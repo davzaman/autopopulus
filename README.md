@@ -1,5 +1,5 @@
 # Autopopulus
-An implementation of autoencoder imputation from our paper "A Novel Framework for Autoencoder Imputation on Big Clinical Data".
+An implementation of autoencoder imputation from our paper "Autopopulus: A Novel Framework for Autoencoder Imputation on Large Clinical Datasets".
 
 # Summary
 Usage of the `AEImputer` class is similar to sklearn's imputers.
