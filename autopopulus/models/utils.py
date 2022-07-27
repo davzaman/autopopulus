@@ -1,13 +1,10 @@
-from typing import Any, Callable, Dict, List, Optional, Sequence
-from pickle import dump
-
+from typing import Optional
 import torch
 from torch import LongTensor, Tensor
 import torch.nn as nn
 
-from pytorch_lightning.core.lightning import LightningModule
-from pytorch_lightning.trainer.trainer import Trainer
-from pytorch_lightning.callbacks import Callback
+
+from autopopulus.data.transforms import sigmoid_cat_cols
 
 
 class BatchSwapNoise(nn.Module):
@@ -46,8 +43,12 @@ class BCEMSELoss(nn.Module):
 
     def forward(self, pred: Tensor, target: Tensor):
         # slicing is differentiable: https://stackoverflow.com/questions/51361407/is-column-selection-in-pytorch-differentiable/51366171
-        bce = self.bce(pred[:, self.cat_columns], target[:, self.cat_columns])
-        mse = self.mse(pred[:, self.ctn_columns], target[:, self.ctn_columns])
+        if len(pred.shape) == 2:  # static
+            bce = self.bce(pred[:, self.cat_columns], target[:, self.cat_columns])
+            mse = self.mse(pred[:, self.ctn_columns], target[:, self.ctn_columns])
+        elif len(pred.shape) == 3:  # longitudinal
+            bce = self.bce(pred[:, :, self.cat_columns], target[:, :, self.cat_columns])
+            mse = self.mse(pred[:, :, self.ctn_columns], target[:, :, self.ctn_columns])
         return bce + mse
 
 
@@ -81,125 +82,6 @@ class ReconstructionKLDivergenceLoss(nn.Module):
         recon_loss = self.recon_loss(pred, target)
 
         return recon_loss + self.kl_coeff + kldiv
-
-
-def sigmoid_cat_cols(data: Tensor, cat_col_idx: Optional[LongTensor]) -> Tensor:
-    """Puts categorical columns of tensor through sigmoid.
-    Uses list of continuous columns/ctn/cat_col_idx to put only categorical columns through sigmoid.
-    """
-    if cat_col_idx is not None:
-        data[:, cat_col_idx] = torch.sigmoid(data[:, cat_col_idx])
-    else:
-        data = torch.sigmoid(data)
-    return data
-
-
-class ErrorAnalysisCallback(Callback):
-    def __init__(self, limit_n: int = 10) -> None:
-        super().__init__()
-        self.limit_n = limit_n
-        self.best_n: Dict[str, Dict[str, Tensor]] = {}
-        self.worst_n: Dict[str, Dict[str, Tensor]] = {}
-
-    def on_validation_end(self, trainer: Trainer, pl_module: LightningModule):
-        # pickle the results
-        with open(f"error_analysis/best_{self.limit_n}", "wb") as file:
-            dump(self.best_n, file)
-
-        with open(f"error_analysis/worst_{self.limit_n}", "wb") as file:
-            dump(self.worst_n, file)
-
-    def on_validation_batch_end(
-        self,
-        trainer: Trainer,
-        pl_module: LightningModule,
-        outputs: Sequence,
-        batch: Sequence,
-        batch_idx: int,
-        dataloader_idx: int,
-    ):
-        for name, metricfn in pl_module.metrics.items():
-            metric_fn_args = [outputs["pred"], outputs["ground_truth"]]
-            if name == "AccuracyPerBin":
-                continue
-                (
-                    (data, ground_truth),
-                    (undiscretized_data, undiscretized_ground_truth),
-                ) = batch
-                args = [
-                    batch,
-                    ground_truth,
-                    pl_module.discrete_columns,
-                    pl_module.columns,
-                ]
-            self.compute_metrics_and_merge_batch(
-                name, metricfn, outputs, metric_fn_args
-            )
-
-            # Compute metrics for missing only data
-            missing_only_mask = ~(outputs["non_missing_mask"].bool())
-            if missing_only_mask.any():
-                metric_fn_args.append(missing_only_mask)
-                self.compute_metrics_and_merge_batch(
-                    name, metricfn, outputs, metric_fn_args
-                )
-
-    def compute_metrics_and_merge_batch(
-        self,
-        name: str,
-        metricfn: Callable,
-        outputs: Dict[str, Tensor],
-        metric_fn_args: List[Any] = None,
-    ):
-        result = metricfn(*metric_fn_args, reduction="none")
-
-        # sort the metric values/results
-        sorted_result, indices = torch.sort(result)
-        # get n best and worst values, and get their corresponding observations
-        best_n = {
-            "pred": outputs["pred"].iloc[indices[:10]],
-            "true": outputs["ground_truth"].iloc[indices[:10]],
-            "values": sorted_result[:10],
-        }
-        worst_n = {
-            "pred": outputs["pred"].iloc[indices[-10:]],
-            "true": outputs["ground_truth"].iloc[indices[-10:]],
-            "values": sorted_result[-10:],
-        }
-
-        if name in self.best_n:  # update
-            self.merge_batch(best_n, worst_n, name)
-        else:  # add in directly
-            self.best_n[name] = best_n
-            self.worst_n[name] = worst_n
-
-    def merge_batch(
-        self, best_n: Dict[str, Tensor], worst_n: Dict[str, Tensor], name: str
-    ):
-        # sort 20 values (10 from best/worst 10, and then 10 best/worst from newest batch.)
-        sorted_values, indices = torch.sort(
-            torch.cat(self.best_n[name]["values"], best_n["values"])
-        )
-
-        self.best_n[name] = {
-            "pred": torch.cat(self.best_n[name]["pred"], best_n["pred"]).iloc[
-                indices[:10]
-            ],
-            "true": torch.cat(self.best_n[name]["true"], best_n["true"]).iloc[
-                indices[:10]
-            ],
-            "values": sorted_values[:10],
-        }
-
-        self.worst_n[name] = {
-            "pred": torch.cat(self.worst_n[name]["pred"], worst_n["pred"]).iloc[
-                indices[-10:]
-            ],
-            "true": torch.cat(self.worst_n[name]["true"], worst_n["true"]).iloc[
-                indices[-10:]
-            ],
-            "values": sorted_values[-10:],
-        }
 
 
 class Print(nn.Module):

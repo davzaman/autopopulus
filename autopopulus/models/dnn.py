@@ -1,3 +1,4 @@
+from logging import info
 from typing import Optional, Union, Dict
 
 import numpy as np
@@ -14,15 +15,19 @@ import tensorflow as tf
 from tensorboardX import SummaryWriter
 from sklearn.base import BaseEstimator, ClassifierMixin
 
-from models.utils import ResetSeed
+from autopopulus.models.utils import ResetSeed
 
 ## Debugging/Running dnn.py separately ##
 """
 import sys, os
-sys.path.insert(1, os.path.join(sys.path[0], "path/to/autopopulus"))
+
+sys.path.insert(
+    1, os.path.join(sys.path[0], "/home/davina/Private/rapid_decline/autopopulus")
+)
+sys.path.insert(1, os.path.join(sys.path[0], "/home/davina/Private/rapid_decline/"))
 """
-from data.utils import get_dataloader
-from utils.log_utils import MyLogger
+from autopopulus.data.utils import get_dataloader
+from autopopulus.utils.log_utils import MyLogger
 
 METRICS_TF = [
     "accuracy",
@@ -202,7 +207,7 @@ class DNNLightning(pl.LightningModule):
         """Log metrics + loss at end of step.
         Compatible with dp mode: https://pytorch-lightning.readthedocs.io/en/latest/metrics.html#classification-metrics."""
         # Log loss
-        self.log(
+        self.info(
             f"DNN/{step_type}-loss",
             outputs["loss"],
             on_step=False,
@@ -215,7 +220,7 @@ class DNNLightning(pl.LightningModule):
         positive_class_probability = torch.sigmoid(logit)
         preds = (positive_class_probability > 0.5).int().flatten()
         for name, metricfn in self.metrics.items():
-            self.log(
+            self.info(
                 f"DNN/{step_type}-{name}",
                 metricfn(preds, outputs["target"].int()),
                 on_step=False,
@@ -296,6 +301,8 @@ def keras_dnn(
 
 if __name__ == "__main__":
     from sklearn import datasets
+
+    # TODO: update this with new code
     from sklearn.model_selection import train_test_split
     from imputer import init_args
 
@@ -327,12 +334,12 @@ if __name__ == "__main__":
     pt.fit(X_train, y_train, X_test, y_test)
     keras.fit(X_train, y_train, X_test, y_test)
     keras2.fit(X_train, y_train, X_test, y_test)
-    print(repr(pt.dnn))
-    print(keras.dnn.summary())
+    info(repr(pt.dnn))
+    info(keras.dnn.summary())
 
     pt_res = pt.predict(X_test)
-    # print(pt.predict_proba(iris_df))
+    # info(pt.predict_proba(iris_df))
     keras_res = keras.predict(X_test)
     keras_res2 = keras2.predict(X_test)
-    print(f"Models do {'' if np.equal(keras_res, keras2).all() else 'NOT'} match.")
-    print(f"Models do {'' if np.equal(keras_res, pt_res).all() else 'NOT'} match.")
+    info(f"Models do {'' if np.equal(keras_res, keras2).all() else 'NOT'} match.")
+    info(f"Models do {'' if np.equal(keras_res, pt_res).all() else 'NOT'} match.")

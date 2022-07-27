@@ -1,13 +1,17 @@
-from argparse import ArgumentParser, Namespace, Action
-import re
-from warnings import warn
-from collections import ChainMap
-from typing import List, Optional, Union
+from argparse import Namespace
 import os
+from functools import reduce
+from inspect import getmembers, isfunction
+import operator
+from typing import Dict, List, Optional, Union
+import re
+
 import pandas as pd
 import numpy as np
+
 import torch
 from torch import Tensor
+import pytorch_lightning as pl
 
 
 def should_ampute(args: Namespace) -> bool:
@@ -20,48 +24,29 @@ def should_ampute(args: Namespace) -> bool:
 
 def seed_everything(seed: int):
     """Sets seeds and also makes cuda deterministic for pytorch."""
+    """
     os.environ["PYTHONHASHSEED"] = str(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+    """
+    pl.seed_everything(seed)
+    # RNN/LSTM determininsm error with cuda 10.1/10.2
+    # Ref: https://pytorch.org/docs/stable/generated/torch.nn.LSTM.html#torch.nn.LSTM
+    os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+    # os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:2"
 
 
-def str2bool(v, default: bool = False):
-    """Convert argparse boolean to true boolean.
-    Ref: https://stackoverflow.com/a/43357954/1888794"""
-    if isinstance(v, bool):
-        return v
-    if v.lower() in ("yes", "true", "t", "y", "1"):
-        return True
-    elif v.lower() in ("no", "false", "f", "n", "0"):
-        return False
-    else:
-        warn(
-            f"Boolean value expected. Passed {v}, which is of type {type(v)} and wasn't recognized. Using default value {default}."
-        )
-        return default
-
-
-def YAMLStringListToList(convert: type = str, choices: Optional[List[str]] = None):
-    class ConvertToList(Action):
-        """Takes a comma separated list (no spaces) from command line and parses into list of some type (Default str)."""
-
-        def __call__(
-            self,
-            parser: ArgumentParser,
-            namespace: Namespace,
-            values: str,
-            option_string: Optional[str] = None,
-        ):
-            if choices:
-                values = [convert(x) for x in values.split(",") if x in choices]
-            else:
-                values = [convert(x) for x in values.split(",")]
-            setattr(namespace, self.dest, values)
-
-    return ConvertToList
+def get_module_function_names(module) -> List[str]:
+    return [
+        name
+        for name, fn in getmembers(module, isfunction)
+        # ignore imported methods
+        if fn.__module__ == module.__name__
+    ]
 
 
 class ChainedAssignent:
@@ -86,11 +71,12 @@ class ChainedAssignent:
         pd.options.mode.chained_assignment = self.saved_swcw
 
 
+# TODO: do i need this anymore?
 def col_prefix(coln: str) -> str:
     """Group features by prefix of varname. Ignores binary vars."""
     prefix, delim, suffix = coln.rpartition("_")
     if suffix == "onehot":  # If onehot: var_category_onehot: get the prefix ("var")
-        return coln.rpartition("_")[0]
+        return prefix
 
     def originally_ctn_col(suffix: str) -> bool:
         # regex matching col names with ranges in them (discretized)
@@ -148,37 +134,47 @@ def maskfill_0(
     """Sets values at the mask to 0. Does nothing if mask is None."""
     if mask is None:
         return data
+    # TODO add checks that the dimensions match or are broadcastable
     return (
         np.where(mask, data, 0)
         if isinstance(data, np.ndarray)
-        # mask, data, torch.tensor(0.0, device=data.device, dtype=torch.double)
-        else torch.where(mask, data, torch.tensor(0.0, device=data.device))
+        # IF this complains remain dtype arg
+        else torch.where(
+            mask, data, torch.tensor(0.0, device=data.device, dtype=data.dtype)
+        )
     )
 
 
-# For debugging
-def parse_yaml_args(obj, base_prefix=""):
+def flatten_groupby(groupby: Dict[str, Dict[int, str]]) -> Dict[str, Dict[int, str]]:
     """
-    The results of loading the guild yml file is a list of dictionaries.
-    Each item in the list is an object in the file represented as a dict.
-        -config: common-flags will become {"config": "common-flags", ...}
-        -flags: k: v, k: v, ... will be {"flags": {k: v, k: v}}
-        This all goes into the same dict object.
-    For multiple config groupings we'll have different objects.
-    """
-    # Grabs the config objects from the yaml file and then merges them.
-    # the if: grab only config objects.
-    # the chainmap will merge all the flag dictionaries from each group.
-    #   if it encounters the same name later, it keeps the first one
-    flags = dict(
-        ChainMap(*[flag_group["flags"] for flag_group in obj if "config" in flag_group])
-    )
+    Groupby has a dict of indices to original column names for different groups:
+    - multicategorical
+    - binary
+    - discretized continuous columns: {data, ground_truth}
 
-    for k, v in flags.items():
-        # ingore the $includes, because bash will think it's a var
-        if k != "$include":
-            # if the yaml has a list, just pick the first one for testing purposes
-            if isinstance(v, list):
-                v = v[0]
-            # print('{}="{}"'.format(k.replace("-", "_"), v))
-    return {k: v[0] if isinstance(v, list) else v for k, v in flags.items()}
+    Here we want to flatten this to have one flattened version to just list them all instead of separated.
+    One flattened version for data and one for ground truth (if GT is discretized differently from data).
+    """
+
+    def get_nested_index(group_name: str, data_name: str):
+        # Drill into ["data"] or ["ground_truth"] if unpacking the discretized groupby subdict
+        return (
+            [group_name, data_name]
+            if group_name == "discretized_ctn_cols"
+            else [group_name]
+        )
+
+    return {
+        data_name: {
+            index: group_id
+            # https://stackoverflow.com/a/14692747/1888794
+            # This weird way is so that we can index nested keys at once
+            for group_name in groupby.keys()
+            for index, group_id in reduce(
+                operator.getitem,
+                get_nested_index(group_name, data_name),
+                groupby,
+            ).items()
+        }
+        for data_name in ["data", "ground_truth"]
+    }

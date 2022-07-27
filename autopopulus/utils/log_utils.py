@@ -1,27 +1,44 @@
 from argparse import Namespace
+from logging import FileHandler, StreamHandler, basicConfig, info, INFO
 from typing import Dict, List, Optional, Union
 
-import os
+from os.path import join, exists
+from os import makedirs
+import sys
 import numpy as np
 import pandas as pd
 import torch
 from pytorch_lightning.loggers import LightningLoggerBase
 from pytorch_lightning.loggers.base import rank_zero_experiment
+from pytorch_lightning.utilities import rank_zero_info
 from pytorch_lightning.utilities import rank_zero_only
 from tensorboardX import SummaryWriter
 from tensorflow.python.summary.summary_iterator import summary_iterator
 
 
-from data.utils import CommonDataModule
-from utils.impute_metrics import MAAPE, RMSE
+from autopopulus.data import CommonDataModule
+from autopopulus.utils.impute_metrics import MAAPE, RMSE
+
+
+def init_new_logger(fname: Optional[str] = None):
+    handlers = [StreamHandler(sys.stdout)]
+    if fname is not None:
+        handlers.append(FileHandler(fname))
+
+    basicConfig(
+        level=INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        # print to stdout and log to file
+        handlers=handlers,
+    )
 
 
 def get_serialized_model_path(modeln: str, ftype: str = "pkl") -> str:
     """Path to dump serialized model, whether it's autoencoder, or predictive model."""
     dir_name = "serialized_models"
-    if not os.path.exists(dir_name):
-        os.makedirs(dir_name)
-    serialized_model_path = os.path.join(dir_name, f"{modeln}.{ftype}")
+    if not exists(dir_name):
+        makedirs(dir_name)
+    serialized_model_path = join(dir_name, f"{modeln}.{ftype}")
     return serialized_model_path
 
 
@@ -41,31 +58,35 @@ def log_imputation_performance(
     for stage_i, stage in enumerate(stages):
         est = results[stage_i]
 
-        true = getattr(data, f"X_true_{stage}")
+        true = (
+            data.splits["ground_truth"]["discretized"][stage]
+            if "discretized" in data.splits["ground_truth"]
+            else data.splits["ground_truth"]["normal"][stage]
+        )
         # if the original dataset contains nans and we're not filtering to fully observed, need to fill in ground truth too for metric computation
         ground_truth_non_missing_mask = ~np.isnan(true)
         true = true.where(ground_truth_non_missing_mask, est)
 
-        missing_mask = getattr(data, f"X_{stage}").isna()
+        missing_mask = (
+            data.splits["data"]["discretized"][stage].isna()
+            if "discretized" in data.splits["data"]
+            else data.splits["data"]["normal"][stage].isna()
+        )
 
         # START HERE
         for name, metricfn in metrics.items():
             metric = metricfn(est, true)
             metric_missing_only = metricfn(est, true, missing_mask)
-            print(
+            rank_zero_info(
                 f"{name}: {metric}.\n Missing cols only, {name}: {metric_missing_only}"
             )
             log.add_scalar(f"impute/{stage}-{name}", metric)
             log.add_scalar(f"impute/{stage}-{name}-missingonly", metric_missing_only)
 
 
-def get_logger(
-    args: Namespace, predictive_model: Optional[str] = None
-) -> SummaryWriter:
-    """Get the universal logger for tensorboardX."""
-    if not args.tbX_on:
-        return
-    logdir = (
+def get_logdir(args: Namespace) -> str:
+    """Get logging directory based on experiment settings."""
+    return (
         (
             f"F.O./"
             f"{args.percent_missing}/"
@@ -75,8 +96,16 @@ def get_logger(
         if args.fully_observed
         else f"full/{args.method}"
     )
+
+
+def get_logger(
+    logdir: Optional[str], predictive_model: Optional[str] = None
+) -> SummaryWriter:
+    """Get the universal logger for tensorboardX."""
+    if not logdir:
+        return
     if predictive_model:
-        logdir += f"/{predictive_model}"
+        return SummaryWriter(logdir=join(logdir, predictive_model))
     return SummaryWriter(logdir=logdir)
     # return SummaryWriter(logdir=logdir, write_to_disk=args.tbX_on)
 
@@ -116,7 +145,8 @@ def copy_log_from_tune(tune_log_path: str, logger: SummaryWriter):
     for summary in summary_iterator(tune_log_path):
         for step, v in enumerate(summary.summary.value):
             if "ray/tune" in v.tag:
-                new_name = v.tag[len("ray/tune/") :]  # remove ray/tune/
+                nremove = len("ray/tune/")
+                new_name = v.tag[nremove:]  # remove ray/tune/
                 logger.add_scalar(new_name, v.simple_value, step)
 
 

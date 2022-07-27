@@ -1,13 +1,17 @@
 from argparse import Namespace
+from logging import info
 from shutil import rmtree
 from typing import Dict, Any, Tuple
 import torch
 import ray.tune as tune
 from ray.tune.schedulers.async_hyperband import ASHAScheduler
+from pytorch_lightning.utilities import rank_zero_info
 
-from utils.log_utils import get_logger
-from data.utils import CommonDataModule
-from models.ap import AEImputer
+
+# Local
+from autopopulus.utils.log_utils import get_logdir, get_logger
+from autopopulus.models.ap import AEImputer
+from autopopulus.data import CommonDataModule
 
 TUNE_LOG_DIR = "tune_results"
 
@@ -17,7 +21,7 @@ def create_autoencoder_with_tuning(
     data: CommonDataModule,
     settings: Dict,
 ):
-    log = get_logger(args)
+    log = get_logger(get_logdir(args))
 
     if args.runtune:
         best_model_config, best_model_path = run_tune(
@@ -50,7 +54,7 @@ def tune_model_ray(
     settings: Dict[str, Any],
 ):
     """NOTE: YOU CANNOT PASS THE SUMMARYWRITER HERE IT WILL CAUSE A PROBLEM WITH MULTIPROCESSING: RuntimeError: Queue objects should only be shared between processes through inheritance"""
-    log = get_logger(args)
+    log = get_logger(get_logdir(args))
     ae_imputer = AEImputer.from_argparse_args(
         args,
         summarywriter=log,
@@ -109,11 +113,11 @@ def run_tune(
         "impute/val-MAAPE",
         "impute/val-MAAPE-missingonly",
     ]:
-        print(
+        rank_zero_info(
             f"Best {metricn} config is:",
             analysis.get_best_config(metric=metricn, mode="min"),
         )
-        print(
+        rank_zero_info(
             f"Best {metricn} logdir is:",
             analysis.get_best_logdir(metric=metricn, mode="min"),
         )
