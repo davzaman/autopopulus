@@ -43,7 +43,7 @@ setup(
             "ray[tune]",
             "guildai",
             "plotly",
-            "nbformat",
+            "nbstripout",
             "flake8",
             "mypy",
             "black",

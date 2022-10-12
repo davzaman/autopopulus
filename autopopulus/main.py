@@ -32,7 +32,7 @@ from autopopulus.utils.utils import (
     seed_everything,
     should_ampute,
 )
-from autopopulus.datasets import DATA_LOADERS, CureCKDDataLoader, CovidCKDDataLoader
+from autopopulus.datasets import DATA_LOADERS, CureCKDDataLoader
 from autopopulus.data import CommonDataModule
 from autopopulus.models.ap import AEImputer
 from autopopulus.task_logic import (
@@ -139,8 +139,6 @@ def init_cli_args() -> Namespace:
 
     if "cure_ckd" in sys.argv:
         p = CureCKDDataLoader.add_data_args(p)
-    elif "covid_ckd" in sys.argv:
-        p = CovidCKDDataLoader.add_data_args(p)
     # MIMIC
     p.add_argument(
         "--mimic-limit",

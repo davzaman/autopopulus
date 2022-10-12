@@ -185,6 +185,7 @@ class CureCKDDataLoader(AbstractDatasetLoader):
         """
         Returns static or longitudinal forms of the dataset.
         When longitudinal not none will return the longitudinal portion vs static portion.
+        The columns are at join(self.data_path, "cat_cols.pkl"/"ctn_cols.pkl").
         """
         df, labels = self.load_flattened_df()
         df = self.filter_adhoc(df)
