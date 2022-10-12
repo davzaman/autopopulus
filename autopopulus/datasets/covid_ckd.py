@@ -73,8 +73,6 @@ class CovidCKDDataLoader(AbstractDatasetLoader):
     def __init__(
         self,
         covid_ckd_data_path: str,
-        covid_ckd_missing_cols: List[str],
-        covid_ckd_observed_cols: List[str],
         covid_ckd_subgroup_filter: Optional[Dict[str, str]] = None,
         covid_ckd_preproc_file_name: str = COVID_PREPROC_FILE_NAME,
         # time_points: List[str] = CKD_TIME_POINTS,
@@ -84,8 +82,6 @@ class CovidCKDDataLoader(AbstractDatasetLoader):
         covid_ckd_target: str = COVID_DEFAULT_TARGET,
     ) -> None:
         self.data_path = covid_ckd_data_path
-        self.missing_cols = covid_ckd_missing_cols
-        self.observed_cols = covid_ckd_observed_cols
         self.subgroup_filter = covid_ckd_subgroup_filter
         self.preproc_file_name = covid_ckd_preproc_file_name
         self.categorical_cols = covid_ckd_categorical_cols
@@ -138,11 +134,6 @@ class CovidCKDDataLoader(AbstractDatasetLoader):
             df[egfr_col].replace(to_replace=-999.99, value=np.nan, inplace=True)
 
         # at ucla only, 0 is assumed to mean missing.
-        # TODO[LOW]: but if they actually have 0 aki's how do we differentiate?
-        # ucla_only = df["site_source"] == 1
-        # for aki_col in [col for col in df.columns if col.startswith("AKI")]:
-        #     df[aki_col][ucla_only].replace(to_replace=0.0, value=np.nan, inplace=True)
-
         # other cols where 0 means missing
         for zero_missing_col in ["severe_flag", "icu_flag", "death_flag"]:
             df[zero_missing_col].replace(to_replace=0.0, value=np.nan, inplace=True)
@@ -200,18 +191,6 @@ class CovidCKDDataLoader(AbstractDatasetLoader):
             type=str,
             default=COVID_DEFAULT_TARGET,
             help="Name of target variable for training.",
-        )
-        p.add_argument(
-            "--covid-ckd-missing-cols",
-            required="--fully-observed" in sys.argv and "none" not in sys.argv,
-            action=YAMLStringListToList(),
-            help="List of columns in the dataset that will be masked when amputing.",
-        )
-        p.add_argument(
-            "--covid-ckd-observed-cols",
-            required="MAR" in sys.argv,
-            action=YAMLStringListToList(),
-            help="List of columns in the dataset to use for masking when amputing under MAR.",
         )
 
         return p

@@ -19,29 +19,6 @@ def load_cli_args(args_options_path: str = "options.yml"):
             with open(args_options_path, "r") as f:
                 res = yaml.safe_load(f)
 
-            """
-            # update cli args below
-            update = {
-                "runtest": False,
-                "runtune": False,
-                "tune_n_samples": 1,
-                "max-epochs": 3,
-                "num-bootstraps": 3,
-                # "percent-missing": 0.66,
-                "missingness-mechanism": "MNAR",
-                "predictors": "lr",
-            }
-            res.update(update)
-
-
-            # For enforcing not fully observed even if its in the guild file
-            enforce_full = False
-            if enforce_full:
-                del res["fully-observed"]
-                del res["percent-missing"]
-                del res["missingness-mechanism"]
-            """
-
             sys.argv = [sys.argv[0]]
             for k, v in res.items():
                 sys.argv += [f"--{k}", str(v)]
@@ -106,6 +83,10 @@ def StringToEnum(enum: Enum):
     return ConvertToEnum
 
 
+def string_json_to_python(obj_string: str) -> Dict:
+    return loads(obj_string.replace("'", '"'))
+
+
 def YAMLStringListToList(convert: type = str, choices: Optional[List[str]] = None):
     class ConvertToList(Action):
         """Takes a comma separated list (no spaces) from command line and parses into list of some type (Default str)."""
@@ -117,6 +98,12 @@ def YAMLStringListToList(convert: type = str, choices: Optional[List[str]] = Non
             values: str,
             option_string: Optional[str] = None,
         ):
+
+            if convert == dict:  # Internal dict will be a string
+                values = string_json_to_python(values)
+                setattr(namespace, self.dest, values)
+                return
+
             # strip any {<space>, ', " [, ]}" and then split by comma
             values = re.sub(r"[ '\"\[\]]", "", values).split(",")
             if choices:
@@ -141,17 +128,14 @@ def YAMLStringDictToDict(
             dict_string: str,
             option_string: Optional[str] = None,
         ):
-            def dict_string_to_json_string(dict_string: str) -> Dict:
-                return loads(dict_string.replace("'", '"'))
-
             if choices:
                 dict_obj = {
                     key: value
-                    for key, value in dict_string_to_json_string(dict_string).items()
+                    for key, value in string_json_to_python(dict_string).items()
                     if key in choices
                 }
             else:
-                dict_obj = dict_string_to_json_string(dict_string)
+                dict_obj = string_json_to_python(dict_string)
             setattr(namespace, self.dest, dict_obj)
 
     return ConvertToDict

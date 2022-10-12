@@ -1,30 +1,181 @@
-from typing import Dict, List, Tuple, Union, Optional
+from re import I
+from typing import Any, Callable, Iterable, List, Optional
 import numpy as np
 import pandas as pd
-from torch import Tensor
 import torch
+from torchmetrics import Metric
 
-from autopopulus.utils.utils import maskfill_0, masked_mean
-from autopopulus.data.transforms import tensor_to_numpy
+from autopopulus.data.constants import PAD_VALUE
 
-PdNpOrTensor = Union[pd.DataFrame, np.ndarray, Tensor]
 
 EPSILON = 1e-10
 
 
-def force_np_if_pd(dfs: List[PdNpOrTensor]) -> Tuple[Union[np.ndarray, Tensor], ...]:
-    # Force to np is pandas, else keep tensor/numpy
-    # TODO: just force everythign to be a tensor?
-    return (*(df.values if isinstance(df, pd.DataFrame) else df for df in dfs),)
+def force_np(data: torch.Tensor) -> np.ndarray:
+    """
+    Force to np and force on cpu if computing metrics
+    (after loss so doesn't need to be on GPU for backward).
+    All post-training metrics should do this.
+    """
+    if isinstance(data, pd.DataFrame):
+        return data.values
+    elif isinstance(data, torch.Tensor):
+        if data.device != torch.device("cpu"):
+            data = data.cpu()
+    return data
+
+
+def format_tensor(*tensors: torch.Tensor) -> Iterable[torch.Tensor]:
+    """
+    If you actually passed gradient-tracking Tensors to a Metric, there will be
+    a huge memory leak, because it will prevent garbage collection for the computation
+    graph. This method ensures the tensors are detached.
+    Ref: https://github.com/allenai/allennlp/blob/9f879b0964e035db711e018e8099863128b4a46f/allennlp/training/metrics/metric.py#L45
+
+    Also enforce float.
+    """
+    # Check if it's actually a tensor in case something else was passed.
+    return (x.detach().long() if isinstance(x, torch.Tensor) else x for x in tensors)
+
+
+class MAAPEMetric(Metric):
+    """
+    This might be useless as the feature-mapping inversion cannot be done on the gpu especially since we need to reorder stuff as pandas df.
+    https://torchmetrics.readthedocs.io/en/stable/pages/implement.html
+    https://github.com/Lightning-AI/metrics/tree/master/src/torchmetrics/regression.mape.py
+    https://github.com/allenai/allennlp/tree/main/allennlp/training/metrics
+    TODO: TEST
+    """
+
+    is_differentiable: bool = True
+    higher_is_better: bool = False
+    full_state_update: bool = False
+
+    def __init__(self, epsilon: float = EPSILON, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.epsilon = epsilon
+        self.add_state("sum_errors", default=torch.tensor(0), dist_reduce_fx="sum")
+        self.add_state("total", default=torch.tensor(0), dist_reduce_fx="sum")
+
+    def update(
+        self,
+        preds: torch.Tensor,
+        target: torch.Tensor,
+        mask: Optional[torch.BoolTensor] = None,
+    ):
+        # preds, target = self._input_format(preds, target)
+        assert preds.shape == target.shape
+
+        row_maape = torch.arctan(torch.abs((target - preds) / (target + self.epsilon)))
+        if mask is not None:
+            row_maape *= ~mask
+            count = torch.sum(~mask)
+        else:
+            count = target.numel()
+        self.sum_errors += torch.sum(row_maape)
+        self.total += count
+
+    def compute(self) -> float:
+        return self.sum_errors / self.total
+
+
+class RMSEMetric(Metric):
+    """
+    This might be useless as the feature-mapping inversion cannot be done on the gpu especially since we need to reorder stuff as pandas df.
+    https://torchmetrics.readthedocs.io/en/stable/pages/implement.html
+    https://github.com/Lightning-AI/metrics/blob/master/src/torchmetrics/regression/mse.py
+    https://github.com/allenai/allennlp/tree/main/allennlp/training/metrics
+    TODO: TEST
+    """
+
+    is_differentiable: bool = True
+    higher_is_better: bool = False
+    full_state_update: bool = False
+
+    def __init__(self, epsilon: float = EPSILON, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.epsilon = epsilon
+        self.add_state("sum_errors", default=torch.tensor(0), dist_reduce_fx="sum")
+        self.add_state("total", default=torch.tensor(0), dist_reduce_fx="sum")
+
+    def update(
+        self,
+        preds: torch.Tensor,
+        target: torch.Tensor,
+        mask: Optional[torch.BoolTensor] = None,
+    ):
+        preds, target = format_tensor(preds, target)
+        assert preds.shape == target.shape
+
+        squared_error = torch.pow(preds - target, 2)
+        if mask is not None:
+            squared_error *= ~mask
+            count = torch.sum(~mask)
+        else:
+            count = target.numel()
+        self.sum_errors += torch.sum(squared_error)
+        self.total += count
+
+    def compute(self) -> float:
+        return torch.sqrt(self.sum_errors / self.total)
+
+
+class AccuracyMetric(Metric):
+    """
+    This might be useless as the feature-mapping inversion cannot be done on the gpu especially since we need to reorder stuff as pandas df.
+    https://torchmetrics.readthedocs.io/en/stable/pages/implement.html
+    https://github.com/Lightning-AI/metrics/blob/master/src/torchmetrics/classification/accuracy.py
+    https://github.com/allenai/allennlp/blob/main/allennlp/training/metrics/categorical_accuracy.py
+    TODO: TEST
+    """
+
+    is_differentiable: bool = False
+    higher_is_better: bool = True
+    full_state_update: bool = False
+
+    def __init__(self, epsilon: float = EPSILON, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.epsilon = epsilon
+        self.add_state("num_correct", default=torch.tensor(0), dist_reduce_fx="sum")
+        self.add_state("total", default=torch.tensor(0), dist_reduce_fx="sum")
+
+    def update(
+        self,
+        preds: torch.Tensor,
+        target: torch.Tensor,
+        bin_cols_idx: torch.Tensor,
+        onehot_cols_idx: torch.Tensor,
+        mask: Optional[torch.BoolTensor] = None,
+    ):
+        # preds, target, bin_cols_idx, onehot_cols_idx, mask = self._input_format(
+        #     preds, target, bin_cols_idx, onehot_cols_idx, mask
+        # )
+        assert preds.shape == target.shape
+
+        predicted_cats = get_categories(preds, bin_cols_idx, onehot_cols_idx)
+        target_cats = get_categories(target, bin_cols_idx, onehot_cols_idx)
+
+        correct = predicted_cats.eq(target_cats).to(float)
+        if mask is not None:
+            mask = get_categories(mask, bin_cols_idx, onehot_cols_idx)
+            correct *= ~mask
+            count = torch.sum(~mask)
+        else:
+            count = target.numel()
+        self.num_correct += torch.sum(correct)
+        self.total += count
+
+    def compute(self) -> float:
+        return self.num_correct / self.total
 
 
 def MAAPE(
-    predicted: PdNpOrTensor,
-    target: PdNpOrTensor,
-    mask: Optional[Tensor] = None,
-    epsilon: int = EPSILON,
+    predicted: torch.Tensor,
+    target: torch.Tensor,
+    mask: Optional[torch.Tensor] = None,
+    epsilon: float = EPSILON,
     reduction: str = "mean",
-) -> Tensor:
+) -> torch.Tensor:
     """
     Mean Arctangent Absolute Percentage Error
     MAPE but works around the divide by 0 issue.
@@ -32,90 +183,107 @@ def MAAPE(
     Note: result is NOT multiplied by 100
     """
     assert predicted.shape == target.shape
-    predicted, target, mask = force_np_if_pd([predicted, target, mask])
+    predicted, target, mask = force_np(predicted), force_np(target), force_np(mask)
 
-    predicted = maskfill_0(predicted, mask)
-    target = maskfill_0(target, mask)
+    predicted = np.ma.masked_array(predicted, mask)
+    target = np.ma.masked_array(target, mask)
 
     if isinstance(predicted, np.ndarray):
         row_maape = np.arctan(np.abs((target - predicted) / (target + epsilon)))
-    else:
-        row_maape = torch.atan(torch.abs((target - predicted) / (target + epsilon)))
 
+    no_reduce = np.ma.mean(row_maape, axis=0)
     if reduction == "none":
-        return masked_mean(row_maape, mask)
+        return no_reduce
     if reduction == "sum":
-        return masked_mean(row_maape, mask).sum()
-    return masked_mean(row_maape, mask).mean()
+        return no_reduce.sum()
+    return no_reduce.mean()
 
 
 def RMSE(
-    predicted: PdNpOrTensor,
-    target: PdNpOrTensor,
-    mask: Optional[Tensor] = None,
+    predicted: torch.Tensor,
+    target: torch.Tensor,
+    mask: Optional[torch.Tensor] = None,
     reduction: str = "mean",
-) -> Tensor:
-    """Should work both for Tensor and np.ndarray."""
+    normalize: Optional[str] = None,
+) -> torch.Tensor:
+    """Should work both for torch.Tensor and np.ndarray."""
     assert predicted.shape == target.shape
-    predicted, target, mask = force_np_if_pd([predicted, target, mask])
+    predicted, target, mask = force_np(predicted), force_np(target), force_np(mask)
 
-    predicted = maskfill_0(predicted, mask)
-    target = maskfill_0(target, mask)
+    predicted = np.ma.masked_array(predicted, mask)
+    target = np.ma.masked_array(target, mask)
 
+    if normalize == "mean":
+        denom = np.ma.mean(target, axis=1)
+    elif normalize == "std":
+        denom = np.ma.std(target, axis=1)
+    elif normalize == "range":
+        denom = np.ma.max(target, axis=1) - np.ma.min(target, axis=1)
+    else:
+        denom = 1
+    no_reduce = np.ma.mean((predicted - target) ** 2, axis=0)
     if reduction == "none":
-        return masked_mean((predicted - target) ** 2, mask) ** 0.5
+        return (no_reduce**0.5) / denom
     if reduction == "sum":
-        return masked_mean((predicted - target) ** 2, mask).sum() ** 0.5
-    return masked_mean((predicted - target) ** 2, mask).mean() ** 0.5
+        return (no_reduce.sum() ** 0.5) / denom
+    return (no_reduce.mean() ** 0.5) / denom
 
 
-def AccuracyPerBin(
-    predicted: Tensor,
-    target: Tensor,
-    groupby: Dict[str, Dict[int, int]],
-    mask: Optional[Tensor] = None,
-    reduction: str = "mean",
-) -> Dict[str, np.ndarray]:
-    """For APnew only: log accuracy over number of bins correctly inferred."""
-    # TODO: accuracy per bin per time point for longitudinal?
-    # predicted = torch.sigmoid(predicted).cpu().numpy(), columns=discretized_col_names
+def categorical_accuracy(
+    bin_col_idxs: torch.Tensor, onehot_cols_idx: torch.Tensor
+) -> Callable:
+    def accuracy_fn(
+        predicted: torch.Tensor,
+        target: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        reduction: str = "mean",
+    ) -> torch.Tensor:
+        """Log accuracy over all categorical variables."""
+        # TODO: accuracy per bin per time point for longitudinal?
+        # Get colname of the bin with the maximum score
+        predicted_cats = get_categories(predicted, bin_col_idxs, onehot_cols_idx)
+        target_cats = get_categories(target, bin_col_idxs, onehot_cols_idx)
 
-    predicted = pd.DataFrame(tensor_to_numpy(predicted))
-    target = pd.DataFrame(tensor_to_numpy(target))
+        predicted, target, mask = force_np(predicted), force_np(target), force_np(mask)
+        if mask is not None:
+            mask = get_categories(mask, bin_col_idxs, onehot_cols_idx)
+            predicted_cats = np.ma.masked_array(predicted_cats, mask)
+            target_cats = np.ma.masked_array(target_cats, mask)
+            accuracy_per_bin = np.ma.mean((predicted_cats == target_cats), axis=0)
+        else:  # no mask
+            accuracy_per_bin = predicted_cats.eq(target_cats).to(float).mean(axis=0)
 
-    # Get colname of the bin with the maximum score
-    coln_maxes = get_feature_max_bins(predicted, groupby["data"])
-    true_coln_maxes = get_feature_max_bins(target, groupby["ground_truth"])
+        if reduction == "none":
+            return accuracy_per_bin
+        if reduction == "sum":
+            return accuracy_per_bin.sum()
+        return accuracy_per_bin.mean()
 
-    if mask is not None:
-        mask = pd.DataFrame(tensor_to_numpy(mask))
-        # gets the mask for the feature: just pick the first
-        # This assumes the mask will be the same for all bins under the same var
-        mask = mask.groupby(groupby["data"], axis=1).first()
-        # only compute on columns where data was missing
-        accuracy_per_bin = masked_mean(coln_maxes.eq(true_coln_maxes) & mask, mask)
-    else:  # no mask
-        accuracy_per_bin = coln_maxes.eq(true_coln_maxes).mean()
-
-    if reduction == "none":
-        return accuracy_per_bin
-    if reduction == "sum":
-        return accuracy_per_bin.sum()
-    return accuracy_per_bin.mean()
+    return accuracy_fn
 
 
-def get_feature_max_bins(
-    df: pd.DataFrame, groupby: Dict[str, List[int]]
-) -> pd.DataFrame:
-    """Gets the name of the bin that's most likely. Works for onehot, binary, and originally continuous (now discretized/onehot) vars.
-    Discretized/onehot vars are grouped by the column name prefix.
-    Binary vars are just thresholded.
+def get_categories(
+    data: torch.Tensor, bin_col_idxs: torch.Tensor, onehot_cols_idx: torch.Tensor
+) -> torch.Tensor:
     """
-    # group by column name prefixes.
-    return df.groupby(groupby, axis=1).apply(
-        # idxmax: get the column with the max bin value
-        lambda group: group.idxmax(axis=1)
-        if group.shape[1] > 1
-        # binary var if it's just one column: just threshold for the values, squeeze into series
-        else (group > 0.5).astype(int).squeeze()
-    )
+    For binary and onehot groups get the column name of the bin with the maximum score.
+    """
+    to_stack = [data[:, bin_col_idxs].T]
+    if len(onehot_cols_idx) > 0:
+        if data.dtype == torch.bool or data.dtype == bool:  # if data is the mask
+            # This assumes the mask will be the same for all bins under the same var
+            fn = lambda idxs: data[:, idxs].all(axis=1)
+        else:  # data is actual data not a mask
+            fn = lambda idxs: torch.argmax(data[:, idxs], axis=1)
+
+        # if this is empty the stack will complain
+        to_stack.append(
+            torch.stack(
+                [
+                    fn(onehot_group[onehot_group != PAD_VALUE])
+                    for onehot_group in onehot_cols_idx
+                ]
+            )
+        )
+    # everything will concatenate on rows
+    return torch.cat(to_stack, axis=0).T  # flip back so it's N x F

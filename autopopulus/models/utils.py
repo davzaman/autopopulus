@@ -1,10 +1,8 @@
-from typing import Optional
+from typing import List, Optional, Union
 import torch
-from torch import LongTensor, Tensor
 import torch.nn as nn
 
-
-from autopopulus.data.transforms import sigmoid_cat_cols
+from autopopulus.data.constants import PAD_VALUE
 
 
 class BatchSwapNoise(nn.Module):
@@ -31,25 +29,53 @@ class BatchSwapNoise(nn.Module):
             return x
 
 
-class BCEMSELoss(nn.Module):
-    """BCE for categorical columns, MSE for continuous columns."""
+class CEMSELoss(nn.Module):
+    """CE for multicat, BCE for binary columns, MSE for continuous columns."""
 
-    def __init__(self, ctn_columns: LongTensor, cat_columns: LongTensor):
+    def __init__(
+        self,
+        ctn_cols_idx: torch.LongTensor,
+        bin_cols_idx: torch.LongTensor,
+        onehot_cols_idx: torch.LongTensor,
+    ):
         super().__init__()
-        self.ctn_columns = ctn_columns
-        self.cat_columns = cat_columns
+        self.ctn_cols_idx = ctn_cols_idx
+        self.bin_cols_idx = bin_cols_idx
+        self.onehot_cols_idx = onehot_cols_idx
         self.bce = nn.BCEWithLogitsLoss()
         self.mse = nn.MSELoss()
+        self.ce = nn.CrossEntropyLoss()
 
-    def forward(self, pred: Tensor, target: Tensor):
+    def forward(self, pred: torch.Tensor, target: torch.Tensor):
         # slicing is differentiable: https://stackoverflow.com/questions/51361407/is-column-selection-in-pytorch-differentiable/51366171
         if len(pred.shape) == 2:  # static
-            bce = self.bce(pred[:, self.cat_columns], target[:, self.cat_columns])
-            mse = self.mse(pred[:, self.ctn_columns], target[:, self.ctn_columns])
+            ce = 0
+            for onehot_group in self.onehot_cols_idx:
+                # ignore pads of -1
+                onehot_group = onehot_group[onehot_group != PAD_VALUE]
+                ce += self.ce(
+                    pred[:, onehot_group],
+                    torch.argmax(target[:, onehot_group], dim=1),
+                )
+            bce = self.bce(pred[:, self.bin_cols_idx], target[:, self.bin_cols_idx])
+            mse = self.mse(pred[:, self.ctn_cols_idx], target[:, self.ctn_cols_idx])
         elif len(pred.shape) == 3:  # longitudinal
-            bce = self.bce(pred[:, :, self.cat_columns], target[:, :, self.cat_columns])
-            mse = self.mse(pred[:, :, self.ctn_columns], target[:, :, self.ctn_columns])
-        return bce + mse
+            ce = 0
+            for onehot_group in self.onehot_cols_idx:
+                # ignore pads of -1
+                onehot_group = onehot_group[onehot_group != PAD_VALUE]
+                ce += self.ce(
+                    pred[:, :, onehot_group],
+                    # Last dim: whether static/longitudinal the last dim is features
+                    torch.argmax(target[:, :, onehot_group], dim=2),
+                )
+            bce = self.bce(
+                pred[:, :, self.bin_cols_idx], target[:, :, self.bin_cols_idx]
+            )
+            mse = self.mse(
+                pred[:, :, self.ctn_cols_idx], target[:, :, self.ctn_cols_idx]
+            )
+        return ce + bce + mse
 
 
 class ReconstructionKLDivergenceLoss(nn.Module):
@@ -60,16 +86,23 @@ class ReconstructionKLDivergenceLoss(nn.Module):
     def __init__(
         self,
         reconstruction_loss: nn.Module,
-        cat_col_idx: Optional[LongTensor] = None,
+        cat_cols_idx: Optional[torch.LongTensor] = None,
         kl_coeff: float = 0.1,
     ) -> None:
         super().__init__()
         self.recon_loss = reconstruction_loss
-        self.cat_col_idx = cat_col_idx
+        self.cat_cols_idx = cat_cols_idx
         self.kldiv = torch.distributions.kl_divergence
         self.kl_coeff = kl_coeff
 
-    def forward(self, pred: Tensor, target: Tensor, mu: Tensor, logvar: Tensor):
+    def forward(
+        self,
+        pred: torch.Tensor,
+        target: torch.Tensor,
+        mu: torch.Tensor,
+        logvar: torch.Tensor,
+    ):
+        ## KL-Divergence
         sigma = torch.exp(0.5 * logvar)
         # p ~ N(0,1)
         p = torch.distributions.Normal(torch.zeros_like(mu), torch.ones_like(sigma))
@@ -78,10 +111,9 @@ class ReconstructionKLDivergenceLoss(nn.Module):
         kldiv = self.kldiv(p, q).mean()
 
         #### Reconstruction Loss ####
-        pred = sigmoid_cat_cols(pred, self.cat_col_idx)
         recon_loss = self.recon_loss(pred, target)
 
-        return recon_loss + self.kl_coeff + kldiv
+        return recon_loss + (self.kl_coeff * kldiv)
 
 
 class Print(nn.Module):
@@ -105,3 +137,109 @@ class ResetSeed(nn.Module):
     def forward(self, x):
         torch.manual_seed(self.seed)
         return x
+
+
+def binary_column_threshold(
+    X: torch.Tensor, bin_col_idxs: torch.Tensor, threshold: float
+) -> torch.Tensor:
+    """
+    Apply sigmoid and threshold to the given columns.
+    NOTE: modifies tensor in place as well.
+    The wrapper function is tested.
+    """
+    longitudinal = len(X.shape) == 3
+    if bin_col_idxs.numel() > 0:
+        if longitudinal:
+            X[:, :, bin_col_idxs] = (
+                torch.sigmoid(X[:, :, bin_col_idxs]) >= threshold
+            ).to(X.dtype)
+        else:
+            X[:, bin_col_idxs] = (torch.sigmoid(X[:, bin_col_idxs]) >= threshold).to(
+                X.dtype
+            )
+    return X
+
+
+def onehot_column_threshold(
+    X: torch.Tensor, onehot_cols_idx: torch.Tensor
+) -> torch.Tensor:
+    """
+    Apply log-softmax, get numerical encoded bin, and explode back to onehot.
+    NOTE: modifies tensor in place as well.
+    The wrapper function is tested.
+    """
+    longitudinal = len(X.shape) == 3
+    for onehot_group in onehot_cols_idx:
+        # ignore pads of -1
+        onehot_group = onehot_group[onehot_group != PAD_VALUE]
+        # Last dim: whether static/longitudinal the last dim is features
+        if longitudinal:
+            X[:, :, onehot_group] = torch.nn.functional.one_hot(
+                torch.argmax(torch.log_softmax(X[:, :, onehot_group], dim=2), dim=2),
+                num_classes=len(onehot_group),
+            ).to(X.dtype)
+        else:
+            X[:, onehot_group] = torch.nn.functional.one_hot(
+                torch.argmax(torch.log_softmax(X[:, onehot_group], dim=1), dim=1),
+                num_classes=len(onehot_group),
+            ).to(X.dtype)
+
+    return X
+
+
+class BinColumnThreshold(nn.Module):
+    """Pytorch wrapper for binary_column_threshold."""
+
+    # Ref: https://discuss.pytorch.org/t/slice-layer-solution/12474
+    def __init__(self, col_idxs: torch.Tensor, threshold: float = 0.5):
+        super().__init__()
+        self.col_idxs = col_idxs
+        self.threshold = threshold
+
+    def forward(self, x):
+        return binary_column_threshold(x, self.col_idxs, self.threshold)
+
+
+class OnehotColumnThreshold(nn.Module):
+    """Pytorch wrapper for onehot_column_threshold."""
+
+    def __init__(self, col_idxs: torch.Tensor):
+        super().__init__()
+        self.col_idxs = col_idxs
+
+    def forward(self, x):
+        return onehot_column_threshold(x, self.col_idxs)
+
+
+class ColumnEmbedder(nn.Module):
+    """
+    Apply a linear layer to the given columns.
+    Embeddings must be invertible: they cannot bottleneck and the activation must be invertible.
+    Ref: https://stats.stackexchange.com/questions/489429/why-are-the-tied-weights-in-autoencoders-transposed-and-not-inverted
+    """
+
+    # Ref: https://discuss.pytorch.org/t/slice-layer-solution/12474
+    def __init__(self, col_idxs: List[int]):
+        super().__init__()
+        self.col_idxs = col_idxs
+        dim = len(self.col_idxs)
+        self.linear = torch.nn.Linear(dim, dim)
+
+    def forward(self, x):
+        return self.linear.forward(x[:, self.col_idxs])
+
+
+class InvertEmbedding(nn.Module):
+    """Inverse apply a layer to the given columns."""
+
+    def __init__(self, embedding_layer: ColumnEmbedder) -> None:
+        self.layer = embedding_layer.linear
+        self.col_idxs = embedding_layer.col_idxs
+
+    def forward(self, x):
+        # the inverse == transpose because embedding layer is square.
+        # Ref: https://stackoverflow.com/a/59886624/1888794
+        # Ref: https://discuss.pytorch.org/t/transpose-of-linear-layer/12411
+        return torch.matmul(
+            self.layer.weight.T, (x[:, self.col_idxs] - self.layer.bias)
+        )

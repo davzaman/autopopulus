@@ -11,7 +11,8 @@ import regex as re
 from os.path import join
 import pandas as pd
 from functools import reduce
-from logging import error, info
+from pytorch_lightning.utilities.rank_zero import rank_zero_info
+from logging import error
 
 #### Local Module ####
 from autopopulus.data import (
@@ -123,7 +124,15 @@ CKD_STATIC_CTN_COLS = [
     # "egfr_last_folow_year",
 ]
 
-CKD_ONEHOT_PREFIXES = ["ethnicity"] + MULTICAT_COLS
+CKD_ONEHOT_PREFIXES = [
+    "ethnicity",  # "ruca_code",
+    "ruca_4_class",
+    # "ruca_7_class",
+    # "patient_race",
+    # "race_ethnicity_cat",
+    "patient_state",
+    "patient_country",
+]
 CKD_DEFAULT_TARGET = "rapid_decline"
 
 
@@ -132,8 +141,6 @@ class CureCKDDataLoader(AbstractDatasetLoader):
     def __init__(
         self,
         cure_ckd_data_path: str,
-        cure_ckd_missing_cols: Dict[str, List[str]],
-        cure_ckd_observed_cols: Dict[str, List[str]],
         cure_ckd_subgroup_filter: Optional[Dict[str, str]] = None,
         cure_ckd_preproc_file_name: str = CKD_PREPROC_FILE_NAME,
         cure_ckd_flattened_df_file_name: str = CKD_FLATTENED_DF_FILE_NAME,
@@ -149,8 +156,6 @@ class CureCKDDataLoader(AbstractDatasetLoader):
     ) -> None:
         self.data_path = cure_ckd_data_path
         # keys: static, longitudinal
-        self.missing_cols_dict = cure_ckd_missing_cols
-        self.observed_cols_dict = cure_ckd_observed_cols
         self.subgroup_filter = cure_ckd_subgroup_filter
         self.preproc_file_name = cure_ckd_preproc_file_name
         # preprocessing on top of what you get from using the preprocess repo
@@ -206,25 +211,18 @@ class CureCKDDataLoader(AbstractDatasetLoader):
             try:
                 longitudinal_df = pd.read_parquet(longitudinal_file_path)
             except Exception:
-                info("Longitudinal file not found, creating...")
+                rank_zero_info("Longitudinal file not found, creating...")
                 longitudinal_df = self.load_longitudinal(df)
                 # Need parquet to serialize multindex dfs
                 longitudinal_df.to_parquet(longitudinal_file_path)
 
             labels.index = longitudinal_df.index.get_level_values("patient_id").unique()
 
-            self.observed_cols = self.observed_cols_dict["longitudinal"]
-            self.missing_cols = self.missing_cols_dict["longitudinal"]
             return (longitudinal_df, labels)
         elif data_type_time_dim == DataTypeTimeDim.STATIC_SUBSET:
             static_df = df[df.columns.difference(self.flattened_longitudinal_cols)]
             static_df.set_index("patient_id", inplace=True)
-            self.observed_cols = self.observed_cols_dict["static"]
-            self.missing_cols = self.missing_cols_dict["static"]
             return (static_df, labels)
-        else:  # Just static
-            self.observed_cols = self.observed_cols_dict["static"]
-            self.missing_cols = self.missing_cols_dict["static"]
 
         # otherwise return df and labels
         # make sure to keep labels for whatever was filtered down for the df
@@ -242,7 +240,7 @@ class CureCKDDataLoader(AbstractDatasetLoader):
             with open(ctn_pickle_fname, "rb") as ctn_col_f:
                 self.continuous_cols = pickle.load(ctn_col_f)
         except IOError:
-            info("Pickled features and labels do not exist. Creating...")
+            rank_zero_info("Pickled features and labels do not exist. Creating...")
             df = self.load_preprocessed_data()
             # dump df
             df.to_feather(flattened_df_path)
@@ -374,7 +372,7 @@ class CureCKDDataLoader(AbstractDatasetLoader):
         """This is going to be serialized vs filter_subgroup which could chagne often and will happen ad-hoc."""
         # filter rows first
         age_mask = df["egfr_entry_age"] < 100
-        info("Dropping patients over 100 years old.")
+        rank_zero_info("Dropping patients over 100 years old.")
         df = df[age_mask].reset_index(drop=True)
 
         return df
@@ -392,7 +390,7 @@ class CureCKDDataLoader(AbstractDatasetLoader):
     def filter_highly_missing_columns(self, df: pd.DataFrame) -> pd.DataFrame:
         # Filter columns
         acceptable_missing_cols = df.isna().mean() < self.missingness_threshold
-        info(
+        rank_zero_info(
             f"Dropping the following columns for missing more than {self.missingness_threshold*99}% data:\n{df.columns[~acceptable_missing_cols]}"
         )
         for col in df.columns[~acceptable_missing_cols]:
@@ -423,7 +421,7 @@ class CureCKDDataLoader(AbstractDatasetLoader):
             map_year_to_feature_name(range_point)
             for range_point in range(self.time_window[0], self.time_window[1] + 1)
         ]
-        info(
+        rank_zero_info(
             f"Filtering features between {time_window_range[0]} and {time_window_range[-1]}."
         )
 
@@ -516,18 +514,6 @@ class CureCKDDataLoader(AbstractDatasetLoader):
             type=float,
             default=0.8,
             help="Allowable percentage of missingness in columns (as a decimal), otherwise they are dropped.",
-        )
-        p.add_argument(
-            "--cure-ckd-missing-cols",
-            required="--fully-observed" in sys.argv and "none" not in sys.argv,
-            action=YAMLStringDictToDict(choices=["static", "longitudinal"]),
-            help="List of columns in the dataset that will be masked when amputing.",
-        )
-        p.add_argument(
-            "--cure-ckd-observed-cols",
-            required="MAR" in sys.argv,
-            action=YAMLStringDictToDict(choices=["static", "longitudinal"]),
-            help="List of columns in the dataset to use for masking when amputing under MAR.",
         )
 
         return p

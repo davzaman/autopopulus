@@ -18,8 +18,8 @@ InputDataSplit = Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
 
 
 def brits(args: Namespace, data: CommonDataModule) -> InputDataSplit:
-    # TODO: add arg for this?
-    brits = BRITS(data.n_features * 0.5)
+    data_version = "mapped" if "mapped" in data.nfeatures else "original"
+    brits = BRITS(data.nfeatures[data_version] * 0.5)
 
     def multi_index_df_to_3d_numpy(df: pd.DataFrame) -> np.ndarray:
         """
@@ -31,19 +31,19 @@ def brits(args: Namespace, data: CommonDataModule) -> InputDataSplit:
         assert (
             seq_lens.diff().dropna().eq(0).all()
         ), "Data passed has unequal sequence lengths."
-        return df.values.reshape(-1, max(seq_lens), data.n_features)
+        return df.values.reshape(-1, max(seq_lens), data.nfeatures[data_version])
 
     imputer = brits.fit(
-        multi_index_df_to_3d_numpy(data.splits["data"]["normal"]["train"])
+        multi_index_df_to_3d_numpy(data.splits["data"]["train"])
     )
     X_train = imputer.impute(
-        multi_index_df_to_3d_numpy(data.splits["data"]["normal"]["train"])
+        multi_index_df_to_3d_numpy(data.splits["data"]["train"])
     )
     X_val = imputer.impute(
-        multi_index_df_to_3d_numpy(data.splits["data"]["normal"]["val"])
+        multi_index_df_to_3d_numpy(data.splits["data"]["val"])
     )
     X_test = imputer.impute(
-        multi_index_df_to_3d_numpy(data.splits["data"]["normal"]["test"])
+        multi_index_df_to_3d_numpy(data.splits["data"]["test"])
     )
 
     return (X_train, X_val, X_test)

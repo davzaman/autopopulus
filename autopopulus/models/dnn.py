@@ -4,6 +4,7 @@ from typing import Optional, Union, Dict
 import numpy as np
 import pandas as pd
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
+from pytorch_lightning.loggers import TensorBoardLogger
 
 #### Pytorch ####
 import torch
@@ -12,7 +13,7 @@ import torch.optim as optim
 import pytorch_lightning as pl
 
 import tensorflow as tf
-from tensorboardX import SummaryWriter
+from torch.utils.tensorboard import SummaryWriter
 from sklearn.base import BaseEstimator, ClassifierMixin
 
 from autopopulus.models.utils import ResetSeed
@@ -27,7 +28,6 @@ sys.path.insert(
 sys.path.insert(1, os.path.join(sys.path[0], "/home/davina/Private/rapid_decline/"))
 """
 from autopopulus.data.utils import get_dataloader
-from autopopulus.utils.log_utils import MyLogger
 
 METRICS_TF = [
     "accuracy",
@@ -55,11 +55,10 @@ class DNNClassifier(ClassifierMixin, BaseEstimator):
         lr: float = 1e-3,
         l2_penalty: float = 1e-4,
         dropout: float = 0.5,
-        summarywriter: Optional[SummaryWriter] = None,
+        logger: Optional[TensorBoardLogger] = None,
     ):
         self.input_dim = input_dim
         self.max_epochs = max_epochs
-        self.summarywriter = summarywriter
         # Hyperparams, can tune with scikitlearn
         self.lr = lr
         self.l2_penalty = l2_penalty
@@ -77,7 +76,7 @@ class DNNClassifier(ClassifierMixin, BaseEstimator):
             callbacks = [EarlyStopping(monitor="DNN/val-loss", patience=5)]
             self.trainer = pl.Trainer(
                 max_epochs=max_epochs,
-                logger=MyLogger(summarywriter),
+                logger=logger,
                 deterministic=True,
                 # gpus=self.num_gpus,
                 # accelerator="ddp" if self.num_gpus > 1 else None,
@@ -104,10 +103,12 @@ class DNNClassifier(ClassifierMixin, BaseEstimator):
         else:
             torch.manual_seed(self.seed)
             train_loader = get_dataloader(
-                X_train, y_train, self.batch_size, self.num_gpus
+                X_train, y_train, self.batch_size, self.num_gpus, self.num_gpus
             )
             val_loader = (
-                get_dataloader(X_val, y_val, self.batch_size, self.num_gpus)
+                get_dataloader(
+                    X_val, y_val, self.batch_size, self.num_gpus, self.num_gpus
+                )
                 if X_val is not None
                 else None
             )
@@ -302,11 +303,11 @@ def keras_dnn(
 if __name__ == "__main__":
     from sklearn import datasets
 
-    # TODO: update this with new code
+    # TODO[LOW]: update this with new code
     from sklearn.model_selection import train_test_split
-    from imputer import init_args
+    from main import init_cli_args
 
-    args = init_args()
+    args = init_cli_args()
     # seed for np, torch, python.random, pythonhashseed
     pl.seed_everything(args.seed)
     tf.random.set_seed(args.seed)

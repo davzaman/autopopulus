@@ -1,15 +1,45 @@
-from typing import List, Union
-from pandas import DataFrame, Series
-from numpy import ndarray
+from typing import Callable, List, Union
+from pandas import DataFrame, Series, get_dummies
+from numpy import ndarray, nan
 from torch import Tensor
 from torch.utils.data import DataLoader, TensorDataset
+
+
+def onehot_multicategorical_column(
+    prefixes: Union[str, List[str]],
+) -> Callable[[DataFrame], DataFrame]:
+    """
+    Onehot encodes columns with prefix_value.
+    e.g. fries [l, s, m, m, l] -> [fries_l, fries_s, fries_m]
+    Can use with hypothesis testing and in the code.
+    Will retain nans.
+    ORDER NOTE: get_dummies adds the onehot cols at the end.
+    """
+    if isinstance(prefixes, str):
+        prefixes = [prefixes]
+
+    def integrate_onehots(df: DataFrame) -> DataFrame:
+        if df[prefixes].empty:
+            return df
+        dummies = get_dummies(df, columns=prefixes, prefix=prefixes, dummy_na=True)
+        # Retain nans
+        nan_cols = [f"{prefix}_nan" for prefix in prefixes]
+        row_mask = dummies[nan_cols].astype(bool)
+        for i, prefix in enumerate(prefixes):
+            col_mask = dummies.columns.str.startswith(prefix)
+            dummies.loc[row_mask.iloc[:, i], col_mask] = nan
+        dummies = dummies.drop(nan_cols, axis=1)
+        return dummies
+
+    return integrate_onehots
 
 
 def get_dataloader(
     X: Union[DataFrame, ndarray],
     y: Union[DataFrame, ndarray],
     batch_size: int,
-    num_gpus: int,
+    num_cpus: int,
+    pin_memory: bool,
 ) -> DataLoader:
     """Pytorch modules require DataLoaders for train/val/test,
     but we start with a df or ndarray.
@@ -20,7 +50,11 @@ def get_dataloader(
         y = y.values
     dataset = TensorDataset(Tensor(X), Tensor(y))
     loader = DataLoader(
-        dataset, batch_size=batch_size, shuffle=False, num_workers=num_gpus * 4
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_cpus,
+        pin_memory=pin_memory,
     )
     return loader
 

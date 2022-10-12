@@ -5,7 +5,7 @@ from pandas import DataFrame
 # Local
 from autopopulus.utils.log_utils import (
     get_logdir,
-    get_logger,
+    get_summarywriter,
     log_imputation_performance,
 )
 from autopopulus.task_logic import baseline_static_imputation
@@ -34,7 +34,7 @@ def baseline_imputation_logic(
     if (
         args.method != "none"
     ):  # Logging here if baseline experiment (not fully observed)
-        log = get_logger(get_logdir(args))
+        log = get_summarywriter(get_logdir(args))
         if args.fully_observed and log:
             log_imputation_performance(
                 [X_train, X_val, X_test], data, log, args.runtest

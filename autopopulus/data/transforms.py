@@ -1,22 +1,34 @@
-from typing import Dict, List, Optional, Tuple, Union
+from functools import reduce
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import re
 import numpy as np
-
-# from numpy.lib.utils import deprecate
 import pandas as pd
-from torch import Tensor, LongTensor
+from torch import Tensor, nan_to_num
 
+from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
-from sklearn.base import BaseEstimator, TransformerMixin
 import torch
+
+from category_encoders.target_encoder import TargetEncoder
 
 # from lib.MDLPC.MDLP import MDLP_Discretizer
 
 from autopopulus.data.mdl_discretization import ColInfoDict, MDLDiscretizer
-from autopopulus.utils.utils import nanmean
+from autopopulus.data.utils import onehot_multicategorical_column
+from autopopulus.data.constants import PAD_VALUE
+
+
+###############
+#   HELPERS   #
+###############
+
+
+def identity(x: Any) -> Any:
+    # Useful as I can compare for testing
+    return x
 
 
 def tensor_to_numpy(tensor: Tensor) -> np.ndarray:
@@ -28,17 +40,23 @@ def tensor_to_numpy(tensor: Tensor) -> np.ndarray:
     return nparr
 
 
-def sigmoid_cat_cols(data: Tensor, cat_col_idx: Optional[LongTensor]) -> Tensor:
-    """Puts categorical columns of tensor through sigmoid.
-    Uses list of continuous columns/ctn/cat_col_idx to put only categorical columns through sigmoid.
-    """
-    if cat_col_idx is not None:
-        data[:, cat_col_idx] = torch.sigmoid(data[:, cat_col_idx])
-    else:
-        data = torch.sigmoid(data)
-    return data
+def mean_of_maxbin(max_col: str) -> float:
+    """For the maximum likely bin of a discretized variable, return the
+    mean for that bin range."""
+    # decimal number, space, - , space, decimal number
+    range_regex = r"\d+\.?\d*-\d*\.?\d*"
+    # the range comes after the name: name_low - high
+    range_str = max_col.rpartition("_")[-1]
+    if re.search(range_regex, range_str):
+        # strip spaces and brackets, split by comma, convert to float
+        low, high = tuple(map(float, range_str.split(" - ")))
+        # return average
+        return (low + high) / 2
 
 
+###################
+# MAIN TRANSFORMS #
+###################
 class SimpleImpute(TransformerMixin, BaseEstimator):
     """Mean impute continuous data, mode impute categorical data."""
 
@@ -66,185 +84,116 @@ class SimpleImpute(TransformerMixin, BaseEstimator):
 
         return self
 
-    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
-        transformed = self.transformers.transform(X)
-        transformed = pd.DataFrame(transformed, columns=self.ctn_cols + self.cat_cols)
-        # Rearrange to match original order
-        return transformed[self.columns]
-
 
 def simple_impute_tensor(
-    X: Tensor, ctn_col_idx: LongTensor, cat_col_idx: LongTensor
+    X: Tensor,
+    non_missing_mask: Tensor,
+    ctn_col_idxs: Tensor,
+    bin_col_idxs: Tensor,
+    onehot_group_idxs: Tensor,
+    return_learned_stats: bool = False,  # for testing
 ) -> Tensor:
-    """Simple imputes on a tensor. Mean(ctn) mode(cat)."""
-    # Aggregate across rows (column mean/mode)
-    if len(X.shape) == 2:  # static
-        X[:, ctn_col_idx] = X[:, ctn_col_idx].where(
-            ~torch.isnan(X[:, ctn_col_idx]), nanmean(X[:, ctn_col_idx], dim=0)
-        )
-        X[:, cat_col_idx] = X[:, cat_col_idx].where(
-            ~torch.isnan(X[:, cat_col_idx]), torch.mode(X[:, cat_col_idx], dim=0).values
-        )
-    elif len(X.shape) == 3:  # static
-        # TODO: figure out how to do this right? LEFT OF HERE
-        X[:, :, ctn_col_idx] = X[:, :, ctn_col_idx].where(
-            ~torch.isnan(X[:, :, ctn_col_idx]), nanmean(X[:, :, ctn_col_idx], dim=0)
-        )
-        X[:, :, cat_col_idx] = X[:, :, cat_col_idx].where(
-            ~torch.isnan(X[:, :, cat_col_idx]),
-            torch.mode(X[:, :, cat_col_idx], dim=0).values,
-        )
+    # TODO: what to do if whole column is nan?
+    # TODO: what to do if none missing
+    means = []
+    for ctn_col in ctn_col_idxs:
+        mean = X[:, ctn_col].nanmean()
+        X[:, ctn_col] = nan_to_num(X[:, ctn_col], mean)
+        means.append(mean)
 
+    modes = []
+    for bin_col in bin_col_idxs:
+        # filter the rows with missing bin_col values and compute the mode
+        mode = X[non_missing_mask[:, bin_col]][:, bin_col].mode().values
+        X[:, bin_col] = nan_to_num(X[:, bin_col], mode)
+        modes.append(mode)
+    # WARNING: https://github.com/pytorch/pytorch/issues/46225
+    # this code works despite that behavior
+    for onehot_group_idx in onehot_group_idxs:
+        # ignore pads of -1
+        onehot_group_idx = onehot_group_idx[onehot_group_idx != PAD_VALUE]
+        # all the onehot categories should be nan
+        non_missing = non_missing_mask[:, onehot_group_idx]
+
+        # mode but numerically encoded
+        # get the "index/bin/category" for each sample, then the mode of that
+        numerical_enc_mode = (
+            torch.argmax(X[non_missing.all(axis=1), :][:, onehot_group_idx], dim=1)
+            .mode()
+            .values
+        )
+        # cannot combine mask and idxs bc not same size
+        X[:, onehot_group_idx] = X[:, onehot_group_idx].where(
+            non_missing,  # keep wehre not missing else impute with onehotted mode
+            # explode the mode back into a onehot vec
+            torch.nn.functional.one_hot(
+                numerical_enc_mode,
+                num_classes=len(onehot_group_idx),
+            ).to(X.dtype),
+        )
+        modes.append(numerical_enc_mode)
+
+    if return_learned_stats:
+        return (X, means, modes)
     return X
 
 
-def undiscretize_tensor(
-    X: Tensor,
-    groupby: Dict[str, Dict[int, int]],
-    discretizations: Dict[str, Union[List[Tuple[float, float]], List[int]]],
-    orig_columns: List[str],
-) -> Tensor:
-    # TODO: Write tests
-    """Convert discretized columns to continuous, ignoring categorical columns.
-
-    If a continuous var was discretized into multiple bins,
-    grab the most likely one (max score of the bins) and return the
-    mean of the range of that bin.
+class CombineOnehots(TransformerMixin, BaseEstimator):
     """
-    # X is Tensor, want to convert to df
-    X_disc = pd.DataFrame(tensor_to_numpy(X))
-
-    # Get the index of the bin with the maximum score for each column group
-    col_max_indices = X_disc.groupby(groupby, axis=1).idxmax(axis=1)
-    #  offset the indices to 0 so we can directly index into that vars ["bins"]
-    offset_coln_maxes = col_max_indices.apply(
-        lambda var_data: var_data - discretizations[var_data.name]["indices"][0]
-    )
-    # get the bin range
-    coln_max_bins = offset_coln_maxes.apply(
-        lambda var: var.map(lambda idx: discretizations[var.name]["bins"][int(idx)])
-    )
-    # apply function to bin range for continuous estimate
-    continuous_estimates = coln_max_bins.applymap(lambda range: np.mean(range))
-    # drop the discretized columns and add their continuous estimates
-    X_cont = pd.concat(
-        [X_disc.drop(groupby.keys(), axis=1), continuous_estimates], axis=1
-    )
-    # add other column names back in
-    X_cont = X_cont.rename(
-        {
-            int(idx): name
-            for idx, name in enumerate(
-                pd.Index(orig_columns).drop(col_max_indices.columns)
-            )
-        },
-        axis=1,
-    )
-    # Reorder to match original order of columns that discretizing might have affected
-    X_cont = X_cont[orig_columns].astype(float)
-
-    # reshape back to 3d if longitudinal
-    if len(X.shape) == 3:
-        n_features = X_cont.shape[-1]
-        n_sequence = X.shape[1]
-        X_cont = X_cont.values.reshape((-1, n_sequence, n_features))
-    else:
-        X_cont = X_cont.values
-
-    return torch.tensor(X_cont, device=X.device).float()
-
-
-def ampute(
-    X: pd.DataFrame,
-    seed: int,
-    missing_cols: List[str],
-    percent: float = 0.33,
-    mech: str = "MCAR",
-    observed_cols: Optional[List[str]] = None,
-) -> pd.DataFrame:
-    """Will simulate missing values according to the missingness mechanism.
-
-    MCAR =  missingness is not related to any value.
-    MAR = missingness is related to observed values.
-    MNAR = missingness is dependant on unobserved values.
-
-    observed_cols only for MAR
+    Inverts onehot columns by combining them into a single column.
+    Relies on a groupby, and will add the combined column at the end.
+    Assumed onehots are prefixed with its name: prefix_value.
     """
-    X_amputed = X.copy()
-    if mech == "MCAR":
-        # for each observation sample a random value from uniform dist
-        # and keep it if it's less than percent.
-        # X[uniform(size=X.shape) < percent] = np.nan
-        np.random.seed(seed)
-        X_amputed[missing_cols] = X_amputed[missing_cols].mask(
-            np.random.uniform(size=X_amputed[missing_cols].shape) < percent,
-            np.nan,
+
+    def __init__(self, onehot_groupby: Dict[int, str], columns: List[str]):
+        # need the column names not indices since we're working with pd
+        self.onehot_groupby = {
+            columns[idx]: prefix for idx, prefix in onehot_groupby.items()
+        }
+
+    def fit(self, X: pd.DataFrame, y: pd.Series) -> "CombineOnehots":
+        """Set things we'll need for CommonDataModule so we can test separately."""
+        groups = X.groupby(self.onehot_groupby, axis=1).groups
+        onehot_prefixes = groups.keys()
+        # drop old cols
+        shifted_down_cols = X.drop(self.onehot_groupby.keys(), axis=1).columns
+        N = len(shifted_down_cols)
+        # the combined col will be added at the end so we can guess the indices
+        # map index -> prefix name by tacking onto the end of the shifted down cols after dropping the onehots
+        self.combined_onehot_groupby = {
+            N + i: prefix for i, prefix in enumerate(onehot_prefixes)
+        }
+        # we subtract all the exploded onehots and add the singular combined ones
+        self.nfeatures = len(X.columns) - sum(map(len, groups.values())) + len(groups)
+        return self
+
+    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+        """."""
+        combined_onehots = (
+            X.groupby(self.onehot_groupby, axis=1)
+            .idxmax(1)  # replace value with the column name of the max
+            .apply(lambda col: col.str.replace(f"{col.name}_", ""))  # strip prefix
         )
-    elif mech == "MAR":
-        """
-        Missing because of the value of some observed var.
-        If your egfr is greater than some value that puts you in the
-        (1-p) percentile, then your a1c and sbp will be missing.
-        """
-        # these match the original dataset
-        for observed_col, missing_col in zip(observed_cols, missing_cols):
-            # cutoff at (1-p) percentile, if you fall above, ampute
-            p_quantile = X_amputed[observed_col].quantile(1 - percent)
-            cutoff = X_amputed[observed_col] > p_quantile
-            X_amputed[missing_col] = X_amputed[missing_col].mask(cutoff, np.nan)
-    elif mech == "MNAR":
-        """
-        Missing because of its true value itself for each var.
-        If it's in the middle/expected range then it will be missing.
-        """
-        # grab `percent` patients in the middle (%-ile)
-        low, high = (0.5 - (percent / 2), 0.5 + (percent / 2))
-        quantiles = X[missing_cols].quantile([low, high])
-        for col in missing_cols:
-            above_low = X[col] > quantiles.loc[low, col]
-            below_high = X[col] < quantiles.loc[high, col]
-            X_amputed[col] = X_amputed[col].mask(above_low & below_high, np.nan)
-    elif mech == "MNAR1":
-        """
-        Missing because of the value of some hidden/unobserved var.
-        If the value of the hidden var is in the tails, it will be missing.
-        TODO: this could possibly produce a whole column of errors.
-        """
-        # these match the original dataset
-        # hidden normally distributed var
-        np.random.seed(seed)
-        hidden = pd.DataFrame(np.random.normal(0, 1, X.shape), columns=X.columns)
-        # grab tails
-        low, high = ((percent / 2), 1 - (percent / 2))
-        quantiles = hidden.quantile([low, high])
-        for col in missing_cols:
-            low_tail = hidden[col] < quantiles.loc[low, col]
-            high_tail = hidden[col] > quantiles.loc[high, col]
-            X_amputed[col] = X_amputed[col].mask(low_tail | high_tail, np.nan)
-    return X_amputed
-
-
-def mean_of_maxbin(max_col: str) -> float:
-    """For the maximum likely bin of a discretized variable, return the
-    mean for that bin range."""
-    # decimal number, space, - , space, decimal number
-    range_regex = r"\d+\.?\d*-\d*\.?\d*"
-    # the range comes after the name: name_low - high
-    range_str = max_col.rpartition("_")[-1]
-    if re.search(range_regex, range_str):
-        # strip spaces and brackets, split by comma, convert to float
-        low, high = tuple(map(float, range_str.split(" - ")))
-        # return average
-        return (low + high) / 2
+        # combine with the rest of the data and then drop old onehot cols
+        new_df = pd.concat([X, combined_onehots], axis=1).drop(
+            self.onehot_groupby.keys(), axis=1
+        )
+        return new_df
 
 
 class UniformProbabilityAcrossNans(TransformerMixin, BaseEstimator):
+    """Make sure to also check "uniform_probability_across_nans" to update tests."""
+
     def __init__(
         self,
         groupby_categorical_only: Dict[str, Dict[int, str]],
+        columns: List[str],
         ground_truth_pipeline: bool = False,
     ):
-        self.groupby_categorical_only = groupby_categorical_only
+        self.groupby_categorical_only = {
+            groupby_name: {columns[idx]: prefix for idx, prefix in groupby_idxs.items()}
+            for groupby_name, groupby_idxs in groupby_categorical_only.items()
+        }
         self.ground_truth_pipeline = ground_truth_pipeline
 
     def fit(self, X: pd.DataFrame, y: pd.Series) -> "UniformProbabilityAcrossNans":
@@ -254,33 +203,32 @@ class UniformProbabilityAcrossNans(TransformerMixin, BaseEstimator):
         self, discretizer_output: Tuple[pd.DataFrame, ColInfoDict]
     ) -> pd.DataFrame:
         """Imposes a uniform probability across all categories with nans."""
-        X, col_info_dict = discretizer_output
+        df, col_info_dict = discretizer_output
+        X = df.copy()
         # Do nothing if nothing is missing
         if X.notna().values.all():
             return X
 
-        # TODO: this might not be necessary the groupby seems to be a pointer so after fit this might reflect the changes properly?
         # deal with dicretized vars, I cannot add it to groupby until after fit is done anyway
         for col_info in col_info_dict.values():
             col_names = X.columns[col_info["indices"]]
             X[col_names] = X[col_names].fillna(1 / len(col_names))
 
-        # deal with categorical vars (multicat and binary)
-        invert_groupby = {}
-        for indices_to_groupid in self.groupby_categorical_only.values():
-            # TODO: pass the correct indicator of data/gt
-            if indices_to_groupid:
-                # discretized ctn_cols is the only one that separates data and
-                if "data" in indices_to_groupid:
-                    key = "ground_truth" if self.ground_truth_pipeline else "data"
-                    indices_to_groupid = indices_to_groupid[key]
-                for index, group_id in indices_to_groupid.items():
-                    invert_groupby.setdefault(group_id, []).append(X.columns[index])
-        # TODO: move this comment to set_groupby in commondatautils
-        # need to have indices for column labels for groupby to work
-        # we keep the indices bc later when we dont have column names we still want groupby to work
-        for expanded_cols in invert_groupby.values():
-            X[expanded_cols] = X[expanded_cols].fillna(1 / len(expanded_cols))
+        # deal with multi-categorical onehot vars
+        if "categorical_onehots" in self.groupby_categorical_only:
+            for onehot_idxs in X.groupby(
+                self.groupby_categorical_only["categorical_onehots"], axis=1
+            ).groups.values():
+                X.loc[:, onehot_idxs] = X.loc[:, onehot_idxs].fillna(
+                    1 / len(onehot_idxs)
+                )
+
+        if "binary_vars" in self.groupby_categorical_only:
+            # binary should all be 0.5
+            for bin_idxs in X.groupby(
+                self.groupby_categorical_only["binary_vars"], axis=1
+            ).groups.values():
+                X.loc[:, bin_idxs] = X.loc[:, bin_idxs].fillna(0.5)
 
         return X
 
@@ -300,10 +248,26 @@ class Discretizer(TransformerMixin, BaseEstimator):
         self.return_info_dict = return_info_dict
 
     def fit(self, X: pd.DataFrame, y: pd.DataFrame) -> "Discretizer":
+        # Set stuff I'll need for CommonDataModule so I can test it here.
         if self.method == "mdl":  # Minimum description length via Orange package.
             self.d = MDLDiscretizer()
             self.d.fit(X, y, X.columns[self.ctn_cols_idx])
-            self.map_dict = self.d.ctn_to_cat_map
+            self.map_dict: Dict[
+                str, List[Union[Tuple[float, float], str, int]]
+            ] = self.d.ctn_to_cat_map  # bins, labels, indices
+
+            self.discretized_groupby = {
+                index: col
+                for col, col_info in self.map_dict.items()
+                for index in col_info["indices"]
+            }
+            num_added_bins = reduce(
+                lambda added_num_cols, k: added_num_cols
+                + len(self.map_dict[k]["indices"]),
+                self.map_dict,
+                0,
+            )
+            self.nfeatures = len(X.columns) + num_added_bins - len(self.map_dict)
             return self
         raise NotImplementedError
         self.d.fit(X.values, y.values)
@@ -319,7 +283,6 @@ class Discretizer(TransformerMixin, BaseEstimator):
     ) -> Union[pd.DataFrame, Tuple[pd.DataFrame, ColInfoDict]]:
         if self.method == "mdl":
             transformed_df = self.d.transform(X)
-            # TODO: document what map dict is
         else:
             raise NotImplementedError
             transformed_df = (
@@ -349,3 +312,100 @@ class Discretizer(TransformerMixin, BaseEstimator):
         # df map from numerical encoding to str representing bin ranges
         df.replace(self.map_dict, inplace=True)
         return df
+
+
+##############################
+# FEATURE MAPPING INVERSIONS #
+##############################
+
+
+def invert_discretize_tensor(
+    encoded_data: Tensor,
+    disc_groupby: Dict[int, str],
+    discretizations: Dict[str, Union[List[Tuple[float, float]], List[int]]],
+    orig_columns: List[str],
+) -> Tensor:
+    """Convert discretized columns to continuous, ignoring categorical columns.
+
+    If a continuous var was discretized into multiple bins,
+    grab the most likely one (max score of the bins) and return the
+    mean of the range of that bin.
+    """
+    # X is Tensor, want to convert to df
+    X_disc = pd.DataFrame(tensor_to_numpy(encoded_data))
+
+    # Get the index of the bin with the maximum score for each column group
+    col_max_indices = X_disc.groupby(disc_groupby, axis=1).idxmax(axis=1)
+    #  offset the indices to 0 so we can directly index into that var's ["bins"]
+    offset_coln_maxes = col_max_indices.apply(
+        lambda var_data: var_data - discretizations[var_data.name]["indices"][0]
+    )
+    # get the bin range
+    coln_max_bins = offset_coln_maxes.apply(
+        lambda var: var.map(lambda idx: discretizations[var.name]["bins"][int(idx)])
+    )
+    # apply function to bin range for continuous estimate
+    continuous_estimates = coln_max_bins.applymap(lambda range: np.mean(range))
+    # drop the discretized columns and add their continuous estimates
+    X_cont = pd.concat(
+        [X_disc.drop(disc_groupby.keys(), axis=1), continuous_estimates], axis=1
+    )
+    # add other column names back in
+    X_cont = X_cont.rename(
+        {
+            int(idx): name
+            for idx, name in enumerate(
+                pd.Index(orig_columns).drop(col_max_indices.columns)
+            )
+        },
+        axis=1,
+    )
+    # Reorder to match original order of columns that discretizing might have affected
+    X_cont = X_cont[orig_columns].astype(float)
+
+    # reshape back to 3d if longitudinal
+    if len(encoded_data.shape) == 3:
+        nfeatures = X_cont.shape[-1]
+        n_sequence = encoded_data.shape[1]
+        X_cont = X_cont.values.reshape((-1, n_sequence, nfeatures))
+    else:
+        X_cont = X_cont.values
+
+    return torch.tensor(X_cont, device=encoded_data.device).float()
+
+
+def invert_target_encoding_tensor(
+    encoded_data: Tensor,
+    mean_to_ordinal_map: Dict[str, Union[Callable, Dict[int, Dict[float, int]]]],
+    combined_onehot_columns: List[str],
+    original_columns: List[str],
+    combined_onehots_groupby: Optional[Dict[int, int]] = None,
+) -> Tensor:
+    encoded_data = encoded_data.detach().numpy()  # needed for inverse transform sklearn
+    device = encoded_data.device
+
+    # this is in collapsed-onehot space
+    mapping = mean_to_ordinal_map["mapping"]
+    for idx, mapping in mean_to_ordinal_map["mapping"].items():
+        for k, v in mapping.items():
+            encoded_data[:, idx] = np.where(
+                encoded_data[:, idx] == k, v, encoded_data[:, idx]
+            )
+
+    # Need pd if category was string
+    encoded_data = pd.DataFrame(encoded_data, columns=combined_onehot_columns)
+    # can only un-ordinal encode the ordinally encoded columns
+    ordinal_enc_cols = list(mean_to_ordinal_map["mapping"].keys())
+    encoded_data.iloc[:, ordinal_enc_cols] = mean_to_ordinal_map["inverse_transform"](
+        encoded_data.iloc[:, ordinal_enc_cols]
+    )
+
+    # explode columns if onehots were flattened
+    if combined_onehots_groupby is not None:
+        # reorder to match original
+        return onehot_multicategorical_column(combined_onehots_groupby.values())(
+            encoded_data
+        )[original_columns]
+
+    # reorder to match original
+    return torch.tensor(encoded_data[original_columns], device=device).float()

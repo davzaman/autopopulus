@@ -3,39 +3,32 @@ import cloudpickle
 import sys
 from typing import Optional, Union
 from argparse import ArgumentParser, Namespace
-
-# import numpy as np
 import pandas as pd
+from ray.tune.integration.pytorch_lightning import TuneReportCallback
+from sklearn.base import TransformerMixin, BaseEstimator
 
 #### Pytorch ####
 import torch
 from torch.utils.data import DataLoader
+
+## Lightning ##
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
-
-# from pytorch_lightning.plugins import DDPPlugin
 from pytorch_lightning.plugins.training_type.ddp import DDPPlugin
-
-#### Experiment Tracking ####
-from tensorboardX import SummaryWriter
-from ray.tune.integration.pytorch_lightning import TuneReportCallback
-
-# For Imputer Class
-from sklearn.base import TransformerMixin, BaseEstimator
+from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.plugins.training_type.ddp import DDPPlugin
 
 # Local
 from autopopulus.models.ae import AEDitto
-from autopopulus.utils.log_utils import (
-    MyLogger,
-    get_serialized_model_path,
-)
+from autopopulus.utils.log_utils import get_logdir, get_serialized_model_path
 from autopopulus.utils.cli_arg_utils import str2bool
 from autopopulus.data import CommonDataModule
 from autopopulus.data.types import DataTypeTimeDim
-from data.constants import PATIENT_ID
+from autopopulus.data.constants import PATIENT_ID
+from autopopulus.utils.utils import CLIInitialized
 
 
-class AEImputer(TransformerMixin, BaseEstimator):
+class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
     """Imputer compatible with sklearn, uses autoencoder to do imputation on tabular data.
     Implements fit and transform.
     Wraps AEDitto which is a flexible Pytorch Lightning style Autoencoder.
@@ -45,7 +38,7 @@ class AEImputer(TransformerMixin, BaseEstimator):
         self,
         max_epochs: int = 100,
         patience: int = 7,
-        summarywriter: Optional[SummaryWriter] = None,
+        logger: Optional[TensorBoardLogger] = None,
         runtune: bool = False,
         runtest: bool = False,
         fast_dev_run: int = None,
@@ -65,7 +58,6 @@ class AEImputer(TransformerMixin, BaseEstimator):
         self.data_type_time_dim = data_type_time_dim
         # This is a convenience
         self.longitudinal = self.data_type_time_dim.is_longitudinal()
-        logger = MyLogger(summarywriter)
 
         # Create AE and trainer
         self.ae = AEDitto(
@@ -84,10 +76,23 @@ class AEImputer(TransformerMixin, BaseEstimator):
             self.fast_dev_run,
             self.runtune,
         )
+        self.inference_trainer = self.create_trainer(
+            logger,
+            self.data_type_time_dim,
+            self.patience,
+            self.max_epochs,
+            self.num_nodes,
+            # Ensure run on 1 GPU if we want to use GPUs for correctness
+            # Also bc synchronizing outputs on inference/predict is not supported for ddp
+            # Ref: https://github.com/PyTorchLightning/pytorch-lightning/discussions/12906
+            num_gpus=1 if self.num_gpus else 0,
+            fast_dev_run=self.fast_dev_run,
+            tune=False,  # No tuning since we're testing
+        )
 
     @staticmethod
     def create_trainer(
-        logger: MyLogger,
+        logger: TensorBoardLogger,
         data_type_time_dim_name: str,
         patience: int,
         max_epochs: int,
@@ -121,21 +126,19 @@ class AEImputer(TransformerMixin, BaseEstimator):
         trainer = pl.Trainer(
             max_epochs=max_epochs,
             logger=logger,
-            # deterministic=True,  # TODO im running into th lstm determinism error but their suggested fixes aren't working...
+            deterministic=True,
             num_nodes=num_nodes,
             # use 1 processes if on cpu
             devices=num_gpus if num_gpus else 1,
             accelerator="gpu" if num_gpus else "cpu",
-            # strategy="ddp" if self.num_gpus > 1 else None,
-            strategy=DDPPlugin(find_unused_parameters=False) if num_gpus > 1 else None,
             # https://github.com/PyTorchLightning/pytorch-lightning/discussions/6761#discussioncomment-1152286
-            # plugins=DDPPlugin(find_unused_parameters=False)
-            # if self.num_gpus > 1
-            # else None,
+            # Use DDP if there's more than 1 GPU, otherwise, it's not necessary.
+            strategy=DDPPlugin(find_unused_parameters=False) if num_gpus > 1 else None,
             # NOTE: CANNOT use "precision=16" speedup with any of the other paper methods.
+            # precision=16,
             enable_checkpointing=False,
             callbacks=callbacks,
-            profiler="simple",  # or "advanced" which is more granular
+            profiler="simple",  # or "advanced" which is more granular , this is too verbose
             fast_dev_run=fast_dev_run,  # For debugging
         )
         return trainer
@@ -148,7 +151,9 @@ class AEImputer(TransformerMixin, BaseEstimator):
             # Serialize data with torch but serialize model with plightning
             torch.save(
                 data.test_dataloader(),
-                get_serialized_model_path("static_test_dataloader", "pt"),
+                get_serialized_model_path(
+                    f"{self.data_type_time_dim.name}_test_dataloader", "pt"
+                ),
                 pickle_module=cloudpickle,
             )
         return self
@@ -160,7 +165,7 @@ class AEImputer(TransformerMixin, BaseEstimator):
         self.ae.datamodule = data
         self.trainer.fit(self.ae, datamodule=data)
         self.trainer.save_checkpoint(
-            get_serialized_model_path(f"AEDitto_{self.data_type_time_dim}", "pt"),
+            get_serialized_model_path(f"AEDitto_{self.data_type_time_dim.name}", "pt"),
         )
 
     def transform(self, dataloader: DataLoader) -> pd.DataFrame:
@@ -168,18 +173,18 @@ class AEImputer(TransformerMixin, BaseEstimator):
         Applies trained autoencoder to given data X.
         Calls predict on pl model and then recovers columns and indices.
         """
-        preds_list = self.trainer.predict(self.ae, dataloader)
+        preds_list = self.inference_trainer.predict(self.ae, dataloader)
         # stack the list of preds from dataloader
         preds = torch.vstack(preds_list).cpu().numpy()
-        columns = dataloader.dataset.split["data"]["normal"].columns
+        columns = dataloader.splits["data"].columns
 
         # Recover IDs, we use only indices used by the batcher (so if we limit to debug, this still works, even if it's shuffled)
         ids = (
-            dataloader.dataset.split_ids["data"]["normal"][
+            dataloader.dataset.split_ids["data"][
                 : self.fast_dev_run * dataloader.batch_size
             ]
             if self.fast_dev_run
-            else dataloader.dataset.split_ids["data"]["normal"]
+            else dataloader.dataset.split_ids["data"]
         )
         # (n samples, t padded time points, f features) -> 2d pd df
         if self.longitudinal:
@@ -190,14 +195,24 @@ class AEImputer(TransformerMixin, BaseEstimator):
             preds_df = pd.DataFrame(preds.flatten(), index=index).unstack(
                 level="feature"
             )
-            preds_df.columns = dataloader.dataset.split["data"]["normal"].columns
+            preds_df.columns = columns
             return preds_df
         return pd.DataFrame(preds, columns=columns, index=ids)
 
     @classmethod
-    def from_checkpoint(cls, args: Namespace) -> "AEImputer":
-        ae_imputer = cls.from_argparse_args(args, runtune=False)
-        ae_imputer.ae = ae_imputer.load_autoencoder(args.ae_from_checkpoint)
+    def from_checkpoint(
+        cls, args: Namespace, ae_from_checkpoint: Optional[str] = None, **kwargs
+    ) -> "AEImputer":
+        checkpoint = (
+            ae_from_checkpoint
+            if ae_from_checkpoint is not None
+            else args.ae_from_checkpoint
+        )
+        logger = TensorBoardLogger(get_logdir(args))
+        ae_imputer = cls.from_argparse_args(
+            args, runtune=False, logger=logger, **kwargs
+        )
+        ae_imputer.ae = ae_imputer.load_autoencoder(checkpoint)
         return ae_imputer
 
     @staticmethod
@@ -211,26 +226,7 @@ class AEImputer(TransformerMixin, BaseEstimator):
 
     @classmethod
     def from_argparse_args(cls, args: Union[Namespace, ArgumentParser], **kwargs):
-        """
-        Create an instance from CLI arguments.
-        **kwargs: Additional keyword arguments that may override ones in the parser or namespace.
-        # Ref: https://github.com/PyTorchLightning/PyTorch-Lightning/blob/0.8.3/pytorch_lightning/trainer/trainer.py#L750
-        """
-        if isinstance(args, ArgumentParser):
-            args = cls.parse_argparser(args)
-        params = vars(args)
-
-        # we only want to pass in valid args, the rest may be user specific
-        # returns a immutable dict MappingProxyType, want to combine so copy
-        valid_kwargs = inspect.signature(cls.__init__).parameters.copy()
-        # Update with stuff required for AEDitto
-        valid_kwargs.update(inspect.signature(AEDitto.__init__).parameters.copy())
-        imputer_kwargs = dict(
-            (name, params[name]) for name in valid_kwargs if name in params
-        )
-        imputer_kwargs.update(**kwargs)
-
-        return cls(**imputer_kwargs)
+        return super().from_argparse_args(args, [AEDitto], **kwargs)
 
     @staticmethod
     def add_imputer_args(parent_parser: ArgumentParser) -> ArgumentParser:
@@ -238,21 +234,18 @@ class AEImputer(TransformerMixin, BaseEstimator):
         p.add_argument(
             "--num-nodes",
             type=int,
-            required="--metho=ap" in sys.argv,
             default=1,
             help="Number of nodes in pytorch lightning distributed cluster.",
         )
         p.add_argument(
             "--max-epochs",
             type=int,
-            required="--method=ap" in sys.argv,
             default=100,
             help="When using the Autopopulus method, set the maximum number of epochs allowed for training the underlying autoencoder.",
         )
         p.add_argument(
             "--patience",
             type=int,
-            required="--method=ap" in sys.argv,
             default=5,
             help="Using early stopping when training the underlying autoencoder for Autopopulus, set the patience for early stopping.",
         )

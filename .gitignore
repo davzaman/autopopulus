@@ -3,15 +3,17 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# ML Flow
+dev/
+options.yml
+*.prof
 mlruns/
+notebooks/
 tune_results/
 full/
 serialized_models/
-
+profiling-results/
 # serialized models
 *.pt
-
 # tflow
 *.tfevents
 

@@ -1,12 +1,18 @@
-import inspect
 from abc import ABC, abstractmethod
-from argparse import ArgumentParser, Namespace
+from argparse import ArgumentParser
 from functools import reduce
+from itertools import chain
+from os import cpu_count
 from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union, cast
+import regex as re
 
-from numpy import array, full_like, ndarray, where
+from scipy.stats import norm, yulesimon
+
+from category_encoders.target_encoder import TargetEncoder
+from numpy import array, full_like, ndarray, argwhere, nan
 from pandas import DataFrame, MultiIndex, Index, Series
 from pytorch_lightning import LightningDataModule
+from pyampute import MultivariateAmputation
 
 from sklearn.base import TransformerMixin
 from sklearn.compose import ColumnTransformer
@@ -34,11 +40,13 @@ from autopopulus.data.types import (
     StaticFeatureAndLabel,
 )
 from autopopulus.data.transforms import (
+    CombineOnehots,
     Discretizer,
     UniformProbabilityAcrossNans,
-    ampute,
+    identity,
 )
-from autopopulus.utils.cli_arg_utils import StringToEnum, str2bool
+from autopopulus.utils.cli_arg_utils import StringToEnum, YAMLStringListToList, str2bool
+from autopopulus.utils.utils import CLIInitialized
 
 # Ref for abstract class attributes wihtout @property
 # https://stackoverflow.com/a/50381071/1888794
@@ -57,7 +65,12 @@ def abstract_attribute(obj: Callable[[Any], R] = None) -> R:
     return cast(R, _obj)
 
 
-class AbstractDatasetLoader(ABC):
+def enforce_numpy(df: DataT) -> ndarray:
+    # enforce numpy is numeric with df*1 (fixes bools)
+    return (df * 1).values if isinstance(df, DataFrame) else (df * 1)
+
+
+class AbstractDatasetLoader(ABC, CLIInitialized):
     """Dataset loading classes to be used by CommonDataModule (which is separate because it's a LightningDataModule.
     Not to be confused with pytorch DataLoader.
     """
@@ -66,10 +79,7 @@ class AbstractDatasetLoader(ABC):
     continuous_cols: DataColumn = abstract_attribute()
     categorical_cols: DataColumn = abstract_attribute()
     # Need to support longitudinal/static.
-    # Can add an extra attribute that's a dict pointing to the static/long versions.
-    missing_cols: DataColumn = abstract_attribute()
-    observed_cols: DataColumn = abstract_attribute()
-    onehot_prefixes: List[str] = abstract_attribute()
+    onehot_prefixes: Optional[List[str]] = None
     subgroup_filter: Optional[Dict[str, str]] = None
 
     @abstractmethod
@@ -119,28 +129,6 @@ class AbstractDatasetLoader(ABC):
         """Method that can append the corresponding CLI args for that dataset to the ArgParser."""
         pass
 
-    @classmethod
-    def from_argparse_args(
-        cls, args: Union[Namespace, ArgumentParser], **kwargs
-    ) -> "DataLoader":
-        """
-        Create an instance from CLI arguments.
-        **kwargs: Additional keyword arguments that may override ones in the parser or namespace.
-        # Ref: https://github.com/PyTorchLightning/PyTorch-Lightning/blob/0.8.3/pytorch_lightning/trainer/trainer.py#L750
-        """
-        if isinstance(args, ArgumentParser):
-            args = cls.parse_argparser(args)
-        params = vars(args)
-
-        # we only want to pass in valid args, the rest may be user specific
-        valid_kwargs = inspect.signature(cls.__init__).parameters
-        data_kwargs = dict(
-            (name, params[name]) for name in valid_kwargs if name in params
-        )
-        data_kwargs.update(**kwargs)
-
-        return cls(**data_kwargs)
-
 
 class SimpleDatasetLoader(AbstractDatasetLoader):
     """Convenience class to pass a basic dataset and necessary auxilliary data.
@@ -154,19 +142,18 @@ class SimpleDatasetLoader(AbstractDatasetLoader):
         label: Union[str, int, LabelT],
         continuous_cols: DataColumn,
         categorical_cols: DataColumn,
-        missing_cols: DataColumn,
-        observed_cols: DataColumn,
-        onehot_prefixes: List[str],
+        onehot_prefixes: List[str] = None,
+        split_id_column: Optional[str] = None,
         subgroup_filter: Optional[Dict[str, str]] = None,
     ) -> None:
         self.data = data
         self.labels = label
         self.continuous_cols = continuous_cols
         self.categorical_cols = categorical_cols
-        self.missing_cols = missing_cols
-        self.observed_cols = observed_cols
         self.onehot_prefixes = onehot_prefixes
         self.subgroup_filter = subgroup_filter
+        if split_id_column:
+            self.split_ids = self._get_split_ids_from_column(split_id_column)
 
     def load_features_and_labels(
         self, data_type_time_dim: Optional[DataTypeTimeDim] = None
@@ -197,6 +184,22 @@ class SimpleDatasetLoader(AbstractDatasetLoader):
         # directly given data and labels, just return them
         return (self.data, self.labels)
 
+    def _get_split_ids_from_column(
+        self, split_column: Optional[str]
+    ) -> Dict[str, Index]:
+        """If your df has a column indicating splits we grab it here."""
+        if split_column is None:
+            return
+
+        split_ids = {
+            split_name: self.data[self.data[split_column] == split_name].index
+            for split_name in ["train", "val", "test"]
+        }
+        # drop column because we don't need it anymore
+        self.data = self.data.drop(split_column, axis=1)
+
+        return split_ids
+
     @staticmethod
     def add_data_args():
         pass
@@ -204,6 +207,7 @@ class SimpleDatasetLoader(AbstractDatasetLoader):
 
 class CommonDataset(Dataset):
     """Extension of Pytorch Dataset for easy training/dataloading and applying transforms on the fly as the data is loaded into the model."""
+
     def __init__(
         self,
         split: Dict[str, DataT],
@@ -219,83 +223,89 @@ class CommonDataset(Dataset):
             except Exception:
                 return index.unique()
 
+        # TODO[LOW]: Technically I only need split ids for data, it should match ground_truth.
         self.split_ids = {
-            k: {k2: get_unique(split_data.index) for k2, split_data in v.items()}
-            for k, v in split.items()
+            k: get_unique(split_data.index)
+            for k, split_data in split.items()
+            if k != "label"
         }
         self.transforms = transforms
 
-    def __len__(self):
-        return (
-            len(self.split_ids["data"]["discretized"])
-            if "discretized" in self.split["data"]
-            else len(self.split_ids["data"]["normal"])
-        )
+    def __len__(self) -> int:
+        return len(self.split_ids["data"])
 
-    def __getitem__(self, index: int):
-        data_list_names = [("data", "normal"), ("ground_truth", "normal")]
-        # prepend the discretized data (reverse order so that it's in the correct final order)
-        if "discretized" in self.split["ground_truth"]:
-            data_list_names.insert(0, ("ground_truth", "discretized"))
-        if "discretized" in self.split["data"]:
-            data_list_names.insert(0, ("data", "discretized"))
+    def __getitem__(self, index: int) -> Dict[str, Dict[str, Tensor]]:
+        """
+        Returns (transformed_data) dictionary instead of list of tuples.
+        {
+            "original": {"data": ..., "ground_truth": ...},
+            "mapped": {"data": ..., "ground_truth": ...}
+        }
+        The structure matches `split`, `split_ids`, but NOT `transforms`.
+        Transforms has "original" transforms e.g. scaling that should be applied whether or not we are feature mapping.
+        """
+        transformed_data = {"original": {}, "mapped": {}}
+        for data_version in transformed_data.keys():
+            for (
+                data_role,
+                split_ids,
+            ) in self.split_ids.items():  # ["data", "ground_truth"]
+                df = self.split[data_role].loc[split_ids[index]]
+                if self.transforms:
+                    transform = self.transforms[data_version][data_role]
+                    # May not exist if no non-discretization steps for example
+                    if transform:
+                        if self.longitudinal:
+                            df = transform(df.values)
+                        else:
+                            # minmaxscaler needs a 2d array even if its just 1 row (for static)
+                            df = transform(df.values.reshape(1, -1))
+                # go back to 1D so we can accumulate a batch properly
+                # df = self.enforce_numpy(df).squeeze()
+                transformed_data[data_version][data_role] = Tensor(
+                    enforce_numpy(df)
+                ).squeeze()
 
-        transformed_data_list = []
-        for names in data_list_names:
-            # get the 1st split_id, then 2nd, etc.
-            df = self.split[names[0]][names[1]].loc[
-                self.split_ids[names[0]][names[1]][index]
-            ]
-            if self.transforms:
-                transform = self.transforms[names[0]][names[1]]
-                # May not exist if no non-discretization steps for example
-                if transform:
-                    if self.longitudinal:
-                        df = transform(df.values)
-                    else:
-                        # minmaxscaler needs a 2d array even if its just 1 row (for static)
-                        df = transform(df.values.reshape(1, -1))
-            # go back to 1D so we can accumulate a batch properly
-            # df = self.enforce_numpy(df).squeeze()
-            df = self.enforce_numpy(df)
-            df = Tensor(df).squeeze()
-            transformed_data_list.append(df)
-
-        return transformed_data_list
-
-    @staticmethod
-    def enforce_numpy(df: DataT) -> ndarray:
-        # enforce numpy is numeric with df*1 (fixes bools)
-        return (df * 1).values if isinstance(df, DataFrame) else (df * 1)
+        return transformed_data
 
 
-class CommonDataModule(LightningDataModule):
+class CommonDataModule(LightningDataModule, CLIInitialized):
     """Data loader for AEImputer Works with pandas/numpy data with data wrangling.
-    Assumes data has been one-hot encoded.
-    IMPORTANT: Assumes (one-hot encoded) categorical vars all share the same unique prefix.
-    Also assumes that if categorical var is missing then the nan is propagated for all of the one-hot features.
+    Splits can be automatically taken care of or be specified as "split_ids" in the DatasetLoader.
+    Pass the data in the way you'd like it to be passed to your downstream model.
+    That is, if you need onehot features, then pass a dataset with onehot features.
 
-    Also has a dictionary available `discretizations` after calling setup():
-    For both the normal "data" and "ground_truth", it maps a column name (str) to its categorical "bins" (a list of value ranges, List[Tuple[float, float]]), and to the "indices" in the discretized df (List[int]).
+    FEATURE-MAP:
+    All mappings are invertible, where the inverted mapping will be applied after imputation loss is computed and are only used for metrics, not training.
+    Your multi-categorical features must already be one-hot encoded (onehot_prefixes should be set in DatasetLoader) if you choose [None, discretize_continuous]. You are allowed to set onehot_prefixes if you choose target_encode_categorical, the will be automatically combined (and then divided later) for you.
+    If you do not not specify onehot_prefixes for [None, discretize_continuous] then it is assumed that the whole of the categorical variables passed in are all binary.
+    IMPORTANT: If you pass data with one-hot encoded categorical vars, we assume each shares the same unique prefix.
+    Also assumes that if categorical var is missing then the nan is propagated for all of the one-hot features.
+        - discretize_continuous: Dictionary available `discretizations` after calling setup().  For both the normal "data" and "ground_truth", it maps a column name (str) to its categorical "bins" (a list of value ranges, List[Tuple[float, float]]), and to the "indices" in the discretized df (List[int]).
+        - target_encode_categorical:  Dictionary available `inverse_target_encode_map` after calling setup(). It contains the inverse transform function for the ordinal encoder, and a dictionary that maps a column name to the inverse float mean target to ordinal encoded number.
     """
 
     def __init__(
         self,
         dataset_loader: AbstractDatasetLoader,
-        seed: int,
-        val_test_size: float,
-        test_size: float,
-        batch_size: int,
-        num_gpus: int,
+        batch_size: int = 32,
+        num_gpus: int = 0,
+        num_cpus: Union[
+            str, int
+        ] = "auto",  # TODO[LOW]: merge with n_gpus to devices or add params for argparser
         fully_observed: bool = False,
         data_type_time_dim=DataTypeTimeDim.STATIC,
         scale: bool = False,
         ampute: bool = False,
-        discretize: bool = False,
+        feature_map: Optional[str] = None,
         uniform_prob: bool = False,
         separate_ground_truth_transform: bool = False,
+        val_test_size: Optional[float] = None,
+        test_size: Optional[float] = None,
         percent_missing: Optional[float] = None,
-        missingness_mechanism: Optional[str] = None,
+        amputation_patterns: Optional[List[Dict[str, Any]]] = None,
+        seed: Optional[int] = None,
+        limit_data: Optional[int] = None,  # Debugging purposes
     ):
         super().__init__()
         self.seed = seed
@@ -305,16 +315,24 @@ class CommonDataModule(LightningDataModule):
         self.test_size = test_size
         self.batch_size = batch_size
         self.num_gpus = num_gpus
+        if isinstance(num_cpus, int):
+            self.num_cpus = num_cpus
+        elif num_cpus == "auto":
+            self.num_cpus = cpu_count()
+        else:  # no multiprocessing
+            self.num_cpus = 0
         self.fully_observed = fully_observed
         self.data_type_time_dim = data_type_time_dim
         self.scale = scale
         self.ampute = ampute
-        self.discretize = discretize
+        self.feature_map = feature_map
         self.uniform_prob = uniform_prob
         self.separate_ground_truth_transform = separate_ground_truth_transform
         self.percent_missing = percent_missing
-        self.missingness_mechanism = missingness_mechanism
+        self.amputation_patterns = amputation_patterns
         self._validate_inputs()
+
+        self.limit_data = limit_data
 
     def setup(self, stage: Optional[str] = None):
         """
@@ -323,6 +341,8 @@ class CommonDataModule(LightningDataModule):
             - longitudinal portion of longitudinal data, or static portion of longitudinal data
             - static data
         Amputation occurs before splitting the data, transforms are fitted after splitting the data.
+        If amputing and you select a already-onehot encoded column, we will explode the nans across the bins for you.
+        Splits are specified either by the DatasetLoader, if not then by relative split sizes. If both are specified it will default to the splits from DatasetLoader.
         Transforms are fitted but not applied to the whole dataset immediately here.
         Transform functions are passed to torch Dataset obj and applied on the fly as data is loaded in batches for training/val/test.
         """
@@ -330,9 +350,15 @@ class CommonDataModule(LightningDataModule):
             X, y = self.dataset_loader.load_features_and_labels(
                 data_type_time_dim=self.data_type_time_dim
             )
+            if self.limit_data:
+                # half data be True the other False
+                idx = y.index[y == True][: self.limit_data // 2]
+                idx = idx.append(y.index[y == False][: self.limit_data // 2])
+                X = X.loc[idx]
+                y = y.loc[idx]
 
             # get the columns before sklearn/other preprocessing steps strip them away
-            self.columns = X.columns
+            self.columns = {"original": X.columns}
 
             if self.fully_observed:
                 # keep rows NOT missing a value for any feature
@@ -344,24 +370,35 @@ class CommonDataModule(LightningDataModule):
 
             # Don't ampute if we're doing a purely F.O. experiment.
             if self.ampute:
-                X = ampute(
-                    X,
+                # TODO: add tests for _add_latent_features, refact into function to test?
+                X = self._add_latent_features(X)
+                amputer = MultivariateAmputation(
+                    prop=self.percent_missing,
+                    patterns=self.amputation_patterns,
                     seed=self.seed,
-                    missing_cols=self.dataset_loader.missing_cols,
-                    percent=self.percent_missing,
-                    mech=self.missingness_mechanism,
-                    # since load features is called before this, we should expect the correct static/longitudinal version
-                    observed_cols=self.dataset_loader.observed_cols,
                 )
+                X = amputer.fit_transform(X)
+                # drop the added latent features.
+                X = X.drop(X.filter(regex=r"latent_p\d+_.+").columns, axis=1)
 
             # cat indices and ctn indices
-            self._set_col_indices_by_type()
-            # group onehots together, binary vars together, etc.
+            self._set_col_idxs_by_type()
+            # group categorical (bin/multicat/onehot) vars together, etc.
             self._set_groupby()
+
+            # expand nans where its onehot to make sure the whole group is nan
+            # before assigned to splits
+            for onehot_group in self.col_idxs_by_type["original"].get("onehot", []):
+                # only .loc doesn't return a copy so I can set the value
+                # but that requires the col names, not indices
+                X.loc[
+                    X.iloc[:, onehot_group].isna().any(axis=1), X.columns[onehot_group]
+                ] = nan
+
             # split by pt id
             self._split_dataset(ground_truth, X, y)
-            self._set_post_split_transforms()
             self._set_nfeatures()
+            self._set_post_split_transforms()
 
     def train_dataloader(self):
         return self._get_dataloader("train")
@@ -376,119 +413,183 @@ class CommonDataModule(LightningDataModule):
     #   HELPERS   #
     ###############
     def _validate_inputs(self):
-        assert not self.discretize or (
-            self.dataset_loader.continuous_cols is not None
-        ), "Failed to provide which continous columns to discretize."
-        # need to discretize if imposing uniform dist
-        assert (
-            not self.uniform_prob or self.discretize
-        ), "Did not indicate to discretize but indicated uniform probability. You need discretization to impose a uniform probability."
-        # need auxiliarry info for amputation, (more if mar)
+        assert (self.num_cpus >= 0) and (
+            self.num_cpus <= cpu_count()
+        ), "Number of CPUs has to be a non-negative integer, and not exceed the number of cores."
+        assert (self.val_test_size is not None and self.test_size is not None) or (
+            hasattr(self.dataset_loader, "split_ids")
+        ), "Need to either specify split percentages or provide custom splits to the dataset loader."
+        if self.feature_map == "discretize_continuous":
+            assert (
+                self.dataset_loader.continuous_cols is not None
+            ), "Failed to provide which continous columns to discretize."
+        elif self.feature_map == "target_encode_categorical":
+            assert (
+                self.dataset_loader.categorical_cols is not None
+            ), "Failed to provide which categorical columns to encode."
+        if self.uniform_prob:  # need to discretize if imposing uniform dist
+            assert (
+                self.feature_map == "discretize_continuous"
+            ), "Did not indicate to discretize but indicated uniform probability. You need discretization to impose a uniform probability."
+        # need auxiliary info for amputation, (more if mar)
         if self.ampute:
             assert (
                 self.percent_missing is not None
-                and self.missingness_mechanism is not None
-                and self.dataset_loader.missing_cols is not None
+                and self.amputation_patterns is not None
             ), "Failed to provide settings for amputation."
-            if self.missingness_mechanism == "MAR":
-                assert (
-                    self.dataset_loader.observed_cols is not None
-                ), "Failed to provide observed columns for MAR mechanism."
 
-    def _set_col_indices_by_type(self):
+    def _add_latent_features(self, data: DataFrame) -> DataFrame:
+        """
+        For amputation, if MNAR is recoverable we need to create and add our own latent features.
+        If we want MNAR (recoverable) specify the distribution name(s) in parentheses.
+        On MNAR (non-recoverable) the default behavior of pyampute is correct.
+        Mutates self.amputation_patterns.
+        """
+        X = data.copy()
+        # TODO: is the pattern dict inside the list mutable in this way?
+        for i, pattern in enumerate(self.amputation_patterns):
+            # match MNAR(*) or MNAR(*, *, ...) but not MNAR alone
+            if re.search(r"MNAR\(\w+(?:,\s*\w+)*\)", pattern["mechanism"]):
+                # Grab everything in between () and split by comma
+                distributions = (
+                    re.findall(r"\((.*?)\)", pattern["mechanism"])[0]
+                    .replace(" ", "")
+                    .split(",")
+                )
+                # Add feature F_i to data X
+                # enumerate in case you want 2 of the same distribution
+                # we need to have unique feature/col name
+                for j, distribution in enumerate(distributions):
+                    distribution = distribution.lower()
+                    feature_name = f"latent_p{i}_{distribution}{j}"
+                    # Create feature following distribution *
+                    if re.search(r"(g(auss(ian)?)?)|(n(orm(al)?)?)", distribution):
+                        X[feature_name] = norm.rvs(
+                            0, 1, size=len(X), random_state=self.seed
+                        )
+                    elif re.search(r"y(ule)?|s(imon)?", distribution):
+                        X[feature_name] = yulesimon.rvs(
+                            1.5, size=len(X), random_state=self.seed
+                        )
+                    # Add weights
+                    if "weights" in pattern:
+                        if isinstance(pattern["weights"], dict):
+                            pattern["weights"][feature_name] = 1
+                        else:  # list, where the feature was added to the end
+                            pattern["weights"].append(1)
+                    else:
+                        pattern["weights"] = {feature_name: 1}
+
+                    # Change name to be pyampute compatible
+                    pattern["mechanism"] = "MNAR"
+        return X
+
+    def _set_col_idxs_by_type(self):
         """
         Dictionary with list of indices as ndarray (which can be used as indexer) of continuous cols and categorical cols in the tensor.
         If processing longitudinal data, it will choose the continuous/categorical columns from the longitudinal/static features accordingly for each portion of the data.
+
+        There's a "original" and "mapped" version, each should have keys: ["continuous", "categorical", "binary", "onehot"].
+        All except "onehot" are List[int], where "onehot" is a List[List[int]] (for each group).
         """
         # If discretizing continuous col indices are required, otherwise this is not needed
         if self.dataset_loader.continuous_cols is None:
-            self.col_indices_by_type = {"continuous": None, "categorical": None}
+            self.col_idxs_by_type: Dict[
+                str, Dict[str, Union[List[int], List[List[int]]]]
+            ] = {"original": {}}
             return
 
         # keep longitudinal columns that are continuous
         # But continuous columns are in the flattened df name format so it will contain the longitudinal col name
         ctn_cols = Index(self.dataset_loader.continuous_cols)
         cat_cols = Index(self.dataset_loader.categorical_cols)
-        self.col_indices_by_type = {
-            "continuous": array(
-                [
-                    self.columns.get_loc(col)
-                    for col in self.columns
-                    if ctn_cols.str.contains(col).any()
-                ]
-            ),
-            "categorical": array(
-                [
-                    self.columns.get_loc(col)
-                    for col in self.columns
-                    if cat_cols.str.contains(col).any()
-                ]
-            ),
+        self.col_idxs_by_type = {
+            "original": {
+                "continuous": array(
+                    [
+                        self.columns["original"].get_loc(col)
+                        for col in self.columns["original"]
+                        if ctn_cols.str.contains(col).any()
+                    ]
+                ),
+                "categorical": array(
+                    [
+                        self.columns["original"].get_loc(col)
+                        for col in self.columns["original"]
+                        if cat_cols.str.contains(col).any()
+                    ]
+                ),
+            }
         }
+
+        # useful for target encoding
+        if self.dataset_loader.onehot_prefixes is not None:
+            self.col_idxs_by_type["original"]["onehot"]: List[List[int]] = [
+                argwhere(self.columns["original"].str.contains(col))
+                for col in self.dataset_loader.onehot_prefixes
+            ]
+            # If its missing argwhere() returns an empty array that i don't want.
+            self.col_idxs_by_type["original"]["onehot"] = [
+                item for item in self.col_idxs_by_type["original"]["onehot"] if item
+            ]
+            # bin vars = categorical columns that are not one-hot encoded
+            self.col_idxs_by_type["original"]["binary"] = list(
+                set(self.col_idxs_by_type["original"]["categorical"])
+                ^ set(chain.from_iterable(self.col_idxs_by_type["original"]["onehot"]))
+            )
+        elif (
+            self.feature_map != "target_encode_categorical"
+        ):  # assume every cat var is binary
+            self.col_idxs_by_type["original"]["binary"] = self.col_idxs_by_type[
+                "original"
+            ]["categorical"]
 
     def _set_nfeatures(self):
         """
         Set number of features in the dataset.
-        MUST come after setting the transforms.
         This will help dynamically set input dimension for AE layers.
+        Assumed to be set before set_post_split_transforms, as may be changed by feature_maps
         """
-        n_features = len(self.columns)
-        if self.discretize:
-            # add all the added bins
-            n_features += reduce(
-                lambda added_num_cols, k: added_num_cols
-                + len(self.discretizations["data"][k]["indices"]),
-                self.discretizations["data"],
-                0,
-            )
-            # subtract duplicate of the original column
-            n_features -= len(self.discretizations["data"])
-        self.n_features = n_features
+        self.nfeatures = {"original": len(self.columns["original"])}
 
     def _set_groupby(self):
         """
         Creates a mapping from index to which group name (column name in common) they belong to so that it can directly be passed to a groupby.
+        We require the indices for the AE model (e.g., binary column thresholding), but the column names for the post_split_transforms.
+        We keep just the indices and convert them to column names just for the post_split_transforms.
 
-        Since this is done in setup before we actually discretize, we have to figure out how to adjust indices of everything (onehots, binary vars, discretized vars) ahead of time.
+        - ["categorical_onehots"] => if onehot_prefixes is set
+        - ["combined_onehots"] => if onehot_prefixes and feature_map "target_encode_categorical"
+        - ["discretized_ctn_cols"] => if feature_map is "discretize_continuous"
+        - ["binary_vars"] => if categorical features set and they're not onehot or converted to continuous via target encoding.
+
         NOTE: We assume that all bins will be used in pd.get_dummies, and self.groupby will be updated when we fit the discretizer (if discretizing).
         """
-        # TODO: test this # A B X0 X2 C D Y => A1 A2 B1 B2 B3 X1 X2 C1 C2 D1 D2 D3 Y
-        cols = self.columns
-        # TODO: use the coltype by indices here instead?
-        if self.data_type_time_dim.is_longitudinal():
-            # keep longitudinal columns that are continuous
-            # But continuous columns are in the flattened df name format so it will contain the longitudinal col name
-            ctn_cols = Index(self.dataset_loader.continuous_cols)
-            ctn_cols = [col for col in cols if ctn_cols.str.contains(col).any()]
-            # repeat with categorical
-            cat_cols = Index(self.dataset_loader.categorical_cols)
-            cat_cols = [col for col in cols if cat_cols.str.contains(col).any()]
-        else:
-            ctn_cols = self.dataset_loader.continuous_cols
-            cat_cols = self.dataset_loader.categorical_cols
-
-        # dummies will put the new discretized columns at the end (sliding everything else down), reference cols should adjust for that
-        # sort=False so symmetric difference doesn't mess up the index
-        reference_cols = Index(
-            cols.symmetric_difference(ctn_cols, sort=False) if self.discretize else cols
-        )
-        high_level_groups = {
-            "categorical_onehots": {
-                index: col
-                for col in self.dataset_loader.onehot_prefixes
-                for index in where(reference_cols.str.contains(col))[0]
+        # keep longitudinal columns that are continuous
+        # But continuous columns are in the flattened df name format so it will contain the longitudinal col name
+        # This should work either case.
+        high_level_groups = {}
+        if "onehot" in self.col_idxs_by_type["original"]:
+            high_level_groups["categorical_onehots"] = {
+                # get prefix of each column
+                index: self.dataset_loader.onehot_prefixes[group]
+                for group, group_idxs in enumerate(
+                    self.col_idxs_by_type["original"]["onehot"]
+                )
+                for index in group_idxs
             }
-        }
 
-        # bin vars = categorical columns that are not one-hot encoded
-        binary_var_indices = set(
-            [reference_cols.get_loc(col) for col in cat_cols]
-        ) ^ set(high_level_groups["categorical_onehots"].keys())
-        high_level_groups["binary_vars"] = {
-            index: reference_cols[index] for index in binary_var_indices
-        }
+        if "binary" in self.col_idxs_by_type["original"]:
+            # TODO[LOW]: since i have binaries in col_idxs_by_type do I need it in the groupby?
+            high_level_groups["binary_vars"] = {
+                index: self.columns["original"][index]
+                for index in self.col_idxs_by_type["original"]["binary"]
+            }
 
-        self.groupby: Dict[str, Dict[int, str]] = high_level_groups
+        # original/mapped -> [groupname -> indices]
+        self.groupby: Dict[str, Dict[str, Dict[int, str]]] = {
+            "original": high_level_groups
+        }
 
     def _split_dataset(
         self,
@@ -499,33 +600,32 @@ class CommonDataModule(LightningDataModule):
         """
         Splits dataset into train/test/val via data index (pt id).
         Also into the different componenets needed for training:
-            - data {discretized, normal}
-            - ground_truth {discretized, normal}
+            - data {mapped, normal}
+            - ground_truth {mapped, normal}
             - labels
+        Where the mapping could be discretized, target encoded, or onehot encoded.
+        The self.splits dictionary will then look like:
+        {
+            "data": {"train": ..., "val": ..., "test": ...},
+            "ground_truth": {"train": ..., "val": ..., "test": ...},
+            # "non_missing_mask": {"train": ..., "val": ..., "test": ...},
+            "label": {"train": ..., "val": ..., "test": ...},
+        }
         """
         splits = self._get_dataset_splits(X, y)
-        self.splits = {"ground_truth": {}, "data": {}}
-        self.splits["ground_truth"]["normal"] = {
-            split_name: ground_truth.loc[split_ids]
-            for split_name, split_ids in splits.items()
+        self.splits: Dict[str, Tensor] = {
+            "data": {},
+            "ground_truth": {},
+            # "non_missing_mask": {},  # I don't need this if I'm warm-starting in AEDitto shared_step
+            "label": {},
         }
-        self.splits["data"]["normal"] = {
-            split_name: X.loc[split_ids] for split_name, split_ids in splits.items()
-        }
-
-        if self.discretize:
-            self.splits["ground_truth"]["discretized"] = {
-                split_name: ground_truth.loc[split_ids].copy()
-                for split_name, split_ids in splits.items()
-            }
-            self.splits["data"]["discretized"] = {
-                split_name: X.loc[split_ids].copy()
-                for split_name, split_ids in splits.items()
-            }
-
-        self.splits["label"] = {
-            split_name: y[split_ids] for split_name, split_ids in splits.items()
-        }
+        for split_name, split_ids in splits.items():
+            self.splits["ground_truth"][split_name] = ground_truth.loc[split_ids]
+            self.splits["data"][split_name] = X.loc[split_ids]
+            # self.splits["non_missing_mask"][split_name] = (
+            #     ~X.loc[split_ids].isna().astype(bool)
+            # )
+            self.splits["label"][split_name] = y[split_ids]
 
     def _get_dataset_splits(
         self,
@@ -535,7 +635,11 @@ class CommonDataModule(LightningDataModule):
         """
         Splitting via df index with label stratification using sklearn.
         """
-        # TODO: enforce pt id is the same name for all dataset
+        # Use pre-specified splits if user has them
+        if hasattr(self.dataset_loader, "split_ids"):
+            return self.dataset_loader.split_ids
+
+        # TODO[LOW]: enforce pt id is the same name for all dataset
         # pick pt id if longitudinal portion of data (multiindex)
         level = PATIENT_ID if isinstance(X.index, MultiIndex) else None
         sample_ids = X.index.unique(level).values
@@ -564,18 +668,25 @@ class CommonDataModule(LightningDataModule):
         Setup sklearn pipeline for transforms to run after splitting data.
         Assumes groupby is set for categorical onehots and binary vars.
         There are separate pipelines for data and ground_truth.
-        If discretizing, we will keep a separate transform function that only applies the non-discretizing steps.
+        If feature_map, we will keep a separate transform function that only applies the non-mapping steps.
         If discretizing update the groupby (so all bins for the same var can be grouped later), and save the bins fitted/learned by discretizer.
         """
 
         def get_steps(
             scale: bool = self.scale,
-            discretize: bool = self.discretize,
+            feature_map: str = self.feature_map,
             uniform_prob: bool = self.uniform_prob,
         ) -> List[TransformerMixin]:
             steps = []
             if scale:
                 # Scale continuous features to [0, 1].  Can produce negative numbers.
+                # Enforce numpy so we don't get "UserWarning: X does not have valid feature names, but MinMaxScaler was fitted with feature names"
+                steps.append(
+                    (
+                        "enforce-numpy",
+                        FunctionTransformer(enforce_numpy),
+                    )
+                )
                 steps.append(
                     (
                         "continuous-scale",
@@ -583,8 +694,9 @@ class CommonDataModule(LightningDataModule):
                             [  # (name, transformer, columns) tuples
                                 (
                                     "scale",
-                                    MinMaxScaler(),
-                                    self.col_indices_by_type["continuous"],
+                                    # https://stats.stackexchange.com/a/328988/273369
+                                    MinMaxScaler(feature_range=(-1, 1)),
+                                    self.col_idxs_by_type["original"]["continuous"],
                                 )
                             ],
                             remainder="passthrough",
@@ -595,22 +707,67 @@ class CommonDataModule(LightningDataModule):
                     (
                         "enforce-pandas",
                         FunctionTransformer(
-                            lambda np_array: DataFrame(np_array, columns=self.columns)
+                            lambda np_array: DataFrame(
+                                np_array, columns=self.columns["original"]
+                            )
                         ),
                     )
                 )
 
-            if discretize:
+            if feature_map == "discretize_continuous":
                 # discretizes continuous vars (supervised).
                 steps.append(
                     (
                         "discretize",
                         Discretizer(
-                            self.splits["data"]["discretized"]["train"].columns,
-                            self.col_indices_by_type["continuous"],
+                            self.columns["original"],
+                            self.col_idxs_by_type["original"]["continuous"],
                             # only return it in transform() if uniform prob is toggled
                             return_info_dict=self.uniform_prob,
                         ),
+                    )
+                )
+            elif feature_map == "target_encode_categorical":
+                intermediate_categorical_cols = self.dataset_loader.categorical_cols
+                if "onehot" in self.col_idxs_by_type["original"]:
+                    # undo the onehot
+                    steps.append(
+                        (
+                            "combine_onehots",
+                            CombineOnehots(
+                                self.groupby["original"]["categorical_onehots"],
+                                self.columns["original"],
+                            ),
+                        )
+                    )
+                    # the columns will change between comebine and target_enc, we need the columns here now (intermediate)
+                    self.columns["mapped"] = (
+                        self.columns["original"]
+                        # drop onehots
+                        .drop(
+                            self.columns["original"][
+                                list(
+                                    chain.from_iterable(  # flatten to List[int]
+                                        self.col_idxs_by_type["original"]["onehot"]
+                                    )
+                                )
+                            ]
+                        ).union(  # add back the onehots but only their prefixes
+                            self.dataset_loader.onehot_prefixes, sort=False
+                        )
+                    )
+                    intermediate_categorical_cols = self.columns["mapped"].drop(
+                        self.columns["original"][
+                            self.col_idxs_by_type["original"]["continuous"]
+                        ]
+                    )
+                else:
+                    self.columns["mapped"] = self.columns["original"]
+
+                steps.append(
+                    (
+                        "target_encode",
+                        TargetEncoder(cols=intermediate_categorical_cols),
                     )
                 )
 
@@ -618,19 +775,23 @@ class CommonDataModule(LightningDataModule):
                 steps.append(
                     (
                         "uniform_probability_across_nans",
-                        UniformProbabilityAcrossNans(self.groupby),
+                        # I don't need groupby in mapped space since i'm not using the indices, but the names.
+                        UniformProbabilityAcrossNans(
+                            self.groupby["original"], self.columns["original"]
+                        ),
                     )
                 )
             return steps
 
+        #### POST FIT LOGIC ####
         steps = get_steps()
+        # train on train, apply to all
+        data_pipeline = Pipeline(steps)
+        ground_truth_pipeline = data_pipeline
         if steps:
-            data_pipeline = Pipeline(steps)
-            # train on train, apply to all
-            # at this point if discretizing, "normal" and "discretized" are the same, they're copies of the same data.
-            # .values so the transformers don't complain about being fitted with feature names and then transforming data with no feature names
+            # at this point if discretizing, "original" and "mapped" are the same, they're copies of the same data.
             data_pipeline.fit(
-                self.splits["data"]["normal"]["train"],  # .values,
+                self.splits["data"]["train"],
                 self.splits["label"]["train"],
             )
             if self.separate_ground_truth_transform:
@@ -641,88 +802,256 @@ class CommonDataModule(LightningDataModule):
                         "uniform_probability_across_nans"
                     ].ground_truth_pipeline = True
                 ground_truth_pipeline.fit(
-                    self.splits["ground_truth"]["normal"]["train"],  # .values,
+                    self.splits["ground_truth"]["train"],
                     self.splits["label"]["train"],
                 )
-            else:
-                ground_truth_pipeline = data_pipeline
 
-            if self.discretize:
-                # keep steps that are not discretization related
-                def non_discretization_transform(
-                    pipeline: Pipeline,
-                ) -> Optional[Callable[[ndarray], ndarray]]:
-                    # do not create new instance, we want to keep the info it learned from fit!
-                    # It is possible there are no non-discretization steps, in that case, do nothing
-                    # Decided to not do identity function so it's clearer when we do nothing
-                    steps = [
-                        (stepname, step)
-                        for stepname, step in pipeline.steps
-                        if stepname != "discretize"
-                        and stepname != "uniform_probability_across_nans"
-                    ]
-                    return Pipeline(steps).transform if steps else None
+            self._set_auxilliary_info_post_mapping(data_pipeline, ground_truth_pipeline)
 
-                self.transforms = {
-                    "data": {
-                        # Leave out discretize and uniform prob across nan (last two steps) for regular, not discretized data
-                        "normal": non_discretization_transform(data_pipeline),
-                        "discretized": data_pipeline.transform,
-                    },
-                    "ground_truth": {
-                        "normal": non_discretization_transform(ground_truth_pipeline),
-                        "discretized": ground_truth_pipeline.transform,
-                    },
-                }
-            else:  # no discretization pipeline
-                self.transforms = {
-                    "data": {
-                        "normal": data_pipeline.transform,
-                    },
-                    "ground_truth": {
-                        "normal": ground_truth_pipeline.transform,
-                    },
-                }
-        else:  # do nothing, no preprocessing requested
             self.transforms = {
-                "data": {"normal": lambda data: data},
-                "ground_truth": {"normal": lambda data: data},
+                "original": {  # keep steps that are not feature mapping related
+                    "data": self._get_original_transform(data_pipeline),
+                    "ground_truth": self._get_original_transform(ground_truth_pipeline),
+                },
+            }
+            if self.feature_map:
+                self.transforms["mapped"] = {
+                    "data": data_pipeline.transform,
+                    "ground_truth": ground_truth_pipeline.transform,
+                }
+        else:  # If no steps asked for, no transforms
+            self.transforms = None
+            self.discretizations = None
+            self.inverse_target_encode_map = None
+
+    @staticmethod
+    def _get_original_transform(
+        pipeline: Pipeline,
+    ) -> Optional[Callable[[ndarray], ndarray]]:
+        """
+        Do not create new instance, we want to keep the info it learned from fit!
+        It is possible there are no non-mapping steps, in that case, do nothing.
+        """
+        steps = [
+            (stepname, step)
+            for stepname, step in pipeline.steps
+            if stepname
+            not in {
+                "discretize",
+                "uniform_probability_across_nans",
+                "combine_onehots",
+                "target_encode",
+            }
+        ]
+        if steps:
+            return Pipeline(steps).transform
+        # do nothing
+        return identity
+
+    def _set_mapped_groupby_discretize(self):
+        """
+        Instead of dropping and adding the feauters and recalculating the indices we just iterate once through the categorical column indices.
+        This must be indices since we use it to invert the tensor after passing through to the model.
+        """
+        if self.feature_map == "discretize_continuous":
+            ## Calculate Shift
+            # for each categorical feature, count how many continuous features were before it and shift it down
+            def new_cat_indices(cat, ctn):
+                n_smaller = 0
+                new_idx = []
+                for i in range(len(cat)):  # go through each categorical feature
+                    # the index into continuous also counts # smaller
+                    while n_smaller < len(ctn) and ctn[n_smaller] < cat[i]:
+                        n_smaller += 1
+                    # shift cat index down
+                    new_idx.append(cat[i] - n_smaller)
+                return new_idx
+
+            # update existing groupby indices: map old idx -> new shifted idx
+            mapping = dict(
+                zip(
+                    self.col_idxs_by_type["original"]["categorical"],
+                    new_cat_indices(
+                        self.col_idxs_by_type["original"]["categorical"],
+                        self.col_idxs_by_type["original"]["continuous"],
+                    ),
+                )
+            )
+            self.groupby["mapped"] = {
+                groupname: {mapping[idx]: col for idx, col in group_idxs.items()}
+                for groupname, group_idxs in self.groupby["original"].items()
             }
 
-        if self.discretize:  # save discretization dict after running fit.
+    def _set_auxilliary_info_post_mapping(
+        self, data_pipeline: Pipeline, ground_truth_pipeline: Pipeline
+    ):
+        """
+        Will set any new attributes for that mapping.
+        Also updates existing auxilliary info for any mapping that changes
+        the feature cardinality/the order of features:
+            - self.groupby
+            - self.nfeatures
+            - self.col_idxs_by_type
+            - self.columns
+        Each of these has "original" version and "mapped" version.
+        The "mapped" version will be in mapped space.
+        Columns also has "post-invert" self.columns which will be in original space but out of order.
+        """
+        self.discretizations = None
+        self.inverse_target_encode_map = None
+        # save discretization dict after running fit, this also changes cardinality of the dataset
+        if self.feature_map == "discretize_continuous":
             self.discretizations = {
-                "data": data_pipeline.named_steps["discretize"].d.ctn_to_cat_map,
+                "data": data_pipeline.named_steps["discretize"].map_dict,
                 "ground_truth": ground_truth_pipeline.named_steps[
                     "discretize"
-                ].d.ctn_to_cat_map,
+                ].map_dict,
             }
 
-            # update groupby with discretized cols
+            ### UPDATE GROUPBY ###
+            self._set_mapped_groupby_discretize()
+
+            # Add new group
             # NOTE: requires groupby to be set before post_split_transforms
-            self.groupby["discretized_ctn_cols"] = {
-                data_name: {
-                    index: col
-                    for col, col_info in self.discretizations[data_name].items()
-                    for index in col_info["indices"]
-                }
-                for data_name in ["data", "ground_truth"]
+            self.groupby["mapped"]["discretized_ctn_cols"] = {
+                data_name: pipeline.named_steps["discretize"].discretized_groupby
+                for data_name, pipeline in [
+                    ("data", data_pipeline),
+                    ("ground_truth", ground_truth_pipeline),
+                ]
             }
-        else:
-            self.discretizations = None
 
+            ## UPDATE nfeatures ##
+            self.nfeatures["mapped"] = data_pipeline.named_steps["discretize"].nfeatures
+
+            ## UPDATE columns ##
+            self.columns["mapped"] = (
+                self.columns["original"]
+                .drop(
+                    self.columns["original"][
+                        self.col_idxs_by_type["original"]["continuous"]
+                    ]  # drop cotinuous cols
+                )
+                .union(
+                    [
+                        f"{col_name}_{label}"
+                        for col_name, col_info in self.discretizations["data"].items()
+                        for label in col_info["labels"]
+                    ],
+                    sort=False,
+                )
+            )  # add back dicretized ctn cols
+
+            ### UPDATE col indices ###
+            # everything is now categorical
+            self.col_idxs_by_type["mapped"] = {
+                # might not need categorical sicne im just using for cemseloss?
+                "categorical": list(range(self.nfeatures["mapped"])),
+                "binary": list(self.groupby["mapped"].get("binary_vars", {}).keys()),
+                # we don't just flip the ["original"]["onehot"] indices since we have new ones.
+                "onehot": self._get_onehot_indices_from_groupby(self.groupby["mapped"]),
+                "continuous": [],
+            }
+
+            ### Update columns after inversion ###
+            # All continuous columns at the end
+            self.columns["map-inverted"] = self.columns["original"][
+                self.col_idxs_by_type["original"]["categorical"]
+            ].union(
+                self.columns["original"][
+                    self.col_idxs_by_type["original"]["continuous"]
+                ],
+                sort=False,
+            )
+
+        elif self.feature_map == "target_encode_categorical":
+            target_encoder = data_pipeline.named_steps["target_encode"]
+            # TODO: should there be data and ground_truth?
+            self.inverse_target_encode_map: Dict[
+                # the transform function or
+                # col_index: {encoded_float: ordinal#}
+                str,
+                Union[Callable, Dict[int, Dict[float, int]]],
+            ] = {
+                "inverse_transform": target_encoder.ordinal_encoder.inverse_transform,
+                "mapping": {
+                    self.columns["mapped"].get_loc(col): {
+                        v: k for k, v in col_mapping.items()
+                    }
+                    for col, col_mapping in target_encoder.mapping.items()
+                },
+            }
+
+            # This changes the cardinality of the dataset
+            if "combine_onehots" in data_pipeline.named_steps:
+                ### UPDATE GROUPBY ###
+                self.groupby["mapped"] = {
+                    "combined_onehots": {
+                        data_name: pipeline.named_steps[
+                            "combine_onehots"
+                        ].combined_onehot_groupby
+                        for data_name, pipeline in [
+                            ("data", data_pipeline),
+                            ("ground_truth", ground_truth_pipeline),
+                        ]
+                    }
+                }
+
+                ### UPDATE nfeatures ###
+                self.nfeatures["mapped"] = data_pipeline.named_steps[
+                    "combine_onehots"
+                ].nfeatures
+
+                ### UPDATE col indices ###
+                # everything is now continuous
+                self.col_idxs_by_type["mapped"] = {
+                    "continuous": list(range(self.nfeatures["mapped"])),
+                    "binary": [],
+                    "onehot": [],
+                    "categorical": [],
+                }
+
+                ### UPDATE columns ###
+                flat_onehot_indices = list(
+                    chain.from_iterable(self.col_idxs_by_type["original"]["onehot"])
+                )
+                # drop them and tack them on at the end, if no combine-onehot its the same thing
+                self.columns["map-inverted"] = (
+                    self.columns["original"]
+                    .drop(self.columns["original"][flat_onehot_indices])
+                    .union(self.columns["original"][flat_onehot_indices], sort=False)
+                )
+
+    @staticmethod
+    def _get_onehot_indices_from_groupby(
+        groupby: Dict[str, Dict[int, str]]
+    ) -> List[List[int]]:
+        """
+        groupby is map: idx -> group name. Want a list of onehot indices groups
+        onehots includes onehot_prefixes and the discretized ctn cols
+        If none exist this will return an empty list.
+        """
+        groups = {}
+        groups.update(groupby.get("categorical_onehots", {}))
+        groups.update(groupby.get("discretized_ctn_cols", {}).get("data", {}))
+
+        onehot_group_indices = {}
+        for idx, group_name in groups.items():
+            if group_name in onehot_group_indices:
+                onehot_group_indices[group_name].append(idx)
+            else:
+                onehot_group_indices[group_name] = [idx]
+        return list(onehot_group_indices.values())
+
+    ##################
+    #  Data Loading  #
+    ##################
     def _get_dataloader(self, split: str) -> DataLoader:
-        split_data = {
-            "data": {"normal": self.splits["data"]["normal"][split]},
-            "ground_truth": {"normal": self.splits["ground_truth"]["normal"][split]},
-        }
-        if self.discretize and self.uniform_prob:
-            split_data["data"]["discretized"] = self.splits["data"]["discretized"][
-                split
-            ]
-            split_data["ground_truth"]["discretized"] = self.splits["ground_truth"][
-                "discretized"
-            ][split]
-
+        """
+        Grab the split from all the Tensors in the self.splits dictionary.
+        If there is no mapped data, "mapped": {} will be empty.
+        """
+        split_data = {k: v[split] for k, v in self.splits.items()}
         return self._create_dataloader(split_data)
 
     def _create_dataloader(
@@ -743,62 +1072,50 @@ class CommonDataModule(LightningDataModule):
             collate_fn=self._batch_collate if is_longitudinal else None,
             batch_size=self.batch_size,
             shuffle=False,
-            num_workers=4 * self.num_gpus,
+            num_workers=self.num_cpus,
             pin_memory=True,
         )
         return loader
 
     def _batch_collate(
-        self,
-        batch: List[
-            Union[Tuple[Tensor, Tensor], Tuple[Tensor, Tensor, Tensor, Tensor]]
-        ],
+        self, batch: List[Dict[str, Union[Dict[str, Tensor], Tensor]]]
     ) -> Tuple[Tensor, Tensor, Tensor]:
         """
-        Batch is a list of tuples with (example, label).
+        Batch is list of nested dictionaries: {
+            "original": {"data": ..., "ground_truth": ...},
+            "mapped": {"data": ..., "ground_truth": ...},
+            "label": ...
+        }
         Pad the variable length sequences, add seq lens, and enforce tensor.
         """
-        inputs = list(zip(*batch))
-        data_indices = [0, 2] if self.discretize else [0]
+        # group all the data together:
+        # convert list of nested dictionaries to a nested dictionary with lists inside
+        collated_batch = {
+            data_version: {
+                data_role: [dic[data_version][data_role] for dic in batch]
+                for data_role in data
+            }
+            for data_version, data in batch[0].items()
+            if data_version != "label"  # ignore label for now
+        }
 
-        seq_lens = [
-            Tensor([len(pt_seq) for pt_seq in inputs[idx]]) for idx in data_indices
-        ]
-        #  TODO: is that necessary: pad all the data going in ?
-        inputs = [
-            pad_sequence(X, batch_first=True, padding_value=PAD_VALUE) for X in inputs
-        ]
-        if self.discretize:
-            return (
-                (inputs[0], inputs[1], seq_lens[0]),
-                (inputs[2], inputs[3], seq_lens[1]),
+        for data_version, nested_dict in collated_batch.items():
+            # Get sequence lengths to store to pack/unpack later.
+            collated_batch[data_version]["seq_len"] = Tensor(
+                [len(pt_seq) for pt_seq in collated_batch[data_version]["data"]]
             )
-        return (inputs[0], inputs[1], seq_lens[0])
+            # Pad the data after storing seq lens
+            for data_role in nested_dict:
+                #  TODO: necessary to pad all the data going in ?
+                collated_batch[data_version][data_role] = pad_sequence(
+                    collated_batch[data_version][data_role],
+                    batch_first=True,
+                    padding_value=PAD_VALUE,
+                )
+        # restore label if we want to use it later
+        collated_batch["label"] = [dic["label"] for dic in batch]
 
-    @classmethod
-    def from_argparse_args(
-        cls, args: Union[Namespace, ArgumentParser], **kwargs
-    ) -> "CommonDataModule":
-        """
-        Create an instance from CLI arguments.
-        **kwargs: Additional keyword arguments that may override ones in the parser or namespace.
-        # Ref: https://github.com/PyTorchLightning/PyTorch-Lightning/blob/-1.8.3/pytorch_lightning/trainer/trainer.py#L750
-        """
-        if isinstance(args, ArgumentParser):
-            args = cls.parse_argparser(args)
-        params = vars(args)
-
-        # we only want to pass in valid args, the rest may be user specific
-        valid_kwargs = inspect.signature(cls.__init__).parameters.copy()
-        valid_kwargs.update(
-            inspect.signature(CommonDataModule.__init__).parameters.copy()
-        )
-        data_kwargs = dict(
-            (name, params[name]) for name in valid_kwargs if name in params
-        )
-        data_kwargs.update(**kwargs)
-
-        return cls(**data_kwargs)
+        return collated_batch
 
     @staticmethod
     def add_data_args(parent_parser: ArgumentParser) -> ArgumentParser:
@@ -808,6 +1125,17 @@ class CommonDataModule(LightningDataModule):
             default=DataTypeTimeDim.STATIC,
             action=StringToEnum(DataTypeTimeDim),
             help="Specify if the dataset should be considered purely static, purely longitudinal, or a subset of a mix.",
+        )
+        p.add_argument(
+            "--feature-map",
+            type=str,
+            default=None,
+            choices=[
+                "onehot_categorical",
+                "target_encode_categorical",
+                "discretize_continuous",
+            ],
+            help="Specify how to map the features (e.g. continuous features to categorical space. Do nothing by default if you don't want to do anything to the features.",
         )
         p.add_argument(
             "--batch-size",
@@ -822,12 +1150,6 @@ class CommonDataModule(LightningDataModule):
             help="Number of workers for the pytorch dataset used in passing batches to the autoencoder.",
         )
         p.add_argument(
-            "--batch-log-interval",
-            type=int,
-            default=500,
-            help="When training the autoencoder and verbosity is on, set the interval for printing progress in training on a batch.",
-        )
-        p.add_argument(
             "--scale",
             type=str2bool,
             default=False,
@@ -839,5 +1161,30 @@ class CommonDataModule(LightningDataModule):
             default=False,
             help="Specify whether or not to fit the ground_truth transforms separately on the ground_truth data. When false, the ground_truth transforms are the same as the data transforms (fit to the data).",
         )
+        p.add_argument(
+            "--limit-data",
+            type=int,
+            default=None,
+            help="Debugging: limits the dataset to a certain size. Must be >= batch-size.",
+        )
 
+        #### AMPUTE ####
+        p.add_argument(
+            "--fully-observed",
+            action="store_true",
+            required=False,
+            help="Filter down to fully observed dataset flag [TOGGLE].",
+        )  # acts as switch
+        p.add_argument(
+            "--percent-missing",
+            type=float,
+            default=0.33,
+            help="When filtering down to fully observed and amputing (imputer is not none), what percent of data should be missing.",
+        )
+        p.add_argument(
+            "--amputation-patterns",
+            action=YAMLStringListToList(convert=dict),
+            default=None,
+            help="Patterns to pass to pyampute for amputation.",
+        )
         return p

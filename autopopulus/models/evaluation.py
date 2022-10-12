@@ -77,23 +77,6 @@ class ErrorAnalysisCallback(Callback):
     ):
         for name, metricfn in pl_module.metrics.items():
             metric_fn_args = [outputs["pred"], outputs["ground_truth"]]
-            if name == "AccuracyPerBin":
-                continue
-                (
-                    (data, ground_truth),
-                    (undiscretized_data, undiscretized_ground_truth),
-                ) = batch
-                # TODO: replace batch with data --> ae --> reconstruct_batch
-                # TODO: replace missing only mask with discrete version
-                # TODO: accuracy per bin should be sorted descending
-                # NEW: can;t i just do what i do in ae.py 352?
-                args = [
-                    batch,
-                    ground_truth,
-                    # this would require i save discrete_columns in commondatamodule or aeditto
-                    pl_module.discrete_columns,
-                    pl_module.columns,
-                ]
             self.compute_metrics_and_merge_batch(
                 name, metricfn, outputs, metric_fn_args
             )

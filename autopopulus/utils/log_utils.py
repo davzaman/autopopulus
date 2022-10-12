@@ -1,19 +1,24 @@
 from argparse import Namespace
 from logging import FileHandler, StreamHandler, basicConfig, info, INFO
+from shutil import copy
 from typing import Dict, List, Optional, Union
 
+from regex import search
 from os.path import join, exists
-from os import makedirs
+from os import makedirs, walk
 import sys
 import numpy as np
 import pandas as pd
-import torch
+
 from pytorch_lightning.loggers import LightningLoggerBase
 from pytorch_lightning.loggers.base import rank_zero_experiment
 from pytorch_lightning.utilities import rank_zero_info
 from pytorch_lightning.utilities import rank_zero_only
-from tensorboardX import SummaryWriter
-from tensorflow.python.summary.summary_iterator import summary_iterator
+from torch.utils.tensorboard import SummaryWriter
+from torch import isnan
+
+import tensorflow as tf
+from tensorflow.core.util.event_pb2 import Event
 
 
 from autopopulus.data import CommonDataModule
@@ -58,20 +63,12 @@ def log_imputation_performance(
     for stage_i, stage in enumerate(stages):
         est = results[stage_i]
 
-        true = (
-            data.splits["ground_truth"]["discretized"][stage]
-            if "discretized" in data.splits["ground_truth"]
-            else data.splits["ground_truth"]["normal"][stage]
-        )
+        true = data.splits["ground_truth"][stage]
         # if the original dataset contains nans and we're not filtering to fully observed, need to fill in ground truth too for metric computation
         ground_truth_non_missing_mask = ~np.isnan(true)
         true = true.where(ground_truth_non_missing_mask, est)
 
-        missing_mask = (
-            data.splits["data"]["discretized"][stage].isna()
-            if "discretized" in data.splits["data"]
-            else data.splits["data"]["normal"][stage].isna()
-        )
+        missing_mask = isnan(data.splits["data"][stage]).bool()
 
         # START HERE
         for name, metricfn in metrics.items():
@@ -86,28 +83,29 @@ def log_imputation_performance(
 
 def get_logdir(args: Namespace) -> str:
     """Get logging directory based on experiment settings."""
-    return (
-        (
-            f"F.O./"
-            f"{args.percent_missing}/"
-            f"{args.missingness_mechanism}/"
-            f"{args.method}"
-        )
+    # Missingness scenario could be 1 mech or mixed
+    pattern_mechanisms = ",".join(
+        [pattern["mechanism"] for pattern in args.amputation_patterns]
+    )
+    dir_name = (
+        (f"F.O./{args.percent_missing}/{pattern_mechanisms}/{args.method}")
         if args.fully_observed
         else f"full/{args.method}"
     )
+    if not exists(dir_name):
+        makedirs(dir_name)
+    return dir_name
 
 
-def get_logger(
+def get_summarywriter(
     logdir: Optional[str], predictive_model: Optional[str] = None
 ) -> SummaryWriter:
-    """Get the universal logger for tensorboardX."""
+    """Get the universal logger for tensorboard."""
     if not logdir:
         return
     if predictive_model:
-        return SummaryWriter(logdir=join(logdir, predictive_model))
-    return SummaryWriter(logdir=logdir)
-    # return SummaryWriter(logdir=logdir, write_to_disk=args.tbX_on)
+        return SummaryWriter(log_dir=join(logdir, predictive_model))
+    return SummaryWriter(log_dir=logdir)
 
 
 def add_scalars(
@@ -140,59 +138,17 @@ def add_all_text(
         logger.add_text(tag, text_string, global_step, walltime)
 
 
-def copy_log_from_tune(tune_log_path: str, logger: SummaryWriter):
-    """Ray tune stores the results as "ray/tune/val-loss" for example. We want to copy these over locally so we can remove the tune files and readily compare the output later."""
-    for summary in summary_iterator(tune_log_path):
-        for step, v in enumerate(summary.summary.value):
-            if "ray/tune" in v.tag:
-                nremove = len("ray/tune/")
-                new_name = v.tag[nremove:]  # remove ray/tune/
-                logger.add_scalar(new_name, v.simple_value, step)
-
-
-class MyLogger(LightningLoggerBase):
-    def __init__(self, summarywriter: SummaryWriter):
-        super().__init__()
-        self._experiment = summarywriter
-
-    @property
-    def name(self):
-        return "MyLogger"
-
-    @property
-    @rank_zero_experiment
-    def experiment(self) -> SummaryWriter:
-        assert rank_zero_only.rank == 0, "tried to init log dirs in non global_rank=0"
-        return self._experiment
-
-    @property
-    def version(self) -> Union[int, str]:
-        return "1"
-
-    @rank_zero_only
-    def log_hyperparams(self, params):
-        # params is an argparse.Namespace
-        # your code to record hyperparameters goes here
-        pass
-
-    @rank_zero_only
-    def log_metrics(self, metrics, step):
-        assert rank_zero_only.rank == 0, "experiment tried to log from global_rank != 0"
-
-        for k, v in metrics.items():
-            if isinstance(v, torch.Tensor):
-                v = v.item()
-
-            if isinstance(v, dict):
-                self.experiment.add_scalars(k, v, step)
-            else:
-                try:
-                    self.experiment.add_scalar(k, v, step)
-                except Exception as e:
-                    m = f"\n you tried to log {v} which is not currently supported. Try a dict or a scalar/tensor."
-                    type(e)(e.message + m)
-
-    @rank_zero_only
-    def finalize(self, status: str) -> None:
-        # Any code that needs to be run after training finishes goes here
-        self.experiment.flush()
+def copy_log_from_tune(
+    best_tune_logdir: str, logdir: str, logger: SummaryWriter = None
+):
+    """
+    We want to copy these over locally so we can remove the tune files and readily compare the output later.
+    Walk through the best tune run logdirectory,
+        ignoring top-level (which is tune metadata we don't care about),
+        and copy over all tfevents.
+    """
+    for root, dirs, files in walk(best_tune_logdir):
+        if root != best_tune_logdir:  # ignore top-level
+            for file in files:
+                if search("tfevents", file):  # only tfevent files
+                    copy(join(root, file), logdir)

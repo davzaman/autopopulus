@@ -6,8 +6,6 @@ import numpy as np
 import pandas as pd
 import itertools
 
-from autopopulus.data.transforms import ampute
-
 DATA_DIR = "/home/davina/Private/mimic3-benchmarks/data/decompensation"
 CHANNEL_INFO_PATH = (
     "/home/davina/Private/mimic3-benchmarks/mimic3models/resources/channel_info.json"
@@ -93,7 +91,6 @@ def load_mimic_data(
         ).T
         y = stay_data["y_true"][:nrows]
 
-        # TODO: this doesn't work, there's too much missing data
         if args.fully_observed:
             # keep rows NOT missing a value for any feature
             fully_observed_mask = X.notna().all(axis=1)
@@ -119,13 +116,7 @@ def load_mimic_data(
     X = {}
     for split in splits:
         if "percent_missing" in args and "missingness_mechanism" in args:
-            X[split] = ampute(
-                X_true[split],
-                args.seed,
-                X_true[split].columns[-7:-3],
-                args.percent_missing,
-                args.missingness_mechanism,
-            )
+            pass
         else:
             X[split] = X_true[split].copy()
         X[split].index = indices[split]

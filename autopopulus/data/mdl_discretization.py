@@ -6,6 +6,8 @@ from Orange.data import Domain, Table, ContinuousVariable, DiscreteVariable
 from Orange.preprocess import Discretize
 from Orange.preprocess.discretize import EntropyMDL
 
+from autopopulus.data.utils import onehot_multicategorical_column
+
 Bin = Tuple[float, float]
 ColInfoDict = Dict[str, Dict[str, Union[List[Bin], List[int]]]]
 
@@ -14,7 +16,10 @@ class MDLDiscretizer:
     """
     Discretize with MDL using the Orange package.
     Transforms df and also has a dictionary available `continuous_to_categorical_mapping`:
-    It maps a column name (str) to its categorical "bins" (a list of value ranges, List[Tuple[float, float]]), and to the "indices" in the discretized df (List[int]).
+    It maps a column name (str) to its categorical:
+        - "bins" (a list of value ranges, List[Tuple[float, float]])
+        - "labels" (strings representing the bins, List[str])
+        -"indices" in the discretized df (List[int]).
     """
 
     def __init__(self, colname_to_idx: Optional[Dict[str, int]] = None):
@@ -46,6 +51,9 @@ class MDLDiscretizer:
             col_name: {
                 # Bins for that column as a list of tuples
                 "bins": bin_ranges,
+                "labels": [
+                    self.bin_tuple_to_str(bin_range) for bin_range in bin_ranges
+                ],
             }
             for col_name, bin_ranges in zip(
                 cols,
@@ -69,7 +77,7 @@ class MDLDiscretizer:
 
         return self
 
-    def transform(self, df: pd.DataFrame, mapped: bool = True) -> pd.DataFrame:
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
         """Transforms df directly, no need to convert to Orange Table.
         Orange has an issue where transform will fit the data again, this is a workaround.
         """
@@ -77,14 +85,8 @@ class MDLDiscretizer:
 
         for col, col_info_dict in self.ctn_to_cat_map.items():
             bins = col_info_dict["bins"]
+            labels = col_info_dict["labels"]
 
-            # if mapped:
-            # labels = list(self.dicts[col].values())
-            # else:
-            labels = [
-                self.bin_tuple_to_str(bin_range) if mapped else i
-                for i, bin_range in enumerate(bins)
-            ]
             # pandas cut expects a list of the bin edges
             bin_points = np.unique(
                 [range_point for range_tuple in bins for range_point in range_tuple]
@@ -99,33 +101,7 @@ class MDLDiscretizer:
                 include_lowest=True,
             ).astype(pd.CategoricalDtype(categories=labels))
 
-        return self.discretize_and_propagate_nans(transform_df)
-
-    def discretize_and_propagate_nans(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Discretized cols are in place/in order not tacked on at the end.
-        Even if the data does not contain the category found, it will be added as a column of all 0s.
-        """
-        # Columns: "colname_binrange0 - binrange1"
-        # NOTE: get dummies will tack on new columns at the end.
-        discretized_df = pd.get_dummies(df, dummy_na=True)
-        # put back in all nans
-        for i, (col, col_info_dict) in enumerate(self.ctn_to_cat_map.items()):
-            # for the rows that *_nan = 1, the corresponding categorical col values will be nan
-            # adjust indices that previously ignore the nan dummy columns
-            discretized_column_group = discretized_df.columns[
-                col_info_dict["indices"] + i
-            ]
-            discretized_df.loc[
-                discretized_df[f"{col}_nan"] == 1, discretized_column_group
-            ] = np.nan
-
-        # drop nan dummy
-        discretized_df = discretized_df.drop(
-            discretized_df.columns[discretized_df.columns.str.endswith("_nan")],
-            axis=1,
-        )
-        return discretized_df
+        return onehot_multicategorical_column(self.ctn_to_cat_map.keys())(transform_df)
 
     @staticmethod
     def bin_ranges_as_tuples(
@@ -147,7 +123,9 @@ class MDLDiscretizer:
             for range_str in ranges[1:-1]:
                 start_range, end_range = range_str.replace(" ", "").split("-")
                 column_ranges.append((float(start_range), float(end_range)))
-            column_ranges.append((start_of_last_bin, max_col_value))
+            # min=max: don't want to add a bin back to the min, (it will be binary)
+            if max_col_value > min_col_value:
+                column_ranges.append((start_of_last_bin, max_col_value))
 
             # add list of all ranges for each column to a list
             list_of_ranges_per_col.append(column_ranges)

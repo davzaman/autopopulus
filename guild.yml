@@ -1,0 +1,94 @@
+######################
+#     OPERATIONS     #
+######################
+- config: high-level-flags
+  flags:
+    method:
+      required: yes
+      type: string
+    experiment-name:
+      required: no
+      arg-skip: yes  #  don't include as arg, log to guild
+      type: string
+    fully-observed:
+      required: no
+      type: bool
+
+# what to do when you run `guild run`
+- operations:
+    main:
+      description: Train and evaluate an imputer, run downstream predictions.
+      flags-import: no
+      label: ${method} ${experiment-name}
+      # plugins: summary
+      env: # don't save pycache
+        PYTHONDONTWRITEBYTECODE: 1
+      sourcecode:
+        - include:
+          - '*.py'
+          - '*.json'
+          - '*.yml'
+        - exclude:
+            dir:
+              - mlruns
+              - notebooks
+              - tune_results
+      output-scalars: off
+      requires:
+        config: options.yml
+      flags:
+        $include:
+          - high-level-flags
+      steps:
+        - run: train_predict
+        - run: test
+
+    train_predict:
+      description: Train an imputer and run predictions.
+      main: autopopulus/main
+      env: # don't save pycache
+        PYTHONDONTWRITEBYTECODE: 1
+      sourcecode:
+        - include:
+          - '*.py'
+          - '*.json'
+          - '*.yml'
+        - exclude:
+            dir:
+              - mlruns
+              - notebooks
+              - tune_results
+      output-scalars: off
+      requires:
+        - config: options.yml
+      flags:
+        $include:
+          - high-level-flags
+
+    test:
+      description: Evaluate/test an imputer if it's an autoencoder.
+      main: autopopulus/evaluate_imputer
+      env: # don't save pycache
+        PYTHONDONTWRITEBYTECODE: 1
+      sourcecode:
+        - include:
+          - '*.py'
+          - '*.json'
+          - '*.yml'
+        - exclude:
+            dir:
+              - mlruns
+              - notebooks
+              - tune_results
+      output-scalars: off
+      requires:
+        # TODO: how do i conditionally pick static/longitudinal?
+        - config: options.yml
+        - file: serialized_models/STATIC_test_dataloader.pt
+          target-path: serialized_models
+        - file: serialized_models/AEDitto_STATIC.pt
+          target-path: serialized_models
+      flags:
+        $include:
+          - high-level-flags
+    
