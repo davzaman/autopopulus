@@ -29,53 +29,58 @@ class BatchSwapNoise(nn.Module):
             return x
 
 
-class CEMSELoss(nn.Module):
-    """CE for multicat, BCE for binary columns, MSE for continuous columns."""
-
+class CtnCatLoss(nn.Module):
     def __init__(
         self,
         ctn_cols_idx: torch.LongTensor,
         bin_cols_idx: torch.LongTensor,
         onehot_cols_idx: torch.LongTensor,
+        loss_bin=nn.BCEWithLogitsLoss(),
+        loss_onehot=nn.CrossEntropyLoss(),
+        loss_ctn=nn.MSELoss(),
     ):
         super().__init__()
         self.ctn_cols_idx = ctn_cols_idx
         self.bin_cols_idx = bin_cols_idx
         self.onehot_cols_idx = onehot_cols_idx
-        self.bce = nn.BCEWithLogitsLoss()
-        self.mse = nn.MSELoss()
-        self.ce = nn.CrossEntropyLoss()
+        self.loss_bin = loss_bin
+        self.loss_onehot = loss_onehot
+        self.loss_ctn = loss_ctn
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor):
         # slicing is differentiable: https://stackoverflow.com/questions/51361407/is-column-selection-in-pytorch-differentiable/51366171
         if len(pred.shape) == 2:  # static
-            ce = 0
+            loss_onehot = 0
             for onehot_group in self.onehot_cols_idx:
                 # ignore pads of -1
                 onehot_group = onehot_group[onehot_group != PAD_VALUE]
-                ce += self.ce(
+                loss_onehot += self.loss_onehot(
                     pred[:, onehot_group],
                     torch.argmax(target[:, onehot_group], dim=1),
                 )
-            bce = self.bce(pred[:, self.bin_cols_idx], target[:, self.bin_cols_idx])
-            mse = self.mse(pred[:, self.ctn_cols_idx], target[:, self.ctn_cols_idx])
+            loss_bin = self.loss_bin(
+                pred[:, self.bin_cols_idx], target[:, self.bin_cols_idx]
+            )
+            loss_ctn = self.loss_ctn(
+                pred[:, self.ctn_cols_idx], target[:, self.ctn_cols_idx]
+            )
         elif len(pred.shape) == 3:  # longitudinal
-            ce = 0
+            loss_onehot = 0
             for onehot_group in self.onehot_cols_idx:
                 # ignore pads of -1
                 onehot_group = onehot_group[onehot_group != PAD_VALUE]
-                ce += self.ce(
+                loss_onehot += self.loss_onehot(
                     pred[:, :, onehot_group],
                     # Last dim: whether static/longitudinal the last dim is features
                     torch.argmax(target[:, :, onehot_group], dim=2),
                 )
-            bce = self.bce(
+            loss_bin = self.loss_bin(
                 pred[:, :, self.bin_cols_idx], target[:, :, self.bin_cols_idx]
             )
-            mse = self.mse(
+            loss_ctn = self.loss_ctn(
                 pred[:, :, self.ctn_cols_idx], target[:, :, self.ctn_cols_idx]
             )
-        return ce + bce + mse
+        return loss_onehot + loss_bin + loss_ctn
 
 
 class ReconstructionKLDivergenceLoss(nn.Module):

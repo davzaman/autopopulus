@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import torch
 from torchmetrics import Metric
+from math import pi
 
 from autopopulus.data.constants import PAD_VALUE
 
@@ -40,21 +41,24 @@ def format_tensor(*tensors: torch.Tensor) -> Iterable[torch.Tensor]:
 
 class MAAPEMetric(Metric):
     """
+    Element-wise MAAPE.
     This might be useless as the feature-mapping inversion cannot be done on the gpu especially since we need to reorder stuff as pandas df.
     https://torchmetrics.readthedocs.io/en/stable/pages/implement.html
     https://github.com/Lightning-AI/metrics/tree/master/src/torchmetrics/regression.mape.py
     https://github.com/allenai/allennlp/tree/main/allennlp/training/metrics
-    TODO: TEST
     """
 
     is_differentiable: bool = True
     higher_is_better: bool = False
     full_state_update: bool = False
 
-    def __init__(self, epsilon: float = EPSILON, **kwargs: Any) -> None:
+    def __init__(
+        self, epsilon: float = EPSILON, scale_to_01: bool = False, **kwargs: Any
+    ) -> None:
         super().__init__(**kwargs)
         self.epsilon = epsilon
-        self.add_state("sum_errors", default=torch.tensor(0), dist_reduce_fx="sum")
+        self.scale_to_01 = scale_to_01
+        self.add_state("sum_errors", default=torch.tensor(0.0), dist_reduce_fx="sum")
         self.add_state("total", default=torch.tensor(0), dist_reduce_fx="sum")
 
     def update(
@@ -76,26 +80,28 @@ class MAAPEMetric(Metric):
         self.total += count
 
     def compute(self) -> float:
-        return self.sum_errors / self.total
+        maape = self.sum_errors / self.total
+        if self.scale_to_01:  # range [0, pi/2] scale to [0, 1]
+            maape *= 2 / pi
+        return maape
 
 
 class RMSEMetric(Metric):
     """
+    Element-wise RMSE.
     This might be useless as the feature-mapping inversion cannot be done on the gpu especially since we need to reorder stuff as pandas df.
     https://torchmetrics.readthedocs.io/en/stable/pages/implement.html
     https://github.com/Lightning-AI/metrics/blob/master/src/torchmetrics/regression/mse.py
     https://github.com/allenai/allennlp/tree/main/allennlp/training/metrics
-    TODO: TEST
     """
 
     is_differentiable: bool = True
     higher_is_better: bool = False
     full_state_update: bool = False
 
-    def __init__(self, epsilon: float = EPSILON, **kwargs: Any) -> None:
+    def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self.epsilon = epsilon
-        self.add_state("sum_errors", default=torch.tensor(0), dist_reduce_fx="sum")
+        self.add_state("sum_errors", default=torch.tensor(0.0), dist_reduce_fx="sum")
         self.add_state("total", default=torch.tensor(0), dist_reduce_fx="sum")
 
     def update(
@@ -122,20 +128,21 @@ class RMSEMetric(Metric):
 
 class AccuracyMetric(Metric):
     """
-    This might be useless as the feature-mapping inversion cannot be done on the gpu especially since we need to reorder stuff as pandas df.
-    https://torchmetrics.readthedocs.io/en/stable/pages/implement.html
+    Element-wise accuracy.
     https://github.com/Lightning-AI/metrics/blob/master/src/torchmetrics/classification/accuracy.py
     https://github.com/allenai/allennlp/blob/main/allennlp/training/metrics/categorical_accuracy.py
-    TODO: TEST
     """
 
     is_differentiable: bool = False
     higher_is_better: bool = True
     full_state_update: bool = False
 
-    def __init__(self, epsilon: float = EPSILON, **kwargs: Any) -> None:
+    def __init__(
+        self, bin_cols_idx: torch.Tensor, onehot_cols_idx: torch.Tensor, **kwargs: Any
+    ) -> None:
         super().__init__(**kwargs)
-        self.epsilon = epsilon
+        self.bin_cols_idx = bin_cols_idx
+        self.onehot_cols_idx = onehot_cols_idx
         self.add_state("num_correct", default=torch.tensor(0), dist_reduce_fx="sum")
         self.add_state("total", default=torch.tensor(0), dist_reduce_fx="sum")
 
@@ -143,8 +150,6 @@ class AccuracyMetric(Metric):
         self,
         preds: torch.Tensor,
         target: torch.Tensor,
-        bin_cols_idx: torch.Tensor,
-        onehot_cols_idx: torch.Tensor,
         mask: Optional[torch.BoolTensor] = None,
     ):
         # preds, target, bin_cols_idx, onehot_cols_idx, mask = self._input_format(
@@ -152,16 +157,16 @@ class AccuracyMetric(Metric):
         # )
         assert preds.shape == target.shape
 
-        predicted_cats = get_categories(preds, bin_cols_idx, onehot_cols_idx)
-        target_cats = get_categories(target, bin_cols_idx, onehot_cols_idx)
+        predicted_cats = get_categories(preds, self.bin_cols_idx, self.onehot_cols_idx)
+        target_cats = get_categories(target, self.bin_cols_idx, self.onehot_cols_idx)
 
-        correct = predicted_cats.eq(target_cats).to(float)
+        correct = predicted_cats.eq(target_cats).to(int)
         if mask is not None:
-            mask = get_categories(mask, bin_cols_idx, onehot_cols_idx)
+            mask = get_categories(mask, self.bin_cols_idx, self.onehot_cols_idx)
             correct *= ~mask
             count = torch.sum(~mask)
         else:
-            count = target.numel()
+            count = target_cats.numel()
         self.num_correct += torch.sum(correct)
         self.total += count
 
@@ -169,7 +174,7 @@ class AccuracyMetric(Metric):
         return self.num_correct / self.total
 
 
-def MAAPE(
+def CWMAAPE(
     predicted: torch.Tensor,
     target: torch.Tensor,
     mask: Optional[torch.Tensor] = None,
@@ -177,7 +182,7 @@ def MAAPE(
     reduction: str = "mean",
 ) -> torch.Tensor:
     """
-    Mean Arctangent Absolute Percentage Error
+    Mean Arctangent Absolute Percentage Error reduced column-wise.
     MAPE but works around the divide by 0 issue.
     Ref: https://gist.github.com/bshishov/5dc237f59f019b26145648e2124ca1c9
     Note: result is NOT multiplied by 100
@@ -199,14 +204,14 @@ def MAAPE(
     return no_reduce.mean()
 
 
-def RMSE(
+def CWRMSE(
     predicted: torch.Tensor,
     target: torch.Tensor,
     mask: Optional[torch.Tensor] = None,
     reduction: str = "mean",
     normalize: Optional[str] = None,
 ) -> torch.Tensor:
-    """Should work both for torch.Tensor and np.ndarray."""
+    """Column-wise reduction. Should work both for torch.Tensor and np.ndarray."""
     assert predicted.shape == target.shape
     predicted, target, mask = force_np(predicted), force_np(target), force_np(mask)
 

@@ -16,7 +16,7 @@ from torch.nn.utils.rnn import pack_padded_sequence, PackedSequence, pad_packed_
 import pytorch_lightning as pl
 
 from autopopulus.models.utils import (
-    CEMSELoss,
+    CtnCatLoss,
     BatchSwapNoise,
     ReconstructionKLDivergenceLoss,
     ResetSeed,
@@ -29,8 +29,10 @@ from autopopulus.data.transforms import (
     simple_impute_tensor,
 )
 from autopopulus.utils.impute_metrics import (
-    RMSE,
-    MAAPE,
+    CWRMSE,
+    CWMAAPE,
+    MAAPEMetric,
+    RMSEMetric,
     categorical_accuracy,
 )
 from autopopulus.utils.cli_arg_utils import YAMLStringListToList, str2bool
@@ -42,8 +44,11 @@ HiddenAndCellState = Tuple[Tensor, Tensor]
 MuLogVar = Tuple[Tensor, Tensor]
 
 DEFAULT_METRICS = {
-    "RMSE": RMSE,
-    "MAAPE": MAAPE,
+    "CWRMSE": CWRMSE,
+    "CWMAAPE": CWMAAPE,
+    # Element-wise metrics.
+    "EWRMSE": RMSEMetric(),
+    "EWMAAPE": MAAPEMetric(scale_to_01=True),
 }
 
 
@@ -93,7 +98,7 @@ class AEDitto(pl.LightningModule):
         learning_rate: float,
         seed: int,
         l2_penalty: float = 0,
-        lossn: str = "CEMSE",
+        lossn: str = "CEMAAPE",
         optimn: str = "Adam",
         activation: str = "ReLU",
         metrics: Dict[  # SEPARATE FROM LOSS, only for evaluation
@@ -571,10 +576,16 @@ class AEDitto(pl.LightningModule):
         loss_choices = {
             "BCE": nn.BCEWithLogitsLoss(),
             "MSE": nn.MSELoss(),
-            "CEMSE": CEMSELoss(
+            "CEMSE": CtnCatLoss(
                 self.col_idxs_by_type[self.data_version]["continuous"],
                 self.col_idxs_by_type[self.data_version]["binary"],
                 self.col_idxs_by_type[self.data_version]["onehot"],
+            ),
+            "CEMAAPE": CtnCatLoss(
+                self.col_idxs_by_type[self.data_version]["continuous"],
+                self.col_idxs_by_type[self.data_version]["binary"],
+                self.col_idxs_by_type[self.data_version]["onehot"],
+                loss_ctn=MAAPEMetric(scale_to_01=True),
             ),
         }
         assert (
@@ -612,13 +623,13 @@ class AEDitto(pl.LightningModule):
 
     def validate_args(self):
         #### Assertions ####
-        if self.lossn == "CEMSE":
+        if self.lossn == "CEMSE" or self.lossn == "CEMAAPE":
             assert self.col_idxs_by_type[
                 self.data_version
-            ], "Failed to get indices of continuous and categorical columns. Likely failed to pass list of columns and list of continuous columns. This is required for CEMSE loss."
+            ], "Failed to get indices of continuous and categorical columns. Likely failed to pass list of columns and list of continuous columns. This is required for CEMSE and CEMAAPE loss."
             assert (
                 self.datamodule.feature_map != "discretize_continuous"
-            ), "Passed a loss of CEMSE but indicated you discretized the data. These cannot both happen (since if all the data is discretized you want to use BCE loss instead)."
+            ), "Passed a loss of CEMSE or CEMAAPE but indicated you discretized the data. These cannot both happen (since if all the data is discretized you want to use BCE loss instead)."
         # for now do not support vae with categorical features
         # TODO: create VAE prior/likelihood for fully categorical features, or beta-div instead.
         if self.variational:
@@ -630,8 +641,8 @@ class AEDitto(pl.LightningModule):
                 self.datamodule.feature_map == "target_encode_categorical"
             ), "Indicated you wanted to use a variational autoencoder and also have categorical features, but these cannot be used togther."
             assert (
-                self.lossn != "CEMSE"
-            ), "Indicated CEMSE loss which refers to mixed data loss, but also indicated you want to use a variational autoencoder which only support continuous features."
+                self.lossn != "CEMSE" and self.lossn != "CEMAAPE"
+            ), "Indicated CEMSE / CEMAAPE loss which refers to mixed data loss, but also indicated you want to use a variational autoencoder which only support continuous features."
 
         if self.datamodule.feature_map == "discretize_continuous":
             assert (

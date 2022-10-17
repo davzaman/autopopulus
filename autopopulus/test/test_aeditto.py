@@ -14,7 +14,7 @@ from autopopulus.models.dnn import ResetSeed
 from autopopulus.models.utils import (
     BatchSwapNoise,
     BinColumnThreshold,
-    CEMSELoss,
+    CtnCatLoss,
     OnehotColumnThreshold,
     ReconstructionKLDivergenceLoss,
 )
@@ -376,7 +376,7 @@ class TestAEDitto(unittest.TestCase):
     def test_loss(self):
         var = Variable(randn(10, 10), requires_grad=True)
         with self.subTest("CEMSELoss"):
-            loss = CEMSELoss(
+            loss = CtnCatLoss(
                 Tensor([0, 1, 2, 3]).long(),
                 Tensor([4, 5, 6]).long(),
                 Tensor([[7, 8, 9]]).long(),

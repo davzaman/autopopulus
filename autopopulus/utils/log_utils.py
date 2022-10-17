@@ -22,7 +22,7 @@ from tensorflow.core.util.event_pb2 import Event
 
 
 from autopopulus.data import CommonDataModule
-from autopopulus.utils.impute_metrics import MAAPE, RMSE
+from autopopulus.utils.impute_metrics import CWMAAPE, CWRMSE
 
 
 def init_new_logger(fname: Optional[str] = None):
@@ -54,7 +54,7 @@ def log_imputation_performance(
     runtest: bool,
 ):
     """For a given imputation method, logs the performance for the following metrics (matches AE). Assumes results are in order: train, val, test."""
-    metrics = {"RMSE": RMSE, "MAAPE": MAAPE}
+    metrics = {"RMSE": CWRMSE, "MAAPE": CWMAAPE}
     if runtest:
         stages = ["train", "val", "test"]
     else:
