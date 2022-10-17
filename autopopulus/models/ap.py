@@ -176,7 +176,7 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         preds_list = self.inference_trainer.predict(self.ae, dataloader)
         # stack the list of preds from dataloader
         preds = torch.vstack(preds_list).cpu().numpy()
-        columns = dataloader.splits["data"].columns
+        columns = dataloader.dataset.split["data"].columns
 
         # Recover IDs, we use only indices used by the batcher (so if we limit to debug, this still works, even if it's shuffled)
         ids = (
