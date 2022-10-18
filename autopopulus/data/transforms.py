@@ -382,7 +382,6 @@ def invert_target_encoding_tensor(
     combined_onehots_groupby: Optional[Dict[int, int]] = None,
 ) -> Tensor:
     encoded_data = encoded_data.detach().numpy()  # needed for inverse transform sklearn
-    device = encoded_data.device
 
     # this is in collapsed-onehot space
     mapping = mean_to_ordinal_map["mapping"]
@@ -403,9 +402,11 @@ def invert_target_encoding_tensor(
     # explode columns if onehots were flattened
     if combined_onehots_groupby is not None:
         # reorder to match original
-        return onehot_multicategorical_column(combined_onehots_groupby.values())(
-            encoded_data
-        )[original_columns]
+        return torch.tensor(
+            onehot_multicategorical_column(combined_onehots_groupby.values())(
+                encoded_data
+            )[original_columns].values
+        ).float()
 
     # reorder to match original
-    return torch.tensor(encoded_data[original_columns], device=device).float()
+    return torch.tensor(encoded_data[original_columns].values).float()

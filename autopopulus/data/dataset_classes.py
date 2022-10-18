@@ -9,7 +9,7 @@ import regex as re
 from scipy.stats import norm, yulesimon
 
 from category_encoders.target_encoder import TargetEncoder
-from numpy import array, full_like, ndarray, argwhere, nan
+from numpy import array, full_like, ndarray, where, nan
 from pandas import DataFrame, MultiIndex, Index, Series
 from pytorch_lightning import LightningDataModule
 from pyampute import MultivariateAmputation
@@ -525,12 +525,14 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         # useful for target encoding
         if self.dataset_loader.onehot_prefixes is not None:
             self.col_idxs_by_type["original"]["onehot"]: List[List[int]] = [
-                argwhere(self.columns["original"].str.contains(col))
+                where(self.columns["original"].str.contains(col))[0]
                 for col in self.dataset_loader.onehot_prefixes
             ]
             # If its missing argwhere() returns an empty array that i don't want.
             self.col_idxs_by_type["original"]["onehot"] = [
-                item for item in self.col_idxs_by_type["original"]["onehot"] if item
+                item
+                for item in self.col_idxs_by_type["original"]["onehot"]
+                if len(item) > 0
             ]
             # bin vars = categorical columns that are not one-hot encoded
             self.col_idxs_by_type["original"]["binary"] = list(
