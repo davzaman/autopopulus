@@ -1,3 +1,4 @@
+from argparse import ArgumentParser
 from pytorch_lightning import Trainer
 from pytorch_lightning.profiler import SimpleProfiler, AdvancedProfiler, PyTorchProfiler
 from pytorch_lightning.plugins.training_type.ddp import DDPPlugin
@@ -10,14 +11,29 @@ from autopopulus.data import CommonDataModule
 from autopopulus.data.dataset_classes import SimpleDatasetLoader
 from autopopulus.models.ae import AEDitto
 from autopopulus.data.utils import onehot_multicategorical_column
+from autopopulus.utils.cli_arg_utils import YAMLStringListToList
+
+PROFILERS = {
+    "simple": SimpleProfiler(dirpath="profiling-results", filename="simple"),
+    "advanced": AdvancedProfiler(dirpath="profiling-results", filename="advanced"),
+    "pytorch": PyTorchProfiler(dirpath="profiling-results", filename="pytorch"),
+}
 
 if __name__ == "__main__":
     seed = 0
     nsamples = 1028
     nfeatures = 10
     fast_dev_run = True
-
     rng = default_rng(seed)
+
+    p = ArgumentParser()
+    p.add_argument("--profilers", type=str, default=None, action=YAMLStringListToList())
+    args = p.parse_known_args()[0]
+    profilers = args.profilers
+    if profilers is not None:
+        profilers = [PROFILERS[profiler_name] for profiler_name in profilers]
+    else:
+        profilers = [None]
 
     # Make data
     onehot_prefixes = ["multicatA", "multicatB"]
@@ -91,12 +107,7 @@ if __name__ == "__main__":
             os.remove(os.path.join("profiling-results", filename))
         except OSError:
             pass
-    for profiler in [
-        SimpleProfiler(dirpath="profiling-results", filename="simple"),
-        # AdvancedProfiler(dirpath="profiling-results", filename="advanced"),
-        # PyTorchProfiler(dirpath="profiling-results", filename="pytorch"),
-    ]:
-
+    for profiler in profilers:
         trainer = Trainer(
             max_epochs=3,
             fast_dev_run=fast_dev_run,
