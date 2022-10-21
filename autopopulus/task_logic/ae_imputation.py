@@ -11,6 +11,11 @@ from autopopulus.models.ap import AEImputer
 
 
 AE_METHOD_SETTINGS = {
+    "vanilla": {"train": {}},
+    "dae": {"train": {"dropout_corruption": 0.3}},
+    "batchswap": {"train": {"batchswap_corruption": 0.3}},
+    "vae": {"train": {"variational": True}},
+    "dvae": {"train": {"dropout_corruption": 0.3, "variational": True}},
     "ap_new": {
         "data": {
             "scale": True,
