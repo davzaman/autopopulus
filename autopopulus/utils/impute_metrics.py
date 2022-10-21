@@ -118,7 +118,7 @@ class RMSEMetric(Metric):
             squared_error *= ~mask
             count = torch.sum(~mask)
         else:
-            count = target.numel()
+            count = torch.tensor(target.numel(), device=self.device)
         self.sum_errors += torch.sum(squared_error)
         self.total += count
 
