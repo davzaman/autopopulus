@@ -12,7 +12,14 @@
       type: string
     fully-observed:
       required: no
-      type: bool
+    feature-mapping:
+      required: no
+      type: string 
+    percent-missing:
+      required: no
+      type: float
+    amputation-patterns:
+      required: no
 
 # what to do when you run `guild run`
 - operations:
