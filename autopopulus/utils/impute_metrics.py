@@ -12,18 +12,23 @@ from autopopulus.data.constants import PAD_VALUE
 EPSILON = 1e-10
 
 
-def force_np(data: torch.Tensor) -> np.ndarray:
+def force_np(*tensors: torch.Tensor) -> np.ndarray:
     """
     Force to np and force on cpu if computing metrics
     (after loss so doesn't need to be on GPU for backward).
     All post-training metrics should do this.
     """
-    if isinstance(data, pd.DataFrame):
-        return data.values
-    elif isinstance(data, torch.Tensor):
-        if data.device != torch.device("cpu"):
-            data = data.cpu()
-    return data
+    np_data = []
+    for tensor in tensors:
+        if isinstance(tensor, pd.DataFrame):
+            np_data.append(tensor.values)
+        elif isinstance(tensor, torch.Tensor):
+            if tensor.device != torch.device("cpu"):
+                tensor = tensor.cpu()
+            np_data.append(tensor.numpy())
+        else:
+            np_data.append(tensor)
+    return tuple(np_data)
 
 
 def format_tensor(*tensors: torch.Tensor) -> Iterable[torch.Tensor]:
@@ -188,7 +193,7 @@ def CWMAAPE(
     Note: result is NOT multiplied by 100
     """
     assert predicted.shape == target.shape
-    predicted, target, mask = force_np(predicted), force_np(target), force_np(mask)
+    predicted, target, mask = force_np(predicted, target, mask)
 
     predicted = np.ma.masked_array(predicted, mask)
     target = np.ma.masked_array(target, mask)
@@ -213,7 +218,7 @@ def CWRMSE(
 ) -> torch.Tensor:
     """Column-wise reduction. Should work both for torch.Tensor and np.ndarray."""
     assert predicted.shape == target.shape
-    predicted, target, mask = force_np(predicted), force_np(target), force_np(mask)
+    predicted, target, mask = force_np(predicted, target, mask)
 
     predicted = np.ma.masked_array(predicted, mask)
     target = np.ma.masked_array(target, mask)
@@ -249,9 +254,11 @@ def categorical_accuracy(
         predicted_cats = get_categories(predicted, bin_col_idxs, onehot_cols_idx)
         target_cats = get_categories(target, bin_col_idxs, onehot_cols_idx)
 
-        predicted, target, mask = force_np(predicted), force_np(target), force_np(mask)
         if mask is not None:
             mask = get_categories(mask, bin_col_idxs, onehot_cols_idx)
+            predicted_cats, target_cats, mask = force_np(
+                predicted_cats, target_cats, mask
+            )
             predicted_cats = np.ma.masked_array(predicted_cats, mask)
             target_cats = np.ma.masked_array(target_cats, mask)
             accuracy_per_bin = np.ma.mean((predicted_cats == target_cats), axis=0)
