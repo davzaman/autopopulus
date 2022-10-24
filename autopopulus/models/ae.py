@@ -43,16 +43,7 @@ from autopopulus.data.constants import PAD_VALUE
 HiddenAndCellState = Tuple[Tensor, Tensor]
 MuLogVar = Tuple[Tensor, Tensor]
 
-DEFAULT_METRICS = {
-    "CWRMSE": CWRMSE,
-    "CWMAAPE": CWMAAPE,
-    # Element-wise metrics.
-    "EWRMSE": RMSEMetric(),
-    "EWMAAPE": MAAPEMetric(scale_to_01=True),
-}
-
-
-LOSS_CHOICES = ["BCE", "MSE", "CEMSE"]
+LOSS_CHOICES = ["BCE", "MSE", "CEMSE", "CEMAAPE"]
 OPTIM_CHOICES = ["Adam", "SGD"]
 
 
@@ -101,11 +92,12 @@ class AEDitto(pl.LightningModule):
         lossn: str = "CEMAAPE",
         optimn: str = "Adam",
         activation: str = "ReLU",
-        metrics: Dict[  # SEPARATE FROM LOSS, only for evaluation
-            # NOTE: Any should be ... (kwargs) but not supported yet
-            str,
-            Union[Metric, Callable[[Tensor, Tensor, Any], Tensor]],
-        ] = DEFAULT_METRICS,
+        metrics: Optional[  # SEPARATE FROM LOSS, only for evaluation
+            Dict[  # NOTE: Any should be ... (kwargs) but not supported yet
+                str,
+                Union[Metric, Callable[[Tensor, Tensor, Any], Tensor]],
+            ]
+        ] = None,
         replace_nan_with: Optional[Union[int, str]] = None,  # warm start
         mvec: bool = False,
         variational: bool = False,
@@ -126,7 +118,18 @@ class AEDitto(pl.LightningModule):
         self.l2_penalty = l2_penalty
         self.dropout = dropout
         self.activation = activation
-        self.metrics = metrics
+        # load the default, but they need to be initialized inside the module
+        # Ref: https://github.com/Lightning-AI/lightning/issues/4909#issuecomment-736645699
+        if metrics is None:
+            # cw/ew are separate bc cw are only implement in functions, not torchmetric modules.
+            self.cwmetrics = {"CWRMSE": CWRMSE, "CWMAAPE": CWMAAPE}
+            # Element-wise metrics, need to be initialized inside moduledict/list if i want the internal states to be placed on the correct device
+            self.ewmetrics = nn.ModuleDict(
+                {"EWRMSE": RMSEMetric(), "EWMAAPE": MAAPEMetric(scale_to_01=True)}
+            )
+        else:
+            self.cwmetrics = metrics
+            self.ewmetrics = []
         # Other options
         self.replace_nan_with = replace_nan_with
         self.mvec = mvec
@@ -399,33 +402,34 @@ class AEDitto(pl.LightningModule):
     ):
         """Log all metrics whether cat/ctn."""
         # NOTE: if you add too many metrics it will mess up the progress bar
-        for name, metricfn in self.metrics.items():
-            if name == "Accuracy":
-                metricfn = metricfn(
-                    self.col_idxs_by_type[ismapped]["binary"],
-                    self.col_idxs_by_type[ismapped]["onehot"],
-                )
-            self.log(
-                f"impute/{self.data_type_time_dim.name}/{ismapped}/{split}-{name}",
-                metricfn(pred, true),
-                on_step=False,
-                on_epoch=True,
-                prog_bar=False,
-                logger=True,
-                rank_zero_only=True,
-            )
-            # Compute metrics for missing only data
-            missing_only_mask = ~(non_missing_mask.bool())
-            if missing_only_mask.any():
+        for metrics in [self.cwmetrics, self.ewmetrics]:
+            for name, metricfn in metrics.items():
+                if name == "Accuracy":
+                    metricfn = metricfn(
+                        self.col_idxs_by_type[ismapped]["binary"],
+                        self.col_idxs_by_type[ismapped]["onehot"],
+                    )
                 self.log(
-                    f"impute/{self.data_type_time_dim.name}/{ismapped}/{split}-{name}-missingonly",
-                    metricfn(pred, true, missing_only_mask),
+                    f"impute/{self.data_type_time_dim.name}/{ismapped}/{split}-{name}",
+                    metricfn(pred, true),
                     on_step=False,
                     on_epoch=True,
                     prog_bar=False,
                     logger=True,
                     rank_zero_only=True,
                 )
+                # Compute metrics for missing only data
+                missing_only_mask = ~(non_missing_mask.bool())
+                if missing_only_mask.any():
+                    self.log(
+                        f"impute/{self.data_type_time_dim.name}/{ismapped}/{split}-{name}-missingonly",
+                        metricfn(pred, true, missing_only_mask),
+                        on_step=False,
+                        on_epoch=True,
+                        prog_bar=False,
+                        logger=True,
+                        rank_zero_only=True,
+                    )
 
     #######################
     #   Initialization    #
@@ -529,7 +533,7 @@ class AEDitto(pl.LightningModule):
         # Add accuracy for number of bins correctly imputed if everything is discretized
         # Safe to assume "mapped" key exists for these feature maps
         if feature_map == "discretize_continuous":
-            self.metrics["Accuracy"] = categorical_accuracy
+            self.cwmetrics["Accuracy"] = categorical_accuracy
             self.feature_map_inversion = lambda data_tensor: invert_discretize_tensor(
                 data_tensor,
                 self.groupby["mapped"]["discretized_ctn_cols"]["data"],
@@ -869,5 +873,11 @@ class AEDitto(pl.LightningModule):
             type=Optional[float],
             default=None,
             help="If implementing a denoising autoencoder, what percentage of corruption at the input, swapping out values as noise.",
+        )
+        p.add_argument(
+            "--replace-nan-with",
+            type=Union[str, int],
+            default=0,
+            help="How to do warm-start to autoencoder imputation. Simple imputation or fill with an integer value.",
         )
         return p
