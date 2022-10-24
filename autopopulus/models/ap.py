@@ -138,7 +138,7 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
             # precision=16,
             enable_checkpointing=False,
             callbacks=callbacks,
-            profiler="simple",  # or "advanced" which is more granular , this is too verbose
+            # profiler="simple",  # or "advanced" which is more granular , this is too verbose
             fast_dev_run=fast_dev_run,  # For debugging
         )
         return trainer

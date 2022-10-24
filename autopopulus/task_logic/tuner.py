@@ -24,7 +24,7 @@ from autopopulus.data import CommonDataModule
 TUNE_LOG_DIR = "tune_results"
 
 
-def create_autoencoder_with_tuning(
+def create_autoencoder(
     args: Namespace, data: CommonDataModule, settings: Dict
 ) -> AEImputer:
     logdir = get_logdir(args)

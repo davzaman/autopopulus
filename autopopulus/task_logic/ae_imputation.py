@@ -6,7 +6,7 @@ from pytorch_lightning.utilities import rank_zero_info, rank_zero_warn
 
 ## Local Modules
 from autopopulus.data import CommonDataModule
-from autopopulus.task_logic.tuner import create_autoencoder_with_tuning
+from autopopulus.task_logic.tuner import create_autoencoder
 from autopopulus.models.ap import AEImputer
 
 
@@ -116,7 +116,7 @@ def ae_imputation_logic(
         ae_imputer = AEImputer.from_checkpoint(args)
         data.setup("fit")
     else:
-        ae_imputer = create_autoencoder_with_tuning(args, data, settings)
+        ae_imputer = create_autoencoder(args, data, settings)
         # need to setup data since it was setup in each tune run, but not this object
         data.setup("fit")
 
