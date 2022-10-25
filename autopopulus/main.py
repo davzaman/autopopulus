@@ -13,7 +13,6 @@ from rich import (
 )  # https://rich.readthedocs.io/en/stable/markup.html#console-markup
 import warnings
 
-from data.types import DataT  # Filter warnings
 
 warnings.filterwarnings(action="ignore", category=DataConversionWarning)
 warnings.filterwarnings(action="ignore", category=FutureWarning)
@@ -32,7 +31,7 @@ from autopopulus.utils.utils import (
     seed_everything,
     should_ampute,
 )
-from autopopulus.datasets import DATA_LOADERS, CureCKDDataLoader
+from autopopulus.datasets import DATA_LOADERS, CureCKDDataLoader, CrrtDataLoader
 from autopopulus.data import CommonDataModule
 from autopopulus.models.ap import AEImputer
 from autopopulus.task_logic import (
@@ -43,6 +42,7 @@ from autopopulus.task_logic import (
 from autopopulus.task_logic.ae_imputation import AE_METHOD_SETTINGS, ae_imputation_logic
 from autopopulus.models.ae import AEDitto
 from autopopulus.models.prediction_models import Predictor
+from autopopulus.data.types import DataT  # Filter warnings
 
 install(theme="solarized-dark")
 
@@ -133,13 +133,15 @@ def init_cli_args() -> Namespace:
         type=str,
         # required=True,
         default="cure_ckd",
-        choices=["cure_ckd", "covid_ckd", "mimic3", "synth"],
+        choices=["cure_ckd", "crrt"],
         help="which dataset to use",
     )
 
     if "cure_ckd" in sys.argv:
         p = CureCKDDataLoader.add_data_args(p)
-    # MIMIC
+    if "crrt" in sys.argv:
+        # MIMIC
+        p = CrrtDataLoader.add_data_args(p)
     p.add_argument(
         "--mimic-limit",
         type=int,

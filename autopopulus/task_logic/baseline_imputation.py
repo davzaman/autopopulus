@@ -8,9 +8,11 @@ from autopopulus.utils.log_utils import (
     get_summarywriter,
     log_imputation_performance,
 )
-from autopopulus.task_logic import baseline_static_imputation
+from autopopulus.task_logic import (
+    baseline_static_imputation,
+    baseline_longitudinal_imputation,
+)
 from autopopulus.data import CommonDataModule
-from task_logic import baseline_longitudinal_imputation
 
 
 def baseline_imputation_logic(

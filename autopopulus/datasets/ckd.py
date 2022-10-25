@@ -5,7 +5,6 @@ https://github.com/davzaman/cure_ckd_preprocess
 
 from argparse import ArgumentParser
 import pickle
-import sys
 from typing import Dict, List, Optional, Tuple, Union
 import regex as re
 from os.path import join
@@ -522,10 +521,12 @@ class CureCKDDataLoader(AbstractDatasetLoader):
 
 # Testing
 if __name__ == "__main__":
-    from main import init_cli_args
-    from utils.cli_arg_utils import load_cli_args
+    from autopopulus.main import init_cli_args
+    from autopopulus.utils.cli_arg_utils import load_cli_args
+    import sys
 
     load_cli_args()
     args = init_cli_args()
+    sys.argv[sys.argv.index("--dataset") + 1] = "crrt"
     data_loader = CureCKDDataLoader.from_argparse_args(args)
-    X, y = data_loader.load_features_and_labels(args.longitudinal)
+    X, y = data_loader.load_features_and_labels(args.data_type_time_dim)
