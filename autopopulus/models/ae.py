@@ -864,13 +864,13 @@ class AEDitto(pl.LightningModule):
         )
         p.add_argument(
             "--dropout-corruption",
-            type=Optional[float],
+            type=float,
             default=None,
             help="If implementing a denoising autoencoder, what percentage of corruption at the input using dropout (noise is 0's).",
         )
         p.add_argument(
             "--batchswap-corruption",
-            type=Optional[float],
+            type=float,
             default=None,
             help="If implementing a denoising autoencoder, what percentage of corruption at the input, swapping out values as noise.",
         )

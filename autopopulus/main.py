@@ -66,7 +66,7 @@ def main():
     load_cli_args()
     args = init_cli_args()
     # if args.verbose:
-    # print(args)
+    #     print(args)
     seed_everything(args.seed)
 
     init_new_logger()
@@ -140,7 +140,6 @@ def init_cli_args() -> Namespace:
     if "cure_ckd" in sys.argv:
         p = CureCKDDataLoader.add_data_args(p)
     if "crrt" in sys.argv:
-        # MIMIC
         p = CrrtDataLoader.add_data_args(p)
     p.add_argument(
         "--mimic-limit",
