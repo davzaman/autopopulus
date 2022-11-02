@@ -14,14 +14,13 @@ def load_cli_args(args_options_path: str = "options.yml"):
     """
     Modify command line args if desired, or load from YAML file.
     """
-    if len(sys.argv) <= 3:
-        if isfile(args_options_path):  # if file exists
-            with open(args_options_path, "r") as f:
-                res = yaml.safe_load(f)
+    if isfile(args_options_path):  # if file exists
+        with open(args_options_path, "r") as f:
+            res = yaml.safe_load(f)
 
-            sys.argv = [sys.argv[0]]
-            for k, v in res.items():
-                sys.argv += [f"--{k}", str(v)]
+        # sys.argv = [sys.argv[0]]
+        for k, v in res.items():
+            sys.argv += [f"--{k}", str(v)]
 
 
 def parse_guild_args(obj, base_prefix=""):
