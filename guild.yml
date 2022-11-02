@@ -12,7 +12,7 @@
       type: string
     fully-observed:
       required: no
-    feature-mapping:
+    feature-map:
       required: no
       type: string 
     percent-missing:
@@ -47,8 +47,8 @@
         $include:
           - high-level-flags
       steps:
-        - run: train_predict
-        - run: test
+        - run: train_predict method=${method} experiment-name=${experiment-name} fully-observed=${fully-observed} feature-map=${feature-map} percent-missing=${percent-missing} amputation-patterns=${amputation-patterns}
+        - run: test method=${method} experiment-name=${experiment-name} fully-observed=${fully-observed} feature-map=${feature-map} percent-missing=${percent-missing} amputation-patterns=${amputation-patterns}
 
     train_predict:
       description: Train an imputer and run predictions.

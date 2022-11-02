@@ -47,7 +47,7 @@ def format_tensor(*tensors: torch.Tensor) -> Iterable[torch.Tensor]:
 class MAAPEMetric(Metric):
     """
     Element-wise MAAPE.
-    This might be useless as the feature-mapping inversion cannot be done on the gpu especially since we need to reorder stuff as pandas df.
+    This might be useless as the feature-map inversion cannot be done on the gpu especially since we need to reorder stuff as pandas df.
     https://torchmetrics.readthedocs.io/en/stable/pages/implement.html
     https://github.com/Lightning-AI/metrics/tree/master/src/torchmetrics/regression.mape.py
     https://github.com/allenai/allennlp/tree/main/allennlp/training/metrics
@@ -94,7 +94,7 @@ class MAAPEMetric(Metric):
 class RMSEMetric(Metric):
     """
     Element-wise RMSE.
-    This might be useless as the feature-mapping inversion cannot be done on the gpu especially since we need to reorder stuff as pandas df.
+    This might be useless as the feature-map inversion cannot be done on the gpu especially since we need to reorder stuff as pandas df.
     https://torchmetrics.readthedocs.io/en/stable/pages/implement.html
     https://github.com/Lightning-AI/metrics/blob/master/src/torchmetrics/regression/mse.py
     https://github.com/allenai/allennlp/tree/main/allennlp/training/metrics

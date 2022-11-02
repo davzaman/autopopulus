@@ -36,7 +36,7 @@ def seed_everything(seed: int):
     # https://github.com/Lightning-AI/lightning/issues/4420#issuecomment-926495956
     # Problem with running on 4 gpus
     # os.environ["NCCL_P2P_DISABLE"] = "1"
-    os.environ["NCCL_DEBUG"] = "WARN"
+    # os.environ["NCCL_DEBUG"] = "WARN"
     # os.environ["PL_TORCH_DISTRIBUTED_BACKEND"] = "gloo"
 
 
