@@ -169,16 +169,18 @@ class CombineOnehots(TransformerMixin, BaseEstimator):
 
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
         """."""
-        combined_onehots = (
-            X.groupby(self.onehot_groupby, axis=1)
-            .idxmax(1)  # replace value with the column name of the max
-            .apply(lambda col: col.str.replace(f"{col.name}_", ""))  # strip prefix
-        )
-        # combine with the rest of the data and then drop old onehot cols
-        new_df = pd.concat([X, combined_onehots], axis=1).drop(
-            self.onehot_groupby.keys(), axis=1
-        )
-        return new_df
+        if self.onehot_groupby:
+            combined_onehots = (
+                X.groupby(self.onehot_groupby, axis=1)
+                .idxmax(1)  # replace value with the column name of the max
+                .apply(lambda col: col.str.replace(f"{col.name}_", ""))  # strip prefix
+            )
+            # combine with the rest of the data and then drop old onehot cols
+            new_df = pd.concat([X, combined_onehots], axis=1).drop(
+                self.onehot_groupby.keys(), axis=1
+            )
+            return new_df
+        return X
 
 
 class UniformProbabilityAcrossNans(TransformerMixin, BaseEstimator):
@@ -312,6 +314,48 @@ class Discretizer(TransformerMixin, BaseEstimator):
         # df map from numerical encoding to str representing bin ranges
         df.replace(self.map_dict, inplace=True)
         return df
+
+
+class ScaleContinuous(TransformerMixin, BaseEstimator):
+    """
+    Wrapper class to ColumnTransformer.
+    Allows us to also return the feature_names_out which are out of order.
+    When we return to pandas we can use this to return to original order.
+    TODO: write tests
+    """
+
+    def __init__(self, orig_cols: List[str], *args, **kwargs) -> None:
+        super().__init__()
+        self.orig_cols = orig_cols
+        self.column_tsfm = ColumnTransformer(*args, **kwargs)
+
+    def fit(self, X: np.ndarray, y: pd.Series):
+        self.column_tsfm.fit(X, y)
+        return self
+
+    def transform(self, X: np.ndarray) -> Tuple[np.ndarray, List[str]]:
+        Xt = self.column_tsfm.transform(X)
+        # without original cols it's going to have meaningless feature names like x7
+        return (Xt, self.column_tsfm.get_feature_names_out(self.orig_cols))
+
+
+class ReturnToPandas(TransformerMixin, BaseEstimator):
+    """Reformat numpy array back to pandas after scaling."""
+
+    def __init__(self, orig_cols: Union[List[str], pd.Index]) -> None:
+        super().__init__()
+        self.orig_cols = orig_cols
+
+    def fit(self, X: np.ndarray, y: pd.Series) -> "ReturnToPandas":
+        self.orig_index = y.index
+        return self
+
+    def transform(
+        self, scale_continuous_output: Tuple[np.ndarray, List[str]]
+    ) -> pd.DataFrame:
+        X, out_of_order_cols = scale_continuous_output
+        df = pd.DataFrame(X, columns=out_of_order_cols, index=self.orig_index)
+        return df[self.orig_cols]
 
 
 ##############################

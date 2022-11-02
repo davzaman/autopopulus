@@ -485,6 +485,17 @@ class TestTransforms(unittest.TestCase):
         onehot_groupby: Dict[int, str],
         combined_groupby: Dict[int, str],
     ) -> pd.DataFrame:
+        with self.subTest("No Onehots"):
+            # Should do nothing
+            combine = CombineOnehots({}, df.columns)
+            combine.fit(df, y)
+            self.assertEqual(combine.combined_onehot_groupby, {})
+            self.assertEqual(combine.nfeatures, len(df.columns))
+            transformed = combine.transform(df)[df.columns]
+            pd.testing.assert_frame_equal(
+                transformed.astype(float), df, check_dtype=False
+            )
+
         combine = CombineOnehots(onehot_groupby, df.columns)
 
         # Test groupby and nfeatures is right after fit

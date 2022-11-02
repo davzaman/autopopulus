@@ -42,6 +42,8 @@ from autopopulus.data.types import (
 from autopopulus.data.transforms import (
     CombineOnehots,
     Discretizer,
+    ReturnToPandas,
+    ScaleContinuous,
     UniformProbabilityAcrossNans,
     identity,
 )
@@ -244,7 +246,7 @@ class CommonDataset(Dataset):
         The structure matches `split`, `split_ids`, but NOT `transforms`.
         Transforms has "original" transforms e.g. scaling that should be applied whether or not we are feature mapping.
         """
-        transformed_data = {"original": {}, "mapped": {}}
+        transformed_data = {data_version: {} for data_version in self.transforms.keys()}
         for data_version in transformed_data.keys():
             for (
                 data_role,
@@ -692,7 +694,8 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
                 steps.append(
                     (
                         "continuous-scale",
-                        ColumnTransformer(
+                        ScaleContinuous(
+                            self.columns["original"],
                             [  # (name, transformer, columns) tuples
                                 (
                                     "scale",
@@ -702,18 +705,12 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
                                 )
                             ],
                             remainder="passthrough",
+                            verbose_feature_names_out=False,
                         ),
                     ),
                 )
                 steps.append(
-                    (
-                        "enforce-pandas",
-                        FunctionTransformer(
-                            lambda np_array: DataFrame(
-                                np_array, columns=self.columns["original"]
-                            )
-                        ),
-                    )
+                    ("enforce-pandas", ReturnToPandas(self.columns["original"]))
                 )
 
             if feature_map == "discretize_continuous":
@@ -816,7 +813,7 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
                     "ground_truth": self._get_original_transform(ground_truth_pipeline),
                 },
             }
-            if self.feature_map:
+            if self.feature_map is not None:
                 self.transforms["mapped"] = {
                     "data": data_pipeline.transform,
                     "ground_truth": ground_truth_pipeline.transform,
