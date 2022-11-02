@@ -80,7 +80,7 @@ def main():
         # Assumes dataset name is kosher from argparse
         data_loader = DATA_LOADERS[args.dataset].from_argparse_args(args)
         data_settings = (
-            AE_METHOD_SETTINGS[args.method]["data"]
+            AE_METHOD_SETTINGS[args.method].get("data", {})
             if args.method in AE_METHOD_SETTINGS
             else baseline_static_imputation.BASELINE_DATA_SETTINGS
         )
