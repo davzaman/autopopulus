@@ -358,13 +358,14 @@ class CureCKDDataLoader(AbstractDatasetLoader):
         self, df: pd.DataFrame, cat_cols_to_encode: List[str]
     ) -> pd.DataFrame:
         """Creates dummies for passed in columns. Drops them from the global var keeping track of what categorical columns are available."""
+        onehots = pd.get_dummies(df[cat_cols_to_encode])
+
         for multicat_col in cat_cols_to_encode:
             self.categorical_cols.remove(multicat_col)
+        self.categorical_cols += onehots.columns.tolist()
+
         return pd.concat(
-            [
-                df.drop(cat_cols_to_encode, axis=1),
-                pd.get_dummies(df[cat_cols_to_encode]),
-            ],
+            [df.drop(cat_cols_to_encode, axis=1), onehots],
             axis=1,
         )
 
