@@ -1,6 +1,4 @@
-import inspect
 import cloudpickle
-import sys
 from typing import Optional, Union
 from argparse import ArgumentParser, Namespace
 import pandas as pd
@@ -17,6 +15,7 @@ from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.plugins.training_type.ddp import DDPPlugin
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.plugins.training_type.ddp import DDPPlugin
+from pytorch_lightning.utilities.rank_zero import rank_zero_only
 
 # Local
 from autopopulus.models.ae import AEDitto
@@ -146,9 +145,13 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
     def fit(self, data: CommonDataModule):
         """Trains the autoencoder for imputation."""
         self._fit(data)
-
+        self._save_test_data(data)
+        return self
+    
+    @rank_zero_only
+    def _save_test_data(self, data:CommonDataModule):
         if self.runtest:  # Serialize test dataloader to run in separate script
-            # Serialize data with torch but serialize model with plightning
+        # Serialize data with torch but serialize model with plightning
             torch.save(
                 data.test_dataloader(),
                 get_serialized_model_path(
@@ -156,7 +159,6 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
                 ),
                 pickle_module=cloudpickle,
             )
-        return self
 
     def _fit(self, data: CommonDataModule):
         """Trains the autoencoder for imputation."""
