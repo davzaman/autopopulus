@@ -33,9 +33,10 @@ def seed_everything(seed: int):
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:2"
 
     # https://github.com/pytorch/pytorch/issues/1637#issuecomment-730423426
+    # https://github.com/Lightning-AI/lightning/issues/4420#issuecomment-926495956
     # Problem with running on 4 gpus
     # os.environ["NCCL_P2P_DISABLE"] = "1"
-    # os.environ["NCCL_DEBUG"] = "WARN"
+    os.environ["NCCL_DEBUG"] = "WARN"
     # os.environ["PL_TORCH_DISTRIBUTED_BACKEND"] = "gloo"
 
 
