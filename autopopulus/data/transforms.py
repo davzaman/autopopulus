@@ -12,12 +12,10 @@ from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
 import torch
 
-from category_encoders.target_encoder import TargetEncoder
-
 # from lib.MDLPC.MDLP import MDLP_Discretizer
 
 from autopopulus.data.mdl_discretization import ColInfoDict, MDLDiscretizer
-from autopopulus.data.utils import onehot_multicategorical_column
+from autopopulus.data.utils import onehot_multicategorical_column, enforce_numpy
 from autopopulus.data.constants import PAD_VALUE
 
 
@@ -319,8 +317,7 @@ class Discretizer(TransformerMixin, BaseEstimator):
 class ScaleContinuous(TransformerMixin, BaseEstimator):
     """
     Wrapper class to ColumnTransformer.
-    Allows us to also return the feature_names_out which are out of order.
-    When we return to pandas we can use this to return to original order.
+    Allows us to also return to pandas and restore original column order.
     TODO: write tests
     """
 
@@ -330,31 +327,15 @@ class ScaleContinuous(TransformerMixin, BaseEstimator):
         self.column_tsfm = ColumnTransformer(*args, **kwargs)
 
     def fit(self, X: np.ndarray, y: pd.Series):
-        self.column_tsfm.fit(X, y)
+        # Enforce numpy so we don't get "UserWarning: X does not have valid feature names, but MinMaxScaler was fitted with feature names"
+        self.column_tsfm.fit(enforce_numpy(X), y)
         return self
 
-    def transform(self, X: np.ndarray) -> Tuple[np.ndarray, List[str]]:
-        Xt = self.column_tsfm.transform(X)
+    def transform(self, X: pd.DataFrame) -> Tuple[np.ndarray, List[str], pd.Index]:
+        Xt = self.column_tsfm.transform(enforce_numpy(X))
         # without original cols it's going to have meaningless feature names like x7
-        return (Xt, self.column_tsfm.get_feature_names_out(self.orig_cols))
-
-
-class ReturnToPandas(TransformerMixin, BaseEstimator):
-    """Reformat numpy array back to pandas after scaling."""
-
-    def __init__(self, orig_cols: Union[List[str], pd.Index]) -> None:
-        super().__init__()
-        self.orig_cols = orig_cols
-
-    def fit(self, X: np.ndarray, y: pd.Series) -> "ReturnToPandas":
-        self.orig_index = y.index
-        return self
-
-    def transform(
-        self, scale_continuous_output: Tuple[np.ndarray, List[str]]
-    ) -> pd.DataFrame:
-        X, out_of_order_cols = scale_continuous_output
-        df = pd.DataFrame(X, columns=out_of_order_cols, index=self.orig_index)
+        out_of_order_cols = self.column_tsfm.get_feature_names_out(self.orig_cols)
+        df = pd.DataFrame(Xt, columns=out_of_order_cols, index=X.index)
         return df[self.orig_cols]
 
 

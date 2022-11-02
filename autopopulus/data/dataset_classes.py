@@ -31,6 +31,7 @@ from autopopulus.data.constants import (
     PAD_VALUE,
     PATIENT_ID,
 )
+from autopopulus.data.utils import enforce_numpy
 from autopopulus.data.types import (
     DataColumn,
     DataT,
@@ -42,7 +43,6 @@ from autopopulus.data.types import (
 from autopopulus.data.transforms import (
     CombineOnehots,
     Discretizer,
-    ReturnToPandas,
     ScaleContinuous,
     UniformProbabilityAcrossNans,
     identity,
@@ -65,11 +65,6 @@ def abstract_attribute(obj: Callable[[Any], R] = None) -> R:
         _obj = DummyAttribute()
     _obj.__is_abstract_attribute__ = True
     return cast(R, _obj)
-
-
-def enforce_numpy(df: DataT) -> ndarray:
-    # enforce numpy is numeric with df*1 (fixes bools)
-    return (df * 1).values if isinstance(df, DataFrame) else (df * 1)
 
 
 class AbstractDatasetLoader(ABC, CLIInitialized):
@@ -252,16 +247,19 @@ class CommonDataset(Dataset):
                 data_role,
                 split_ids,
             ) in self.split_ids.items():  # ["data", "ground_truth"]
-                df = self.split[data_role].loc[split_ids[index]]
+                # a list of indices will ensure I get back a DF (2d array) whether im asking for just 1 index
+                df = self.split[data_role].loc[[split_ids[index]]]
                 if self.transforms:
                     transform = self.transforms[data_version][data_role]
                     # May not exist if no non-discretization steps for example
                     if transform:
                         if self.longitudinal:
-                            df = transform(df.values)
+                            # df = transform(df.values)
+                            df = transform(df)
                         else:
                             # minmaxscaler needs a 2d array even if its just 1 row (for static)
-                            df = transform(df.values.reshape(1, -1))
+                            # df = transform(df.values.reshape(1, -1))
+                            df = transform(df)
                 # go back to 1D so we can accumulate a batch properly
                 # df = self.enforce_numpy(df).squeeze()
                 transformed_data[data_version][data_role] = Tensor(
@@ -683,14 +681,7 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         ) -> List[TransformerMixin]:
             steps = []
             if scale:
-                # Scale continuous features to [0, 1].  Can produce negative numbers.
-                # Enforce numpy so we don't get "UserWarning: X does not have valid feature names, but MinMaxScaler was fitted with feature names"
-                steps.append(
-                    (
-                        "enforce-numpy",
-                        FunctionTransformer(enforce_numpy),
-                    )
-                )
+                # Scale continuous features. Can produce negative numbers.
                 steps.append(
                     (
                         "continuous-scale",
@@ -708,9 +699,6 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
                             verbose_feature_names_out=False,
                         ),
                     ),
-                )
-                steps.append(
-                    ("enforce-pandas", ReturnToPandas(self.columns["original"]))
                 )
 
             if feature_map == "discretize_continuous":

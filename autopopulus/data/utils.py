@@ -4,6 +4,13 @@ from numpy import ndarray, nan
 from torch import Tensor
 from torch.utils.data import DataLoader, TensorDataset
 
+from autopopulus.data.types import DataT
+
+
+def enforce_numpy(df: DataT) -> ndarray:
+    # enforce numpy is numeric with df*1 (fixes bools)
+    return (df * 1).values if isinstance(df, DataFrame) else (df * 1)
+
 
 def onehot_multicategorical_column(
     prefixes: Union[str, List[str]],
