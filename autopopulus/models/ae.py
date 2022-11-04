@@ -453,6 +453,7 @@ class AEDitto(pl.LightningModule):
             "groupby": self.groupby,
             "columns": self.columns,
             "discretizations": self.discretizations,
+            "inverse_target_encode_map": self.inverse_target_encode_map,
             "col_idxs_by_type": self.col_idxs_by_type,
             # cannot pickle lambda fns, save the feature_map name instead
             "feature_map": self.datamodule.feature_map,
@@ -516,6 +517,7 @@ class AEDitto(pl.LightningModule):
         self.groupby = self.datamodule.groupby
         self.columns = self.datamodule.columns
         self.discretizations = self.datamodule.discretizations
+        self.inverse_target_encode_map = self.datamodule.inverse_target_encode_map
 
         # used for BCE+MSE los, -> cat cols the VAE Loss,etc which require tensor
         # We still need this if we're loading the ae from a file and not calling fit
@@ -551,7 +553,7 @@ class AEDitto(pl.LightningModule):
             self.feature_map_inversion = (
                 lambda data_tensor: invert_target_encoding_tensor(
                     data_tensor,
-                    self.datamodule.inverse_target_encode_map,
+                    self.inverse_target_encode_map,
                     self.columns["mapped"],
                     self.columns["original"],
                     groupby,
@@ -779,7 +781,8 @@ class AEDitto(pl.LightningModule):
         """
         # get unmapped versions of everything
         if original_data is not None and original_ground_truth is not None:
-            reconstruct_batch = self.feature_map_inversion(reconstruct_batch)
+            if self.feature_map_inversion is not None:
+                reconstruct_batch = self.feature_map_inversion(reconstruct_batch)
             data = original_data
             ground_truth = original_ground_truth
             # re-compute non_missing_mask
