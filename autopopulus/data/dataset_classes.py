@@ -43,7 +43,7 @@ from autopopulus.data.types import (
 from autopopulus.data.transforms import (
     CombineOnehots,
     Discretizer,
-    ScaleContinuous,
+    ColTransformPandas,
     UniformProbabilityAcrossNans,
     identity,
 )
@@ -684,19 +684,18 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
                 # Scale continuous features. Can produce negative numbers.
                 steps.append(
                     (
-                        "continuous-scale",
-                        ScaleContinuous(
+                        "scale_continuous",
+                        ColTransformPandas(
                             self.columns["original"],
-                            [  # (name, transformer, columns) tuples
+                            transformers=[  # (name, transformer, columns) tuples
                                 (
                                     "scale",
                                     # https://stats.stackexchange.com/a/328988/273369
-                                    MinMaxScaler(feature_range=(-1, 1)),
+                                    # MinMaxScaler(feature_range=(-1, 1)),
+                                    MinMaxScaler(feature_range=(0, 1)),
                                     self.col_idxs_by_type["original"]["continuous"],
                                 )
                             ],
-                            remainder="passthrough",
-                            verbose_feature_names_out=False,
                         ),
                     ),
                 )
@@ -753,9 +752,9 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
 
                 steps.append(
                     (
-                        "target_encode",
+                        "target_encode_categorical",
                         TargetEncoder(cols=intermediate_categorical_cols),
-                    )
+                    ),
                 )
 
             if uniform_prob:
@@ -827,7 +826,7 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
                 "discretize",
                 "uniform_probability_across_nans",
                 "combine_onehots",
-                "target_encode",
+                "target_encode_categorical",
             }
         ]
         if steps:
@@ -952,19 +951,17 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
             )
 
         elif self.feature_map == "target_encode_categorical":
-            target_encoder = data_pipeline.named_steps["target_encode"]
+            target_encoder = data_pipeline.named_steps["target_encode_categorical"]
             # TODO: should there be data and ground_truth?
             self.inverse_target_encode_map: Dict[
-                # the transform function or
-                # col_index: {encoded_float: ordinal#}
+                # the transform function or col_index: {ordinal#: encoded_float}
                 str,
-                Union[Callable, Dict[int, Dict[float, int]]],
+                Union[Callable, Dict[int, Dict[int, float]]],
             ] = {
                 "inverse_transform": target_encoder.ordinal_encoder.inverse_transform,
                 "mapping": {
-                    self.columns["mapped"].get_loc(col): {
-                        v: k for k, v in col_mapping.items()
-                    }
+                    # we cannot invert the mapping since multiple ordinal values might be mapped to the same encoded float
+                    self.columns["mapped"].get_loc(col): col_mapping.to_dict()
                     for col, col_mapping in target_encoder.mapping.items()
                 },
             }

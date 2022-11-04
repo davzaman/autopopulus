@@ -298,7 +298,7 @@ class TestCommonDataModule(unittest.TestCase):
                                     data_name
                                 ].__self__.named_steps.keys()
                             ),
-                            ["enforce-numpy", "continuous-scale", "enforce-pandas"],
+                            ["scale_continuous"],
                         )
 
                     np.testing.assert_array_equal(
@@ -413,7 +413,7 @@ class TestCommonDataModule(unittest.TestCase):
                                     data_name
                                 ].__self__.named_steps.keys()
                             ),
-                            ["combine_onehots", "target_encode"],
+                            ["combine_onehots", "target_encode_categorical"],
                         )
 
                         # The onehot_groupby and columns passed to combineonehots should be in original space
@@ -434,7 +434,7 @@ class TestCommonDataModule(unittest.TestCase):
                         # The categorical columns for the targetencoder should be in combined space
                         passed_cat_cols = (
                             data.transforms["mapped"][data_name]
-                            .__self__.named_steps["target_encode"]
+                            .__self__.named_steps["target_encode_categorical"]
                             .cols
                         )
                         np.testing.assert_array_equal(
@@ -463,7 +463,7 @@ class TestCommonDataModule(unittest.TestCase):
                                 data_name
                             ].__self__.named_steps.keys()
                         ),
-                        ["enforce-numpy", "continuous-scale", "enforce-pandas"],
+                        ["scale_continuous"],
                     )
                 for data_name in ["data", "ground_truth"]:
                     self.assertEqual(
@@ -473,11 +473,9 @@ class TestCommonDataModule(unittest.TestCase):
                             ].__self__.named_steps.keys()
                         ),
                         [
-                            "enforce-numpy",
-                            "continuous-scale",
-                            "enforce-pandas",
+                            "scale_continuous",
                             "combine_onehots",
-                            "target_encode",
+                            "target_encode_categorical",
                         ],
                     )
 
@@ -584,7 +582,7 @@ class TestCommonDataModule(unittest.TestCase):
                                     data_name
                                 ].__self__.named_steps.keys()
                             ),
-                            ["enforce-numpy", "continuous-scale", "enforce-pandas"],
+                            ["scale_continuous"],
                         )
 
                     np.testing.assert_array_equal(
@@ -677,13 +675,13 @@ class TestCommonDataModule(unittest.TestCase):
                                     data_name
                                 ].__self__.named_steps.keys()
                             ),
-                            ["target_encode"],
+                            ["target_encode_categorical"],
                         )
 
                         # The categorical columns for the targetencoder should be the same as the categorical cols for original data
                         passed_cat_cols = (
                             data.transforms["mapped"][data_name]
-                            .__self__.named_steps["target_encode"]
+                            .__self__.named_steps["target_encode_categorical"]
                             .cols
                         )
                         self.assertEqual(passed_cat_cols, hypothesis["cat_cols"])
@@ -708,7 +706,7 @@ class TestCommonDataModule(unittest.TestCase):
                                 data_name
                             ].__self__.named_steps.keys()
                         ),
-                        ["enforce-numpy", "continuous-scale", "enforce-pandas"],
+                        ["scale_continuous"],
                     )
                 for data_name in ["data", "ground_truth"]:
                     self.assertEqual(
@@ -718,10 +716,8 @@ class TestCommonDataModule(unittest.TestCase):
                             ].__self__.named_steps.keys()
                         ),
                         [
-                            "enforce-numpy",
-                            "continuous-scale",
-                            "enforce-pandas",
-                            "target_encode",
+                            "scale_continuous",
+                            "target_encode_categorical",
                         ],
                     )
 

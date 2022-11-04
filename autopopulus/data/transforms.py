@@ -314,25 +314,37 @@ class Discretizer(TransformerMixin, BaseEstimator):
         return df
 
 
-class ScaleContinuous(TransformerMixin, BaseEstimator):
+class ColTransformPandas(TransformerMixin, BaseEstimator):
     """
-    Wrapper class to ColumnTransformer.
+    Wrapper class to ColumnTransformer to scale only continuous columns.
     Allows us to also return to pandas and restore original column order.
     TODO: write tests
     """
 
-    def __init__(self, orig_cols: List[str], *args, **kwargs) -> None:
+    def __init__(
+        self, orig_cols: List[str], enforce_numpy: bool = False, *args, **kwargs
+    ) -> None:
         super().__init__()
         self.orig_cols = orig_cols
-        self.column_tsfm = ColumnTransformer(*args, **kwargs)
+        self.enforce_numpy = enforce_numpy  # TODO: might not be necessary
+        self.column_tsfm = ColumnTransformer(
+            *args, remainder="passthrough", verbose_feature_names_out=False, **kwargs
+        )
 
     def fit(self, X: np.ndarray, y: pd.Series):
         # Enforce numpy so we don't get "UserWarning: X does not have valid feature names, but MinMaxScaler was fitted with feature names"
-        self.column_tsfm.fit(enforce_numpy(X), y)
+        if self.enforce_numpy:
+            self.column_tsfm.fit(enforce_numpy(X), y)
+        else:
+            self.column_tsfm.fit(X, y)
+
         return self
 
     def transform(self, X: pd.DataFrame) -> Tuple[np.ndarray, List[str], pd.Index]:
-        Xt = self.column_tsfm.transform(enforce_numpy(X))
+        if self.enforce_numpy:  # Need to retain access to X as df so don't overwrite
+            Xt = self.column_tsfm.transform(enforce_numpy(X))
+        else:
+            Xt = self.column_tsfm.transform(X)
         # without original cols it's going to have meaningless feature names like x7
         out_of_order_cols = self.column_tsfm.get_feature_names_out(self.orig_cols)
         df = pd.DataFrame(Xt, columns=out_of_order_cols, index=X.index)
@@ -409,20 +421,23 @@ def invert_target_encoding_tensor(
     encoded_data = encoded_data.detach().numpy()  # needed for inverse transform sklearn
 
     # this is in collapsed-onehot space
-    mapping = mean_to_ordinal_map["mapping"]
     for idx, mapping in mean_to_ordinal_map["mapping"].items():
-        for k, v in mapping.items():
-            encoded_data[:, idx] = np.where(
-                encoded_data[:, idx] == k, v, encoded_data[:, idx]
-            )
+        mean_encoded_values = np.array(list(mapping.values()))
+        ordinal_value = np.array(list(mapping.keys()))
+        # get nearest since after autoencoder i wont' have the exact continuous value
+        # also works if multiple categories have the same encoding
+        # if there's multiple mins prefers the 1st one (selects an actual category over nan if they're all the same)
+        encoded_data[:, idx] = np.array(
+            [
+                ordinal_value[np.abs(mean_encoded_values - v).argmin()]
+                for v in encoded_data[:, idx]
+            ]
+        )
 
     # Need pd if category was string
     encoded_data = pd.DataFrame(encoded_data, columns=combined_onehot_columns)
     # can only un-ordinal encode the ordinally encoded columns
-    ordinal_enc_cols = list(mean_to_ordinal_map["mapping"].keys())
-    encoded_data.iloc[:, ordinal_enc_cols] = mean_to_ordinal_map["inverse_transform"](
-        encoded_data.iloc[:, ordinal_enc_cols]
-    )
+    encoded_data = mean_to_ordinal_map["inverse_transform"](encoded_data)
 
     # explode columns if onehots were flattened
     if combined_onehots_groupby is not None:
@@ -430,7 +445,9 @@ def invert_target_encoding_tensor(
         return torch.tensor(
             onehot_multicategorical_column(combined_onehots_groupby.values())(
                 encoded_data
-            )[original_columns].values
+            )
+            .reindex(columns=original_columns)  # will fill 0s for missing cats
+            .values
         ).float()
 
     # reorder to match original

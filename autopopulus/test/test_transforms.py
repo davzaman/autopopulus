@@ -231,9 +231,9 @@ class TestTransforms(unittest.TestCase):
 
             categories = [[0, 1], [0, 1, 2, 3], [0, 1, 2]]
             # mock an encoding for each categorical column
-            mean_to_ordinal_map = {
+            ordinal_to_mean_map = {
                 combined_df.columns.get_loc(col): {
-                    rng.random(): category for category in categories[i]
+                    category: rng.random() for category in categories[i]
                 }
                 for i, col in enumerate(
                     hypothesis["onehot"]["bin_cols"] + hypothesis["onehot_prefixes"]
@@ -245,7 +245,7 @@ class TestTransforms(unittest.TestCase):
                 onehot_df.astype(float),
                 ["bin", "mult1", "mult2"],
                 categories,
-                mean_to_ordinal_map,
+                ordinal_to_mean_map,
                 onehot_df.columns,
                 combined_groupby,
             )
@@ -385,9 +385,9 @@ class TestTransforms(unittest.TestCase):
             assume(not df.empty)
             categories = [[0, 1], [0, 1, 2, 3], [0, 1, 2]]
             # mock an encoding for each categorical column
-            mean_to_ordinal_map = {
+            ordinal_to_mean_map = {
                 df.columns.get_loc(col): {
-                    rng.random(): category for category in categories[i]
+                    category: rng.random() for category in categories[i]
                 }
                 for i, col in enumerate(hypothesis["cat_cols"])
             }
@@ -396,7 +396,7 @@ class TestTransforms(unittest.TestCase):
                 df,
                 hypothesis["cat_cols"],
                 categories,
-                mean_to_ordinal_map,
+                ordinal_to_mean_map,
                 df.columns,
             )
 
@@ -612,7 +612,7 @@ class TestTransforms(unittest.TestCase):
         true_df: pd.DataFrame,
         cat_cols: List[str],
         categories: List[List[int]],
-        mean_to_ordinal_map: Dict[str, Dict[float, Any]],
+        ordinal_to_mean_map: Dict[str, Dict[float, Any]],
         orig_cols: List[str],
         combined_onehots_groupby: Optional[Dict[int, int]] = None,
     ):
@@ -628,17 +628,21 @@ class TestTransforms(unittest.TestCase):
         # enc._missing_indices = {}
         # flip the mean_to_ordinal map to pretend like we're target encoding
         target_encode_map = {
-            df.columns[idx]: {cat: mean for mean, cat in mapping.items()}
-            for idx, mapping in mean_to_ordinal_map.items()
+            df.columns[idx]: mapping for idx, mapping in ordinal_to_mean_map.items()
         }
 
+        # only applying to cat_cols since im roundabout creating my own map/inverse transform instead of using targetencode since i cannot control the categories also bc i dont have labels
         unencoded_tensor = invert_target_encoding_tensor(
-            torch.tensor(df.replace(target_encode_map).values),
+            torch.tensor(df.replace(target_encode_map)[cat_cols].values),
             {
-                "inverse_transform": enc.inverse_transform,
-                "mapping": mean_to_ordinal_map,
+                "inverse_transform": lambda df: pd.DataFrame(
+                    enc.inverse_transform(df), columns=cat_cols
+                ).astype(float),
+                "mapping": {
+                    i: mapping for i, mapping in enumerate(ordinal_to_mean_map.values())
+                },
             },
-            df.columns,
+            cat_cols,
             orig_cols,
             combined_onehots_groupby,
         )
