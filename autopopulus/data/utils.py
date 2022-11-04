@@ -7,6 +7,17 @@ from torch.utils.data import DataLoader, TensorDataset
 from autopopulus.data.types import DataT
 
 
+def explode_nans(X: DataFrame, onehot_groups_idxs: List[List[int]]) -> DataFrame:
+    """
+    For onehot groups if 1 of the values is nan, all of the category values for that group should be nan for that sample.
+    """
+    for onehot_group in onehot_groups_idxs:
+        # only .loc doesn't return a copy so I can set the value
+        # but that requires the col names, not indices
+        X.loc[X.iloc[:, onehot_group].isna().any(axis=1), X.columns[onehot_group]] = nan
+    return X
+
+
 def enforce_numpy(df: DataT) -> ndarray:
     # enforce numpy is numeric with df*1 (fixes bools)
     return (df * 1).values if isinstance(df, DataFrame) else (df * 1)

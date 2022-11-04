@@ -15,7 +15,7 @@ import torch
 # from lib.MDLPC.MDLP import MDLP_Discretizer
 
 from autopopulus.data.mdl_discretization import ColInfoDict, MDLDiscretizer
-from autopopulus.data.utils import onehot_multicategorical_column, enforce_numpy
+from autopopulus.data.utils import explode_nans, onehot_multicategorical_column, enforce_numpy
 from autopopulus.data.constants import PAD_VALUE
 
 
@@ -411,6 +411,13 @@ def invert_discretize_tensor(
     return torch.tensor(X_cont, device=encoded_data.device).float()
 
 
+def _nanargmin(arr: np.ndarray, axis: int = 0) -> int:
+    try:
+        return np.nanargmin(arr, axis)
+    except ValueError:
+        return np.nan
+
+
 def invert_target_encoding_tensor(
     encoded_data: Tensor,
     mean_to_ordinal_map: Dict[str, Union[Callable, Dict[int, Dict[float, int]]]],
@@ -425,12 +432,15 @@ def invert_target_encoding_tensor(
         mean_encoded_values = np.array(list(mapping.values()))
         ordinal_value = np.array(list(mapping.keys()))
         # get nearest since after autoencoder i wont' have the exact continuous value
-        # also works if multiple categories have the same encoding
-        # if there's multiple mins prefers the 1st one (selects an actual category over nan if they're all the same)
+        # if there's multiple mins prefers the 1st one (multiple cats with same enc)
+        # preserves nans in place
         encoded_data[:, idx] = np.array(
             [
-                ordinal_value[np.abs(mean_encoded_values - v).argmin()]
-                for v in encoded_data[:, idx]
+                ordinal_value[idx] if not np.isnan(idx) else idx
+                for idx in [
+                    _nanargmin(np.abs(mean_encoded_values - v))
+                    for v in encoded_data[:, idx]
+                ]
             ]
         )
 
@@ -442,12 +452,19 @@ def invert_target_encoding_tensor(
     # explode columns if onehots were flattened
     if combined_onehots_groupby is not None:
         # reorder to match original
+        onehot_groups_idxs = [
+            np.nonzero(original_columns.str.startswith(prefix))[0]
+            for prefix in combined_onehots_groupby.values()
+        ]
         return torch.tensor(
-            onehot_multicategorical_column(combined_onehots_groupby.values())(
-                encoded_data
-            )
-            .reindex(columns=original_columns)  # will fill 0s for missing cats
-            .values
+            explode_nans(
+                onehot_multicategorical_column(combined_onehots_groupby.values())(
+                    encoded_data
+                ).reindex(
+                    columns=original_columns, fill_value=0
+                ),  # will fill 0s for missing cats
+                onehot_groups_idxs,
+            ).values
         ).float()
 
     # reorder to match original

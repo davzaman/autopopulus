@@ -31,7 +31,7 @@ from autopopulus.data.constants import (
     PAD_VALUE,
     PATIENT_ID,
 )
-from autopopulus.data.utils import enforce_numpy
+from autopopulus.data.utils import enforce_numpy, explode_nans
 from autopopulus.data.types import (
     DataColumn,
     DataT,
@@ -388,12 +388,7 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
 
             # expand nans where its onehot to make sure the whole group is nan
             # before assigned to splits
-            for onehot_group in self.col_idxs_by_type["original"].get("onehot", []):
-                # only .loc doesn't return a copy so I can set the value
-                # but that requires the col names, not indices
-                X.loc[
-                    X.iloc[:, onehot_group].isna().any(axis=1), X.columns[onehot_group]
-                ] = nan
+            X = explode_nans(X, self.col_idxs_by_type["original"].get("onehot", []))
 
             # split by pt id
             self._split_dataset(ground_truth, X, y)

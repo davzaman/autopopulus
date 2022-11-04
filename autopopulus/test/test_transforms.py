@@ -8,7 +8,7 @@ import pandas as pd
 import numpy as np
 from numpy.random import default_rng
 import torch
-from sklearn.preprocessing import OrdinalEncoder
+from category_encoders import TargetEncoder
 
 from hypothesis import (
     assume,
@@ -242,10 +242,9 @@ class TestTransforms(unittest.TestCase):
             # enforce float for nans bc for some reason df's dype was object
             self._test_invert_target_encode(
                 combined_df.astype(float),
+                y,
                 onehot_df.astype(float),
                 ["bin", "mult1", "mult2"],
-                categories,
-                ordinal_to_mean_map,
                 onehot_df.columns,
                 combined_groupby,
             )
@@ -393,10 +392,9 @@ class TestTransforms(unittest.TestCase):
             }
             self._test_invert_target_encode(
                 df,
+                y,
                 df,
                 hypothesis["cat_cols"],
-                categories,
-                ordinal_to_mean_map,
                 df.columns,
             )
 
@@ -609,40 +607,32 @@ class TestTransforms(unittest.TestCase):
     def _test_invert_target_encode(
         self,
         df: pd.DataFrame,
+        y: pd.Series,
         true_df: pd.DataFrame,
         cat_cols: List[str],
-        categories: List[List[int]],
-        ordinal_to_mean_map: Dict[str, Dict[float, Any]],
         orig_cols: List[str],
         combined_onehots_groupby: Optional[Dict[int, int]] = None,
     ):
-        # the inverse will fail without this update
-        # https://github.com/scikit-learn/scikit-learn/issues/24082
-        enc = OrdinalEncoder(
-            categories=categories,
-            # without these it'll complain: Found unknown categories [nan] in column 0 during fit
-            handle_unknown="use_encoded_value",
-            unknown_value=np.nan,
+        enc = TargetEncoder(
+            cols=cat_cols, handle_missing="return_nan", handle_unknown="return_nan"
         )
-        enc.fit(df[cat_cols])
-        # enc._missing_indices = {}
-        # flip the mean_to_ordinal map to pretend like we're target encoding
-        target_encode_map = {
-            df.columns[idx]: mapping for idx, mapping in ordinal_to_mean_map.items()
+        enc.fit(df, y)
+        # make the encoding random
+        rng = default_rng()
+        enc.mapping = {
+            k: series.map(lambda enc_v: rng.random())
+            for k, series in enc.mapping.items()
         }
-
-        # only applying to cat_cols since im roundabout creating my own map/inverse transform instead of using targetencode since i cannot control the categories also bc i dont have labels
         unencoded_tensor = invert_target_encoding_tensor(
-            torch.tensor(df.replace(target_encode_map)[cat_cols].values),
+            torch.tensor(enc.fit_transform(df, y).values),
             {
-                "inverse_transform": lambda df: pd.DataFrame(
-                    enc.inverse_transform(df), columns=cat_cols
-                ).astype(float),
+                "inverse_transform": enc.ordinal_encoder.inverse_transform,
                 "mapping": {
-                    i: mapping for i, mapping in enumerate(ordinal_to_mean_map.values())
+                    df.columns.get_loc(col): col_mapping.to_dict()
+                    for col, col_mapping in enc.mapping.items()
                 },
             },
-            cat_cols,
+            df.columns,
             orig_cols,
             combined_onehots_groupby,
         )
