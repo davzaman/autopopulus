@@ -3,7 +3,7 @@ from math import ceil
 import sys
 from typing import Callable, List, Dict, Any, Optional, Tuple, Union
 from torchmetrics import Metric
-from warnings import warn
+from numpy import stack
 
 #### Pytorch ####
 from torch import long as torch_long
@@ -492,6 +492,8 @@ class AEDitto(pl.LightningModule):
         which produces ValueError, so this tensor needs to be padded.
         """
         try:
+            if len(idxs) > 1:  # Creating tensor from list of arrays is slow
+                idxs = stack(idxs, axis=0)
             return tensor(idxs, dtype=torch_long, device=device)
         except ValueError:  # pad when onehot list of group indices
             return nn.utils.rnn.pad_sequence(
