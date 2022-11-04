@@ -645,7 +645,9 @@ class AEDitto(pl.LightningModule):
                 self.datamodule.feature_map != "discretize_continuous"
             ), "Indicated you discretized the data and also wanted to use a variational autoencoder. These cannot be used together."
             # cat_cols are only fine if you're target encoding
-            assert not self.col_idxs_by_type["original"].get("categorical", []) or (
+            assert len(
+                self.col_idxs_by_type["original"].get("categorical", [])
+            ) == 0 or (
                 self.datamodule.feature_map == "target_encode_categorical"
             ), "Indicated you wanted to use a variational autoencoder and also have categorical features, but these cannot be used togther."
             assert (

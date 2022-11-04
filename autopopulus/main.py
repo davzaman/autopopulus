@@ -1,9 +1,10 @@
 from logging import error
+from os import makedirs
 import sys
 from typing import Callable
 from argparse import ArgumentParser, Namespace
 import pickle as pk
-from os.path import join, exists
+from os.path import join, exists, dirname
 
 #### Traceback ####
 from rich.traceback import install
@@ -94,6 +95,7 @@ def main():
 
         imputed_data = get_imputation_logic(args)(args, data)
         labels = data.splits["label"]
+        makedirs(dirname(pickled_imputed_data_path), exist_ok=True)
         with open(pickled_imputed_data_path, "wb") as file:
             pk.dump((imputed_data, labels), file)
 

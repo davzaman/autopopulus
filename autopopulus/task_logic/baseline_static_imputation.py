@@ -48,6 +48,7 @@ def knn(args: Namespace, data: CommonDataModule) -> InputDataSplit:
     X_test = imputer.transform(data.splits["data"]["test"])
 
     # Add columns back in (sklearn erases) for rmse for missing only columns
+    X_train = pd.DataFrame(X_train, columns=data.columns["original"])
     X_val = pd.DataFrame(X_val, columns=data.columns["original"])
     X_test = pd.DataFrame(X_test, columns=data.columns["original"])
 
@@ -57,13 +58,14 @@ def knn(args: Namespace, data: CommonDataModule) -> InputDataSplit:
 def mice(args: Namespace, data: CommonDataModule) -> InputDataSplit:
     """Uses sklearn instead of miceforest package."""
     imputer = IterativeImputer(
-        max_iter=args.num_mice_iterations, random_state=args.seed
+        max_iter=args.mice_num_iterations, random_state=args.seed
     )
     X_train = imputer.fit_transform(data.splits["data"]["train"])
     X_val = imputer.transform(data.splits["data"]["val"])
     X_test = imputer.transform(data.splits["data"]["test"])
 
     # Add columns back in (sklearn erases) for rmse for missing only columns
+    X_train = pd.DataFrame(X_train, columns=data.columns["original"])
     X_val = pd.DataFrame(X_val, columns=data.columns["original"])
     X_test = pd.DataFrame(X_test, columns=data.columns["original"])
 
@@ -80,7 +82,7 @@ def miceforest(args: Namespace, data: CommonDataModule) -> InputDataSplit:
         save_all_iterations=True,
         random_state=args.seed,
     )
-    imputer.mice(args.num_mice_iterations, verbose=args.verbose, n_jobs=args.njobs)
+    imputer.mice(args.mice_num_iterations, verbose=args.verbose, n_jobs=args.njobs)
     X_train = imputer.complete_data()
     X_val = imputer.impute_new_data(data.splits["data"]["val"]).complete_data()
     X_test = imputer.impute_new_data(data.splits["data"]["test"]).complete_data()

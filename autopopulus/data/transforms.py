@@ -15,7 +15,11 @@ import torch
 # from lib.MDLPC.MDLP import MDLP_Discretizer
 
 from autopopulus.data.mdl_discretization import ColInfoDict, MDLDiscretizer
-from autopopulus.data.utils import explode_nans, onehot_multicategorical_column, enforce_numpy
+from autopopulus.data.utils import (
+    explode_nans,
+    onehot_multicategorical_column,
+    enforce_numpy,
+)
 from autopopulus.data.constants import PAD_VALUE
 
 
@@ -76,11 +80,19 @@ class SimpleImpute(TransformerMixin, BaseEstimator):
             transformers=[
                 ("num", numeric_transformer, self.ctn_cols),
                 ("cat", categorical_transformer, self.cat_cols),
-            ]
+            ],
+            remainder="passthrough",
+            verbose_feature_names_out=False,
         )
         self.transformers.fit(X, y)
 
         return self
+
+    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+        out_of_order_cols = self.transformers.get_feature_names_out(self.columns)
+        return pd.DataFrame(
+            self.transformers.transform(X), columns=out_of_order_cols, index=X.index
+        )[self.columns]
 
 
 def simple_impute_tensor(

@@ -15,7 +15,7 @@ from pytorch_lightning.loggers.base import rank_zero_experiment
 from pytorch_lightning.utilities import rank_zero_info
 from pytorch_lightning.utilities import rank_zero_only
 from torch.utils.tensorboard import SummaryWriter
-from torch import isnan
+from torch import isnan, tensor
 
 import tensorflow as tf
 from tensorflow.core.util.event_pb2 import Event
@@ -68,7 +68,10 @@ def log_imputation_performance(
         ground_truth_non_missing_mask = ~np.isnan(true)
         true = true.where(ground_truth_non_missing_mask, est)
 
-        missing_mask = isnan(data.splits["data"][stage]).bool()
+        orig = data.splits["data"][stage]
+        if isinstance(orig, pd.DataFrame):
+            orig = tensor(orig.values)
+        missing_mask = isnan(orig).bool()
 
         # START HERE
         for name, metricfn in metrics.items():
