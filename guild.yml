@@ -20,6 +20,9 @@
       type: float
     amputation-patterns:
       required: no
+    replace-nan-with:
+      required: no
+      type: string
 
 # what to do when you run `guild run`
 - operations:
@@ -47,11 +50,12 @@
         $include:
           - high-level-flags
       steps:
-        - run: train_predict method=${method} experiment-name=${experiment-name} fully-observed=${fully-observed} feature-map=${feature-map} percent-missing=${percent-missing} amputation-patterns=${amputation-patterns}
-        - run: test method=${method} experiment-name=${experiment-name} fully-observed=${fully-observed} feature-map=${feature-map} percent-missing=${percent-missing} amputation-patterns=${amputation-patterns}
+        - run: train_predict method=${method} experiment-name=${experiment-name} fully-observed=${fully-observed} feature-map=${feature-map} percent-missing=${percent-missing} amputation-patterns=${amputation-patterns} replace-nan-with=${replace-nan-with}
+        - run: test method=${method} experiment-name=${experiment-name} fully-observed=${fully-observed} feature-map=${feature-map} percent-missing=${percent-missing} amputation-patterns=${amputation-patterns} replace-nan-with=${replace-nan-with}
 
     train_predict:
       description: Train an imputer and run predictions.
+      label: ${method} ${experiment-name}
       main: autopopulus/main
       env: # don't save pycache
         PYTHONDONTWRITEBYTECODE: 1
@@ -74,6 +78,7 @@
 
     test:
       description: Evaluate/test an imputer if it's an autoencoder.
+      label: ${method} ${experiment-name}
       main: autopopulus/evaluate_imputer
       env: # don't save pycache
         PYTHONDONTWRITEBYTECODE: 1
