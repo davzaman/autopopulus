@@ -35,7 +35,7 @@ from autopopulus.utils.impute_metrics import (
     RMSEMetric,
     categorical_accuracy,
 )
-from autopopulus.utils.cli_arg_utils import YAMLStringListToList, str2bool
+from autopopulus.utils.cli_arg_utils import YAMLStringListToList, StringOrInt, str2bool
 from autopopulus.data import CommonDataModule
 from autopopulus.data.types import DataTypeTimeDim
 from autopopulus.data.constants import PAD_VALUE
@@ -883,8 +883,8 @@ class AEDitto(pl.LightningModule):
         )
         p.add_argument(
             "--replace-nan-with",
-            type=Union[str, int],
             default=0,
+            action=StringOrInt(str_choices=["simple"]),
             help="How to do warm-start to autoencoder imputation. Simple imputation or fill with an integer value.",
         )
         return p

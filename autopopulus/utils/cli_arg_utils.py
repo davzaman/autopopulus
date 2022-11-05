@@ -1,4 +1,4 @@
-from argparse import ArgumentParser, Namespace, Action
+from argparse import ArgumentParser, ArgumentTypeError, Namespace, Action
 from enum import Enum
 import re
 import sys
@@ -138,3 +138,28 @@ def YAMLStringDictToDict(
             setattr(namespace, self.dest, dict_obj)
 
     return ConvertToDict
+
+
+def StringOrInt(
+    str_choices: Optional[List[str]] = None,
+):
+    class ForceIntOrMatchStr(Action):
+        """Takes a comma separated list (no spaces) from command line and parses into list of some type (Default str)."""
+
+        def __call__(
+            self,
+            parser: ArgumentParser,
+            namespace: Namespace,
+            input: str,
+            option_string: Optional[str] = None,
+        ):
+            if input.isdecimal():
+                val = int(input)
+            else:
+                if input in str_choices:
+                    val = input
+                else:
+                    raise ArgumentTypeError(f"x must be an in or one of: {str_choices}")
+            setattr(namespace, self.dest, val)
+
+    return ForceIntOrMatchStr
