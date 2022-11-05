@@ -24,11 +24,12 @@ BASELINE_DATA_SETTINGS = {
 
 
 def fully_observed(args: Namespace, data: CommonDataModule) -> InputDataSplit:
-    return (
-        data.splits["data"]["train"],
-        data.splits["data"]["val"],
-        data.splits["data"]["test"],
-    )
+    data.setup("fit")
+    return {
+        "train": data.splits["data"]["train"],
+        "val": data.splits["data"]["val"],
+        "test": data.splits["data"]["test"],
+    }
 
 
 def simple(args: Namespace, data: CommonDataModule) -> InputDataSplit:

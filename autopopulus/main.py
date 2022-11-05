@@ -184,7 +184,8 @@ def init_cli_args() -> Namespace:
         default="simple",
         choices=list(AE_METHOD_SETTINGS.keys())
         + get_module_function_names(baseline_static_imputation)
-        + get_module_function_names(baseline_longitudinal_imputation),
+        + get_module_function_names(baseline_longitudinal_imputation)
+        + ["none"],
         help="Which imputer to use, fully_observed for no imputation (include the fully observed flag in this case).",
     )
     # For MICE
