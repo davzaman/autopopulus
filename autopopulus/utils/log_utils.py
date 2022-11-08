@@ -87,14 +87,13 @@ def log_imputation_performance(
 def get_logdir(args: Namespace) -> str:
     """Get logging directory based on experiment settings."""
     # Missingness scenario could be 1 mech or mixed
-    pattern_mechanisms = ",".join(
-        [pattern["mechanism"] for pattern in args.amputation_patterns]
-    )
-    dir_name = (
-        (f"F.O./{args.percent_missing}/{pattern_mechanisms}/{args.method}")
-        if args.fully_observed
-        else f"full/{args.method}"
-    )
+    if args.amputation_patterns:
+        pattern_mechanisms = ",".join(
+            [pattern["mechanism"] for pattern in args.amputation_patterns]
+        )
+        dir_name = f"F.O./{args.percent_missing}/{pattern_mechanisms}/{args.method}"
+    else:
+        dir_name = f"full/{args.method}"
     if not exists(dir_name):
         makedirs(dir_name)
     return dir_name

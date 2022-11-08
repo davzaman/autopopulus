@@ -9,8 +9,8 @@ import pytorch_lightning as pl
 
 def should_ampute(args: Namespace) -> bool:
     return (
-        "percent_missing" in args
-        and "amputation_patterns" in args
+        ("percent_missing" in args and args.percent_missing)
+        and ("amputation_patterns" in args and args.amputation_patterns)
         and args.method != "none"
     )
 

@@ -1157,7 +1157,7 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         p.add_argument(
             "--percent-missing",
             type=float,
-            default=0.33,
+            default=None,
             help="When filtering down to fully observed and amputing (imputer is not none), what percent of data should be missing.",
         )
         p.add_argument(
