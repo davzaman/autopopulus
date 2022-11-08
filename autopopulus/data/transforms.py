@@ -437,7 +437,7 @@ def invert_target_encoding_tensor(
     original_columns: List[str],
     combined_onehots_groupby: Optional[Dict[int, int]] = None,
 ) -> Tensor:
-    encoded_data = encoded_data.detach().numpy()  # needed for inverse transform sklearn
+    encoded_data = tensor_to_numpy(encoded_data)  # needed for inverse transform sklearn
 
     # this is in collapsed-onehot space
     for idx, mapping in mean_to_ordinal_map["mapping"].items():

@@ -272,7 +272,7 @@ class AEDitto(pl.LightningModule):
 
     def shared_step(self, batch, split: str) -> Tuple[float, Dict[str, float]]:
         ### Unpack ###
-        data_version = "mapped" if batch["mapped"] else "original"
+        data_version = "mapped" if "mapped" in batch else "original"
         data, ground_truth = (
             batch[data_version]["data"],
             batch[data_version]["ground_truth"],
@@ -334,7 +334,7 @@ class AEDitto(pl.LightningModule):
 
             # TODO: everything to cpu here?
             # save mapped outputs for evaluation
-            if batch["mapped"]:  # test not empty or None
+            if "mapped" in batch:  # test not empty or None
                 self.metric_logging_step(
                     reconstruct_batch.detach(),
                     ground_truth.detach(),
@@ -348,12 +348,12 @@ class AEDitto(pl.LightningModule):
             ground_truth,
             non_missing_mask,
         ) = self.get_imputed_tensor_from_model_output(
-            data.detach(),
-            reconstruct_batch.detach(),
-            ground_truth.detach(),
-            non_missing_mask.detach(),
-            batch["original"]["data"].detach(),
-            batch["original"]["ground_truth"].detach(),
+            data.detach().cpu(),
+            reconstruct_batch.detach().cpu(),
+            ground_truth.detach().cpu(),
+            non_missing_mask.detach().cpu(),
+            batch["original"]["data"].detach().cpu(),
+            batch["original"]["ground_truth"].detach().cpu(),
         )
 
         return (
