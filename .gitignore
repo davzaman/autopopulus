@@ -9,6 +9,7 @@ options.yml
 mlruns/
 notebooks/
 tune_results/
+fil-result/
 full/
 serialized_models/
 profiling-results/

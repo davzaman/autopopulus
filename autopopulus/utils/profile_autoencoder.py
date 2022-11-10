@@ -9,22 +9,33 @@ from torch import vstack
 
 from autopopulus.data import CommonDataModule
 from autopopulus.data.dataset_classes import SimpleDatasetLoader
-from autopopulus.models.ae import AEDitto
 from autopopulus.data.utils import onehot_multicategorical_column
 from autopopulus.utils.cli_arg_utils import YAMLStringListToList
+from autopopulus.models.ap import AEImputer
 
 PROFILERS = {
     "simple": SimpleProfiler(dirpath="profiling-results", filename="simple"),
     "advanced": AdvancedProfiler(dirpath="profiling-results", filename="advanced"),
-    "pytorch": PyTorchProfiler(dirpath="profiling-results", filename="pytorch"),
+    # Ref: https://pytorch-lightning.readthedocs.io/en/latest/api/pytorch_lightning.profilers.PyTorchProfiler.html#pytorch_lightning.profilers.PyTorchProfiler
+    # https://pytorch.org/docs/master/profiler.html
+    "pytorch": PyTorchProfiler(
+        dirpath="profiling-results",
+        filename="pytorch",
+        # emit_nvtx=True,
+        profile_memory=True,
+        with_stack=True,
+    ),
 }
 
 if __name__ == "__main__":
     seed = 0
-    nsamples = 1028
+    batch_size = 512
+    nsamples = 10028
     nfeatures = 10
-    fast_dev_run = True
+    fast_dev_run = 4
     rng = default_rng(seed)
+    num_gpus = 1
+    num_cpus = 32
 
     p = ArgumentParser()
     p.add_argument("--profilers", type=str, default=None, action=YAMLStringListToList())
@@ -80,8 +91,9 @@ if __name__ == "__main__":
         seed=seed,
         val_test_size=0.5,
         test_size=0.5,
-        batch_size=4,
-        num_gpus=1,
+        batch_size=batch_size,
+        num_gpus=num_gpus,
+        num_cpus=num_cpus,
         scale=True,
         # feature_map="target_encode_categorical",
         feature_map="discretize_continuous",
@@ -89,49 +101,33 @@ if __name__ == "__main__":
         dataset_loader=dataset_loader,
     )
 
-    model = AEDitto(
-        seed=seed,
-        hidden_layers=[0.5],
-        learning_rate=0.1,
-        mvec=False,
-        variational=False,
-        activation="ReLU",
-        optimn="Adam",
-        lossn="BCE",
-        datamodule=data,
-    )
-
     # appends to file so remove old ones
     for filename in ["simple", "advanced", "pytorch"]:
-        try:
-            os.remove(os.path.join("profiling-results", filename))
-        except OSError:
-            pass
+        for name in ["fit", "predict"]:
+            try:
+                os.remove(os.path.join("profiling-results", f"{name}-{filename}.txt"))
+            except OSError:
+                pass
+
     for profiler in profilers:
-        trainer = Trainer(
-            max_epochs=3,
+        model = AEImputer(
+            seed=seed,
+            num_gpus=num_gpus,
+            hidden_layers=[0.5],
+            learning_rate=0.1,
+            mvec=False,
+            variational=False,
+            activation="ReLU",
+            optimn="Adam",
+            lossn="BCE",
+            datamodule=data,
             fast_dev_run=fast_dev_run,
-            deterministic=True,
-            gpus=[0],
-            accelerator="gpu",
-            strategy=DDPPlugin(find_unused_parameters=False),
-            enable_checkpointing=False,
             profiler=profiler,
         )
-        trainer.fit(model, datamodule=data)
+
+        model.fit(data)
 
     # sanity check output
     loader = data.test_dataloader()
-    preds_list = trainer.predict(model, loader)
-    # stack the list of preds from dataloader
-    preds = vstack(preds_list).cpu().numpy()
-    columns = data.splits["data"]["train"].columns
-
-    # Recover IDs, we use only indices used by the batcher (so if we limit to debug, this still works, even if it's shuffled)
-    ids = (
-        loader.dataset.split_ids["data"][: fast_dev_run * data.batch_size]
-        if fast_dev_run
-        else loader.dataset.split_ids["data"]
-    )
-    recovered_X = pd.DataFrame(preds, columns=columns, index=ids)
-    recovered_X.to_csv("profiling-results/output_sanity_check.csv")
+    preds = model.transform(loader)
+    preds.to_csv("profiling-results/output_sanity_check.csv")
