@@ -2,7 +2,6 @@ import cloudpickle
 from typing import Optional, Union
 from argparse import ArgumentParser, Namespace
 import pandas as pd
-from ray.tune.integration.pytorch_lightning import TuneReportCallback
 from sklearn.base import TransformerMixin, BaseEstimator
 
 #### Pytorch ####
@@ -12,15 +11,14 @@ from torch.utils.data import DataLoader
 ## Lightning ##
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
-from pytorch_lightning.plugins.training_type.ddp import DDPPlugin
 from pytorch_lightning.loggers import TensorBoardLogger
-from pytorch_lightning.plugins.training_type.ddp import DDPPlugin
 from pytorch_lightning.utilities.rank_zero import rank_zero_only
+from pytorch_lightning.callbacks import Callback
+from pytorch_lightning.profiler import Profiler
 
 # Local
 from autopopulus.models.ae import AEDitto
 from autopopulus.utils.log_utils import get_logdir, get_serialized_model_path
-from autopopulus.utils.cli_arg_utils import str2bool
 from autopopulus.data import CommonDataModule
 from autopopulus.data.types import DataTypeTimeDim
 from autopopulus.data.constants import PATIENT_ID
@@ -38,16 +36,20 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         max_epochs: int = 100,
         patience: int = 7,
         logger: Optional[TensorBoardLogger] = None,
-        runtune: bool = False,
+        tune_callback: Optional[Callback] = None,
+        trial_num: Optional[int] = None,
         runtest: bool = False,
         fast_dev_run: int = None,
+        profiler: Optional[Union[str, Profiler]] = None,
         num_gpus: int = 1,
         num_nodes: int = 1,
         data_type_time_dim: DataTypeTimeDim = DataTypeTimeDim.STATIC,
         *args,  # For inner AEDitto
         **kwargs,
     ):
-        self.runtune = runtune
+        self.tune_callback = tune_callback
+        self.profiler = profiler
+        self.trial_num = trial_num
         self.fast_dev_run = fast_dev_run
         self.num_gpus = num_gpus
         self.num_nodes = num_nodes
@@ -73,7 +75,8 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
             self.num_nodes,
             self.num_gpus,
             self.fast_dev_run,
-            self.runtune,
+            self.tune_callback,
+            profiler=self.profiler,
         )
         self.inference_trainer = self.create_trainer(
             logger,
@@ -86,7 +89,8 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
             # Ref: https://github.com/PyTorchLightning/pytorch-lightning/discussions/12906
             num_gpus=1 if self.num_gpus else 0,
             fast_dev_run=self.fast_dev_run,
-            tune=False,  # No tuning since we're testing
+            tune_callback=None,  # No tuning since we're testing
+            profiler=self.profiler,
         )
 
     @staticmethod
@@ -98,7 +102,8 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         num_nodes: Optional[int] = None,
         num_gpus: Optional[int] = None,
         fast_dev_run: Optional[bool] = None,
-        tune: Optional[bool] = None,
+        tune_callback: Optional[Callback] = None,
+        profiler: Optional[Union[str, Profiler]] = None,
     ) -> pl.Trainer:
         callbacks = [
             # ModelSummary(max_depth=3),
@@ -108,36 +113,23 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
                 patience=patience,
             ),
         ]
-        if tune:
-            callbacks.append(
-                TuneReportCallback(
-                    [
-                        f"AE/{data_type_time_dim_name}/val-loss",
-                        f"impute/{data_type_time_dim_name}/val-RMSE",
-                        f"impute/{data_type_time_dim_name}/val-RMSE-missingonly",
-                        f"impute/{data_type_time_dim_name}/val-MAAPE",
-                        f"impute/{data_type_time_dim_name}/val-MAAPE-missingonly",
-                    ],
-                    on="validation_end",
-                )
-            )
+        if tune_callback:
+            callbacks.append(tune_callback)
 
         trainer = pl.Trainer(
             max_epochs=max_epochs,
             logger=logger,
             deterministic=True,
             num_nodes=num_nodes,
-            # use 1 processes if on cpu
-            devices=num_gpus if num_gpus else 1,
+            devices=num_gpus if num_gpus else "auto",
             accelerator="gpu" if num_gpus else "cpu",
             # https://github.com/PyTorchLightning/pytorch-lightning/discussions/6761#discussioncomment-1152286
             # Use DDP if there's more than 1 GPU, otherwise, it's not necessary.
-            strategy=DDPPlugin(find_unused_parameters=False) if num_gpus > 1 else None,
-            # NOTE: CANNOT use "precision=16" speedup with any of the other paper methods.
-            # precision=16,
+            strategy="ddp_find_unused_parameters_false" if num_gpus > 1 else None,
+            precision=16,
             enable_checkpointing=False,
             callbacks=callbacks,
-            # profiler="simple",  # or "advanced" which is more granular , this is too verbose
+            profiler=profiler,
             fast_dev_run=fast_dev_run,  # For debugging
         )
         return trainer
@@ -147,15 +139,17 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         self._fit(data)
         self._save_test_data(data)
         return self
-    
+
     @rank_zero_only
-    def _save_test_data(self, data:CommonDataModule):
+    def _save_test_data(self, data: CommonDataModule):
         if self.runtest:  # Serialize test dataloader to run in separate script
-        # Serialize data with torch but serialize model with plightning
+            # Serialize data with torch but serialize model with plightning
             torch.save(
                 data.test_dataloader(),
                 get_serialized_model_path(
-                    f"{self.data_type_time_dim.name}_test_dataloader", "pt"
+                    f"{self.data_type_time_dim.name}_test_dataloader",
+                    "pt",
+                    self.trial_num,
                 ),
                 pickle_module=cloudpickle,
             )
@@ -167,7 +161,9 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         self.ae.datamodule = data
         self.trainer.fit(self.ae, datamodule=data)
         self.trainer.save_checkpoint(
-            get_serialized_model_path(f"AEDitto_{self.data_type_time_dim.name}", "pt"),
+            get_serialized_model_path(
+                f"AEDitto_{self.data_type_time_dim.name}", "pt", self.trial_num
+            ),
         )
 
     def transform(self, dataloader: DataLoader) -> pd.DataFrame:
@@ -211,9 +207,8 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
             else args.ae_from_checkpoint
         )
         logger = TensorBoardLogger(get_logdir(args))
-        ae_imputer = cls.from_argparse_args(
-            args, runtune=False, logger=logger, **kwargs
-        )
+        kwargs["tune_callback"] = None
+        ae_imputer = cls.from_argparse_args(args, logger=logger, **kwargs)
         ae_imputer.ae = ae_imputer.load_autoencoder(checkpoint)
         return ae_imputer
 
@@ -261,7 +256,7 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         p.add_argument(
             "--tune-n-samples",
             type=int,
-            default=1,
+            default=0,
             help="When defining the distributions/choices to go over during hyperparameter tuning, how many samples to take.",
         )
         p.add_argument(
@@ -269,11 +264,5 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
             type=int,
             default=0,
             help="Debugging: limits number of batches for train/val/test on deep learning model.",
-        )
-        p.add_argument(
-            "--runtune",
-            type=str2bool,
-            default=False,
-            help="Whether or not to run tuning instead of single training.",
         )
         return p

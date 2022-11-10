@@ -24,6 +24,8 @@ from tensorflow.core.util.event_pb2 import Event
 from autopopulus.data import CommonDataModule
 from autopopulus.utils.impute_metrics import CWMAAPE, CWRMSE
 
+TUNE_LOG_DIR = "tune_results"
+
 
 def init_new_logger(fname: Optional[str] = None):
     handlers = [StreamHandler(sys.stdout)]
@@ -38,9 +40,13 @@ def init_new_logger(fname: Optional[str] = None):
     )
 
 
-def get_serialized_model_path(modeln: str, ftype: str = "pkl") -> str:
+def get_serialized_model_path(
+    modeln: str, ftype: str = "pkl", trial_num: Optional[int] = None
+) -> str:
     """Path to dump serialized model, whether it's autoencoder, or predictive model."""
     dir_name = "serialized_models"
+    if trial_num is not None:
+        dir_name = join(TUNE_LOG_DIR, f"trial_{trial_num}", dir_name)
     if not exists(dir_name):
         makedirs(dir_name)
     serialized_model_path = join(dir_name, f"{modeln}.{ftype}")
@@ -86,14 +92,17 @@ def log_imputation_performance(
 
 def get_logdir(args: Namespace) -> str:
     """Get logging directory based on experiment settings."""
+    prefix = f"{TUNE_LOG_DIR}/trial_{args.trial_num}/" if "trial_num" in args else ""
     # Missingness scenario could be 1 mech or mixed
     if args.amputation_patterns:
         pattern_mechanisms = ",".join(
             [pattern["mechanism"] for pattern in args.amputation_patterns]
         )
-        dir_name = f"F.O./{args.percent_missing}/{pattern_mechanisms}/{args.method}"
+        dir_name = (
+            f"{prefix}F.O./{args.percent_missing}/{pattern_mechanisms}/{args.method}"
+        )
     else:
-        dir_name = f"full/{args.method}"
+        dir_name = f"{prefix}full/{args.method}"
     if not exists(dir_name):
         makedirs(dir_name)
     return dir_name

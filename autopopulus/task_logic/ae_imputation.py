@@ -6,6 +6,8 @@ from pytorch_lightning.utilities import rank_zero_info, rank_zero_warn
 
 ## Local Modules
 from autopopulus.data import CommonDataModule
+
+# from autopopulus.task_logic.optuna import create_autoencoder
 from autopopulus.task_logic.tuner import create_autoencoder
 from autopopulus.models.ap import AEImputer
 
@@ -107,7 +109,7 @@ def ae_imputation_logic(
     settings = AE_METHOD_SETTINGS[args.method]["train"]
 
     if args.ae_from_checkpoint:
-        if args.runtune:
+        if args.tune_n_samples:
             rank_zero_warn(
                 "Specified a checkpoint and to run tuning, we default to loading the checkpoint."
                 " If this was not the intention, please do not specify a checkpoint."

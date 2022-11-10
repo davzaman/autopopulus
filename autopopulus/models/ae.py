@@ -409,26 +409,25 @@ class AEDitto(pl.LightningModule):
                         self.col_idxs_by_type[ismapped]["binary"],
                         self.col_idxs_by_type[ismapped]["onehot"],
                     )
-                self.log(
-                    f"impute/{self.data_type_time_dim.name}/{ismapped}/{split}-{name}",
-                    metricfn(pred, true),
-                    on_step=False,
-                    on_epoch=True,
-                    prog_bar=False,
-                    logger=True,
-                    rank_zero_only=True,
+                metric_name = (
+                    f"impute/{self.data_type_time_dim.name}/{ismapped}/{split}-{name}"
                 )
+                log_settings = {
+                    "on_step": False,
+                    "on_epoch": True,
+                    "prog_bar": False,
+                    "logger": True,
+                    "rank_zero_only": True,
+                }
+
+                self.log(metric_name, metricfn(pred, true), **log_settings)
                 # Compute metrics for missing only data
                 missing_only_mask = ~(non_missing_mask.bool())
                 if missing_only_mask.any():
                     self.log(
-                        f"impute/{self.data_type_time_dim.name}/{ismapped}/{split}-{name}-missingonly",
+                        f"{metric_name}-missingonly",
                         metricfn(pred, true, missing_only_mask),
-                        on_step=False,
-                        on_epoch=True,
-                        prog_bar=False,
-                        logger=True,
-                        rank_zero_only=True,
+                        **log_settings,
                     )
 
     #######################

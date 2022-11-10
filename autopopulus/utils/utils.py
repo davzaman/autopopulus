@@ -4,6 +4,7 @@ import os
 from inspect import getmembers, isfunction
 from typing import List, Union
 
+import torch
 import pytorch_lightning as pl
 
 
@@ -17,17 +18,13 @@ def should_ampute(args: Namespace) -> bool:
 
 def seed_everything(seed: int):
     """Sets seeds and also makes cuda deterministic for pytorch."""
-    """
     os.environ["PYTHONHASHSEED"] = str(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-    """
     pl.seed_everything(seed)
     # RNN/LSTM determininsm error with cuda 10.1/10.2
     # Ref: https://pytorch.org/docs/stable/generated/torch.nn.LSTM.html#torch.nn.LSTM
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
     os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
     # os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:2"
