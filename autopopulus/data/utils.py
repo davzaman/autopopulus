@@ -56,7 +56,7 @@ def get_dataloader(
     X: Union[DataFrame, ndarray],
     y: Union[DataFrame, ndarray],
     batch_size: int,
-    num_cpus: int,
+    num_workers: int,
     pin_memory: bool,
 ) -> DataLoader:
     """Pytorch modules require DataLoaders for train/val/test,
@@ -71,7 +71,7 @@ def get_dataloader(
         dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=num_cpus,
+        num_workers=num_workers,
         pin_memory=pin_memory,
     )
     return loader

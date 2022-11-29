@@ -290,9 +290,7 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         dataset_loader: AbstractDatasetLoader,
         batch_size: int = 32,
         num_gpus: int = 0,
-        num_cpus: Union[
-            str, int
-        ] = "auto",  # TODO[LOW]: merge with n_gpus to devices or add params for argparser
+        num_workers: Union[str, int] = 4,
         fully_observed: bool = False,
         data_type_time_dim=DataTypeTimeDim.STATIC,
         scale: bool = False,
@@ -315,12 +313,12 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         self.test_size = test_size
         self.batch_size = batch_size
         self.num_gpus = num_gpus
-        if isinstance(num_cpus, int):
-            self.num_cpus = num_cpus
-        elif num_cpus == "auto":
-            self.num_cpus = cpu_count()
+        if isinstance(num_workers, int):
+            self.num_workers = num_workers
+        elif num_workers == "auto":
+            self.num_workers = cpu_count()
         else:  # no multiprocessing
-            self.num_cpus = 0
+            self.num_workers = 0
         self.fully_observed = fully_observed
         self.data_type_time_dim = data_type_time_dim
         self.scale = scale
@@ -408,8 +406,8 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
     #   HELPERS   #
     ###############
     def _validate_inputs(self):
-        assert (self.num_cpus >= 0) and (
-            self.num_cpus <= cpu_count()
+        assert (self.num_workers >= 0) and (
+            self.num_workers <= cpu_count()
         ), "Number of CPUs has to be a non-negative integer, and not exceed the number of cores."
         assert (self.val_test_size is not None and self.test_size is not None) or (
             hasattr(self.dataset_loader, "split_ids")
@@ -1051,8 +1049,9 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
             collate_fn=self._batch_collate if is_longitudinal else None,
             batch_size=self.batch_size,
             shuffle=False,
-            num_workers=self.num_cpus,
-            pin_memory=True,
+            num_workers=self.num_workers,
+            # don't use pin memory: https://discuss.pytorch.org/t/dataloader-method-acquire-of-thread-lock-objects/52943
+            pin_memory=False,
         )
         return loader
 
@@ -1124,6 +1123,12 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         )
         p.add_argument(
             "--num-gpus",
+            type=int,
+            default=4,
+            help="Number of gpus for the pytorch dataset used in passing batches to the autoencoder.",
+        )
+        p.add_argument(
+            "--num-workers",
             type=int,
             default=4,
             help="Number of workers for the pytorch dataset used in passing batches to the autoencoder.",

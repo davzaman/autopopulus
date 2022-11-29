@@ -35,7 +35,7 @@ if __name__ == "__main__":
     fast_dev_run = 4
     rng = default_rng(seed)
     num_gpus = 1
-    num_cpus = 32
+    num_workers = 32
 
     p = ArgumentParser()
     p.add_argument("--profilers", type=str, default=None, action=YAMLStringListToList())
@@ -93,7 +93,7 @@ if __name__ == "__main__":
         test_size=0.5,
         batch_size=batch_size,
         num_gpus=num_gpus,
-        num_cpus=num_cpus,
+        num_workers=num_workers,
         scale=True,
         # feature_map="target_encode_categorical",
         feature_map="discretize_continuous",
