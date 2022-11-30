@@ -16,6 +16,9 @@ from pytorch_lightning.utilities.rank_zero import rank_zero_only
 from pytorch_lightning.callbacks import Callback
 from pytorch_lightning.profiler import Profiler
 
+from ray_lightning import RayStrategy
+from ray_lightning.tune import TuneReportCallback
+
 # Local
 from autopopulus.models.ae import AEDitto
 from autopopulus.utils.log_utils import get_logdir, get_serialized_model_path
@@ -113,8 +116,20 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
                 patience=patience,
             ),
         ]
+
+        # https://github.com/PyTorchLightning/pytorch-lightning/discussions/6761#discussioncomment-1152286
+        # Use DDP if there's more than 1 GPU, otherwise, it's not necessary.
+        strategy = "ddp_find_unused_parameters_false" if num_gpus > 1 else None
+        accelerator = "gpu" if num_gpus else "cpu"
+
         if tune_callback:
             callbacks.append(tune_callback)
+            if isinstance(tune_callback, TuneReportCallback):
+                # Overwrite strategy and accelerator
+                strategy = RayStrategy(
+                    num_workers=1, num_cpus_per_worker=7, use_gpu=True
+                )
+                accelerator = None
 
         trainer = pl.Trainer(
             max_epochs=max_epochs,
@@ -122,10 +137,9 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
             deterministic=True,
             num_nodes=num_nodes,
             devices=num_gpus if num_gpus else "auto",
-            accelerator="gpu" if num_gpus else "cpu",
-            # https://github.com/PyTorchLightning/pytorch-lightning/discussions/6761#discussioncomment-1152286
-            # Use DDP if there's more than 1 GPU, otherwise, it's not necessary.
-            strategy="ddp_find_unused_parameters_false" if num_gpus > 1 else None,
+            accelerator=accelerator,
+            strategy=strategy,
+            # https://pytorch-lightning.readthedocs.io/en/stable/accelerators/gpu_intermediate.html#distributed-and-16-bit-precision
             precision=16,
             enable_checkpointing=False,
             callbacks=callbacks,
