@@ -241,7 +241,13 @@ class CommonDataset(Dataset):
         The structure matches `split`, `split_ids`, but NOT `transforms`.
         Transforms has "original" transforms e.g. scaling that should be applied whether or not we are feature mapping.
         """
-        transformed_data = {data_version: {} for data_version in self.transforms.keys()}
+        if self.transforms:
+            transformed_data = {
+                data_version: {} for data_version in self.transforms.keys()
+            }
+        else:
+            transformed_data = {"original": {}}
+
         for data_version in transformed_data.keys():
             for (
                 data_role,
@@ -289,7 +295,6 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         self,
         dataset_loader: AbstractDatasetLoader,
         batch_size: int = 32,
-        num_gpus: int = 0,
         num_workers: Union[str, int] = 4,
         fully_observed: bool = False,
         data_type_time_dim=DataTypeTimeDim.STATIC,
@@ -312,7 +317,6 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         self.val_test_size = val_test_size
         self.test_size = test_size
         self.batch_size = batch_size
-        self.num_gpus = num_gpus
         if isinstance(num_workers, int):
             self.num_workers = num_workers
         elif num_workers == "auto":
@@ -764,10 +768,10 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
 
         #### POST FIT LOGIC ####
         steps = get_steps()
-        # train on train, apply to all
-        data_pipeline = Pipeline(steps)
-        ground_truth_pipeline = data_pipeline
         if steps:
+            # train on train, apply to all
+            data_pipeline = Pipeline(steps)
+            ground_truth_pipeline = data_pipeline
             # at this point if discretizing, "original" and "mapped" are the same, they're copies of the same data.
             data_pipeline.fit(
                 self.splits["data"]["train"],
@@ -1049,6 +1053,8 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
             collate_fn=self._batch_collate if is_longitudinal else None,
             batch_size=self.batch_size,
             shuffle=False,
+            prefetch_factor=8,
+            # persistent_workers=True,
             num_workers=self.num_workers,
             # don't use pin memory: https://discuss.pytorch.org/t/dataloader-method-acquire-of-thread-lock-objects/52943
             pin_memory=False,

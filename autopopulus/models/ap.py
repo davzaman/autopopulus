@@ -15,9 +15,8 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.utilities.rank_zero import rank_zero_only
 from pytorch_lightning.callbacks import Callback
 from pytorch_lightning.profiler import Profiler
+from pytorch_lightning.strategies.strategy import Strategy
 
-from ray_lightning import RayStrategy
-from ray_lightning.tune import TuneReportCallback
 
 # Local
 from autopopulus.models.ae import AEDitto
@@ -40,6 +39,7 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         patience: int = 7,
         logger: Optional[TensorBoardLogger] = None,
         tune_callback: Optional[Callback] = None,
+        strategy: Optional[Strategy] = None,
         trial_num: Optional[int] = None,
         runtest: bool = False,
         fast_dev_run: int = None,
@@ -50,7 +50,6 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         *args,  # For inner AEDitto
         **kwargs,
     ):
-        self.tune_callback = tune_callback
         self.profiler = profiler
         self.trial_num = trial_num
         self.fast_dev_run = fast_dev_run
@@ -78,7 +77,8 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
             self.num_nodes,
             self.num_gpus,
             self.fast_dev_run,
-            self.tune_callback,
+            tune_callback,
+            strategy,
             profiler=self.profiler,
         )
         self.inference_trainer = self.create_trainer(
@@ -93,6 +93,7 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
             num_gpus=1 if self.num_gpus else 0,
             fast_dev_run=self.fast_dev_run,
             tune_callback=None,  # No tuning since we're testing
+            strategy=None,
             profiler=self.profiler,
         )
 
@@ -106,6 +107,7 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         num_gpus: Optional[int] = None,
         fast_dev_run: Optional[bool] = None,
         tune_callback: Optional[Callback] = None,
+        strategy: Optional[Strategy] = None,
         profiler: Optional[Union[str, Profiler]] = None,
     ) -> pl.Trainer:
         callbacks = [
@@ -119,17 +121,14 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
 
         # https://github.com/PyTorchLightning/pytorch-lightning/discussions/6761#discussioncomment-1152286
         # Use DDP if there's more than 1 GPU, otherwise, it's not necessary.
-        strategy = "ddp_find_unused_parameters_false" if num_gpus > 1 else None
-        accelerator = "gpu" if num_gpus else "cpu"
+        if strategy is None:
+            strategy = "ddp_find_unused_parameters_false" if num_gpus > 1 else None
+            accelerator = "gpu" if num_gpus else "cpu"
+        else:
+            accelerator = None
 
-        if tune_callback:
+        if tune_callback is not None:
             callbacks.append(tune_callback)
-            if isinstance(tune_callback, TuneReportCallback):
-                # Overwrite strategy and accelerator
-                strategy = RayStrategy(
-                    num_workers=1, num_cpus_per_worker=7, use_gpu=True
-                )
-                accelerator = None
 
         trainer = pl.Trainer(
             max_epochs=max_epochs,

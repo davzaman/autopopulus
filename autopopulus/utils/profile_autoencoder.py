@@ -29,13 +29,14 @@ PROFILERS = {
 
 if __name__ == "__main__":
     seed = 0
-    batch_size = 512
-    nsamples = 10028
-    nfeatures = 10
-    fast_dev_run = 4
+    batch_size = 256
+    nsamples = 1000028
+    nfeatures = 20
+    fast_dev_run = 0
     rng = default_rng(seed)
-    num_gpus = 1
-    num_workers = 32
+    num_gpus = 2
+    num_workers = 4
+    optimn = "Adam"
 
     p = ArgumentParser()
     p.add_argument("--profilers", type=str, default=None, action=YAMLStringListToList())
@@ -92,7 +93,6 @@ if __name__ == "__main__":
         val_test_size=0.5,
         test_size=0.5,
         batch_size=batch_size,
-        num_gpus=num_gpus,
         num_workers=num_workers,
         scale=True,
         # feature_map="target_encode_categorical",
@@ -118,7 +118,7 @@ if __name__ == "__main__":
             mvec=False,
             variational=False,
             activation="ReLU",
-            optimn="Adam",
+            optimn=optimn,
             lossn="BCE",
             datamodule=data,
             fast_dev_run=fast_dev_run,

@@ -3,13 +3,16 @@ from typing import Dict
 from numpy import ndarray
 from pandas import DataFrame
 from pytorch_lightning.utilities import rank_zero_info, rank_zero_warn
+from pytorch_lightning.profiler import AdvancedProfiler
+from pytorch_lightning.loggers import TensorBoardLogger
 
 ## Local Modules
 from autopopulus.data import CommonDataModule
 
-# from autopopulus.task_logic.optuna import create_autoencoder
-from autopopulus.task_logic.tuner import create_autoencoder
+# Import from task_logic.<desired tuning module>: currently optuna not supported
+from autopopulus.task_logic.ray import create_autoencoder_with_tuning
 from autopopulus.models.ap import AEImputer
+from autopopulus.utils.log_utils import get_logdir
 
 
 AE_METHOD_SETTINGS = {
@@ -118,9 +121,21 @@ def ae_imputation_logic(
         ae_imputer = AEImputer.from_checkpoint(args)
         data.setup("fit")
     else:
-        ae_imputer = create_autoencoder(args, data, settings)
-        # need to setup data since it was setup in each tune run, but not this object
-        data.setup("fit")
+        if args.tune_n_samples:
+            ae_imputer = create_autoencoder_with_tuning(args, data, settings)
+            # need to setup data since it was setup in each tune run, but not this object
+            data.setup("fit")
+        else:  # If not tuning assume we've been given a specific setting for hyperparams
+            ae_imputer = AEImputer.from_argparse_args(
+                args,
+                logger=TensorBoardLogger(get_logdir(args)),
+                tune_callback=None,
+                # profiler=AdvancedProfiler(
+                #     dirpath="profiling-results", filename="advanced-real"
+                # ),
+                **settings,
+            )
+            ae_imputer.fit(data)
 
     transformed = {
         split_name: ae_transform(data, ae_imputer, split_name)

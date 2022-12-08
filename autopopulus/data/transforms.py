@@ -182,7 +182,9 @@ class CombineOnehots(TransformerMixin, BaseEstimator):
         if self.onehot_groupby:
             combined_onehots = (
                 X.groupby(self.onehot_groupby, axis=1)
-                .idxmax(1)  # replace value with the column name of the max
+                .idxmax(
+                    1, numeric_only=True
+                )  # replace value with the column name of the max
                 .apply(lambda col: col.str.replace(f"{col.name}_", ""))  # strip prefix
             )
             # combine with the rest of the data and then drop old onehot cols
@@ -384,7 +386,9 @@ def invert_discretize_tensor(
     X_disc = pd.DataFrame(tensor_to_numpy(encoded_data))
 
     # Get the index of the bin with the maximum score for each column group
-    col_max_indices = X_disc.groupby(disc_groupby, axis=1).idxmax(axis=1)
+    col_max_indices = X_disc.groupby(disc_groupby, axis=1).idxmax(
+        axis=1, numeric_only=True
+    )
     #  offset the indices to 0 so we can directly index into that var's ["bins"]
     offset_coln_maxes = col_max_indices.apply(
         lambda var_data: var_data - discretizations[var_data.name]["indices"][0]

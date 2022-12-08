@@ -36,10 +36,7 @@ from xgboost import XGBClassifier
 
 from sktime.classification.shapelet_based import ShapeletTransformClassifier
 from sktime.classification.distance_based import KNeighborsTimeSeriesClassifier
-from sktime._contrib.vector_classifiers._rotation_forest import RotationForest
-from sktime._contrib.vector_classifiers._continuous_interval_tree import (
-    ContinuousIntervalTree,
-)
+from sktime.classification.sklearn import RotationForest, ContinuousIntervalTree
 from sktime.transformations.panel.padder import PaddingTransformer
 from sktime.datatypes._panel._convert import from_multi_index_to_nested
 from sktime.transformations.panel.tsfresh import TSFreshFeatureExtractor

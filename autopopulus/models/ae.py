@@ -143,7 +143,7 @@ class AEDitto(pl.LightningModule):
         self.n_layers = len(hidden_layers) + 1  # fencing problem +1
 
         # Required for serialization
-        self.save_hyperparameters()
+        self.save_hyperparameters(ignore=["datamodule"])
 
     #######################
     #    Forward Logic    #
