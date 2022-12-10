@@ -25,6 +25,10 @@ from autopopulus.data import CommonDataModule
 from autopopulus.data.types import DataTypeTimeDim
 from autopopulus.data.constants import PATIENT_ID
 from autopopulus.utils.utils import CLIInitialized
+from autopopulus.data.dataset_classes import (
+    CommonDatasetWithTransform,
+    CommonTransformedDataset,
+)
 
 
 class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
@@ -187,15 +191,18 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         preds_list = self.inference_trainer.predict(self.ae, dataloader)
         # stack the list of preds from dataloader
         preds = torch.vstack(preds_list).cpu().numpy()
-        columns = dataloader.dataset.split["data"].columns
+        if isinstance(dataloader.dataset, CommonDatasetWithTransform):
+            columns = dataloader.dataset.split["data"].columns
+            reference_ids = dataloader.dataset.split_ids["data"]
+        elif isinstance(dataloader.dataset, CommonTransformedDataset):
+            columns = dataloader.dataset.transformed_data["original"]["data"].columns
+            reference_ids = dataloader.dataset.split_ids
 
         # Recover IDs, we use only indices used by the batcher (so if we limit to debug, this still works, even if it's shuffled)
         ids = (
-            dataloader.dataset.split_ids["data"][
-                : self.fast_dev_run * dataloader.batch_size
-            ]
+            reference_ids[: self.fast_dev_run * dataloader.batch_size]
             if self.fast_dev_run
-            else dataloader.dataset.split_ids["data"]
+            else reference_ids
         )
         # (n samples, t padded time points, f features) -> 2d pd df
         if self.longitudinal:
