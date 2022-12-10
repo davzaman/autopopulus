@@ -202,7 +202,58 @@ class SimpleDatasetLoader(AbstractDatasetLoader):
         pass
 
 
-class CommonDataset(Dataset):
+class CommonTransformedDataset(Dataset):
+    """
+    Extension of Pytorch Dataset for easy training/dataloading
+    does NOT transform data on the fly and assumes data is already transformed.
+    Assumes the data is already sliced for a particular split.
+    transformed_data_train = {
+        "original": {"data": ..., "ground_truth": ...},
+        "mapped": {"data": ..., "ground_truth": ...}
+    }
+    """
+
+    def __init__(
+        self,
+        transformed_data: Dict[str, Dict[str, DataT]],
+        longitudinal: bool = False,
+    ) -> None:
+        self.transformed_data = transformed_data
+        self.longitudinal = longitudinal
+
+        # TODO[LOW]: Refactor out
+        def get_unique(index: Index) -> ndarray:
+            try:
+                return index.unique(PATIENT_ID)
+            except Exception:
+                return index.unique()
+
+        # "original" should always exist and "data" should match "ground_truth" index.
+        self.split_ids = get_unique(self.transformed_data["original"]["data"].index)
+
+    def __len__(self) -> int:
+        return len(self.split_ids)
+
+    def __getitem__(self, index: int) -> Dict[str, Dict[str, Tensor]]:
+        """Slices a single sample, converts to Tensor, and returns dictionary."""
+        return_tensors = {}
+        for (
+            data_version,
+            data_dict,
+        ) in self.transformed_data.items():  # ["original", "mapped"]
+            return_tensors[data_version] = {}
+
+            for data_role, data in data_dict.items():  # ["data", "ground_truth"]
+                # a list of indices will ensure I get back a DF (2d array) whether im asking for just 1 index
+                sample = data.loc[[self.split_ids[index]]]
+                return_tensors[data_version][data_role] = Tensor(
+                    enforce_numpy(sample)
+                ).squeeze()
+
+        return return_tensors
+
+
+class CommonDatasetWithTransform(Dataset):
     """Extension of Pytorch Dataset for easy training/dataloading and applying transforms on the fly as the data is loaded into the model."""
 
     def __init__(
@@ -1027,27 +1078,47 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
     ##################
     #  Data Loading  #
     ##################
-    def _get_dataloader(self, split: str) -> DataLoader:
+    def _get_dataloader(
+        self, split: str, apply_transform_adhoc: bool = False
+    ) -> DataLoader:
         """
         Grab the split from all the Tensors in the self.splits dictionary.
-        If there is no mapped data, "mapped": {} will be empty.
+        If there is no mapped data, "mapped": {} will be empty or not exist.
         """
-        split_data = {k: v[split] for k, v in self.splits.items()}
-        return self._create_dataloader(split_data)
+        if apply_transform_adhoc:  # Apply transform 1-by-1 in Dataset __getitem__
+            split_data = {k: v[split] for k, v in self.splits.items()}
+        else:  # apply transform beforehand on the entire split
+            split_data = {}
+            for data_version in self.transforms.keys():  # ["original", "mapped"]
+                split_data[data_version] = {}
+                for (
+                    data_role,
+                    split_dfs,
+                ) in self.splits.items():  # ["data", "ground_truth"]
+                    if data_role != "label":
+                        # apply transform to particular split
+                        split_data[data_version][data_role] = self.transforms[
+                            data_version
+                        ][data_role](split_dfs[split])
+
+        return self._create_dataloader(split_data, apply_transform_adhoc)
 
     def _create_dataloader(
-        self, split_data: Dict[str, Dict[str, DataFrame]]
+        self, split_data: Dict[str, Dict[str, DataFrame]], apply_transform_adhoc: bool
     ) -> DataLoader:
         """Packages data for pytorch Dataset/DataLoader."""
         is_longitudinal = self.data_type_time_dim in (
             DataTypeTimeDim.LONGITUDINAL,
             DataTypeTimeDim.LONGITUDINAL_SUBSET,
         )
-        dataset = CommonDataset(
-            split_data,
-            self.transforms,
-            is_longitudinal,
-        )
+        if apply_transform_adhoc:
+            dataset = CommonDatasetWithTransform(
+                split_data,
+                self.transforms,
+                is_longitudinal,
+            )
+        else:
+            dataset = CommonTransformedDataset(split_data, is_longitudinal)
         loader = DataLoader(
             dataset,
             collate_fn=self._batch_collate if is_longitudinal else None,

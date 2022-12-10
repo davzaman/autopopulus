@@ -85,6 +85,12 @@ def main():
             if args.method in AE_METHOD_SETTINGS
             else baseline_static_imputation.BASELINE_DATA_SETTINGS
         )
+        # # To turn off transforms for debugging
+        # data_settings = {
+        #     "scale": False,
+        #     "feature_map": None,
+        #     "uniform_prob": False,
+        # }
 
         data = CommonDataModule.from_argparse_args(
             args,
