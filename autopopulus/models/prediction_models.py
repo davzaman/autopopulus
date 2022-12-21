@@ -1,6 +1,4 @@
-from ast import Call
-import inspect
-from pyclbr import Function
+from timeit import default_timer as timer
 from typing import Callable, List, Dict, Any, Optional, Tuple, Union
 from tqdm import tqdm
 from argparse import ArgumentParser, Namespace
@@ -33,6 +31,7 @@ from sklearn.metrics import (
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from xgboost import XGBClassifier
+from lightgbm import LGBMClassifier
 
 from sktime.classification.shapelet_based import ShapeletTransformClassifier
 from sktime.classification.distance_based import KNeighborsTimeSeriesClassifier
@@ -60,8 +59,8 @@ PREDICTOR_MODEL_METADATA = {
         "full_name": "logistic_regression",
         "pipeline_name": "LR",
         "model_kwargs": {
-            "solver": "lbfgs",
-            "max_iter": 5000,  # convergence warning
+            "solver": "sag",
+            # "max_iter": 5000,  # convergence warning
             "class_weight": "balanced",
         },
         "tune_kwargs": {"penalty": ["l2"], "C": logspace(4, 1, 20, base=1.0)},
@@ -87,7 +86,7 @@ PREDICTOR_MODEL_METADATA = {
             "scale_pos_weight": 72,
             "use_label_encoder": False,
             "eval_metric": "logloss",  # Get rid of warning
-            "use_label_encoder": False,  # get rid of warning
+            # "use_label_encoder": False,  # get rid of warning
         },
         "tune_kwargs": {
             "n_estimators": range(5, 35, 5),
@@ -98,6 +97,23 @@ PREDICTOR_MODEL_METADATA = {
         "has_n_jobs": True,
         "longitudinal": False,
     },
+    "lgbm": {
+        "cls": LGBMClassifier,
+        "full_name": "lgbm",
+        "pipeline_name": "LGBM",
+        "model_kwargs": {
+            "boosting_type": "goss",
+        },
+        "tune_kwargs": {
+            "n_estimators": range(5, 35, 5),
+            "max_depth": range(3, 11),
+            "learning_rate": [1e-5, 1e-3, 1e-1],
+        },
+        "has_seed": True,
+        "has_n_jobs": True,
+        "longitudinal": False,
+    },
+    # Time series
     "shapelettsc": {
         "cls": ShapeletTransformClassifier,
         "full_name": "shapelettsc",
@@ -196,7 +212,10 @@ class Predictor(TransformerMixin, CLIInitialized):
                 )
 
                 # Run GridSearch on concatenated train+val
+                print(f"Starting fit of {model}")
+                start = timer()
                 cv.fit(X_boot, y_boot)
+                print(f"Fit took {timer() - start} seconds.")
                 # Evaluate on best model
                 metric_results = self.evaluate(
                     y_eval, cv.predict(X_eval), cv.predict_proba(X_eval)[:, 1]
