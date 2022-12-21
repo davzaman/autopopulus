@@ -12,6 +12,7 @@
       type: string
     fully-observed:
       required: no
+      # arg-switch: yes  # ref: https://my.guild.ai/t/flag-not-recognized-no-module-named-batch-size/770/7
     feature-map:
       required: no
       type: string 
@@ -28,7 +29,6 @@
 - operations:
     main:
       description: Train and evaluate an imputer, run downstream predictions.
-      flags-import: no
       label: ${method} ${experiment-name}
       # plugins: summary
       env: # don't save pycache
@@ -43,6 +43,9 @@
               - mlruns
               - notebooks
               - tune_results
+              - full
+              - profiling-results
+              - fil-result
       output-scalars: off
       requires:
         config: options.yml
@@ -69,6 +72,9 @@
               - mlruns
               - notebooks
               - tune_results
+              - full
+              - profiling-results
+              - fil-result
       output-scalars: off
       requires:
         - config: options.yml
@@ -92,6 +98,9 @@
               - mlruns
               - notebooks
               - tune_results
+              - full
+              - profiling-results
+              - fil-result
       output-scalars: off
       requires:
         - config: options.yml
