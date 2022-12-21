@@ -444,18 +444,18 @@ def invert_target_encoding_tensor(
     encoded_data = tensor_to_numpy(encoded_data)  # needed for inverse transform sklearn
 
     # this is in collapsed-onehot space
-    for idx, mapping in mean_to_ordinal_map["mapping"].items():
+    for col_idx, mapping in mean_to_ordinal_map["mapping"].items():
         mean_encoded_values = np.array(list(mapping.values()))
         ordinal_value = np.array(list(mapping.keys()))
         # get nearest since after autoencoder i wont' have the exact continuous value
         # if there's multiple mins prefers the 1st one (multiple cats with same enc)
         # preserves nans in place
-        encoded_data[:, idx] = np.array(
+        encoded_data[:, col_idx] = np.array(
             [
-                ordinal_value[idx] if not np.isnan(idx) else idx
-                for idx in [
+                ordinal_value[mapping_idx] if not np.isnan(mapping_idx) else mapping_idx
+                for mapping_idx in [
                     _nanargmin(np.abs(mean_encoded_values - v))
-                    for v in encoded_data[:, idx]
+                    for v in encoded_data[:, col_idx]
                 ]
             ]
         )
