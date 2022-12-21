@@ -801,7 +801,10 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
                 steps.append(
                     (
                         "target_encode_categorical",
-                        TargetEncoder(cols=intermediate_categorical_cols),
+                        TargetEncoder(
+                            cols=intermediate_categorical_cols,
+                            handle_unknown="return_nan",
+                        ),
                     ),
                 )
 
@@ -1232,10 +1235,10 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         #### AMPUTE ####
         p.add_argument(
             "--fully-observed",
-            action="store_true",
-            required=False,
-            help="Filter down to fully observed dataset flag [TOGGLE].",
-        )  # acts as switch
+            type=str2bool,
+            default=False,
+            help="Filter down to fully observed dataset flag.",
+        )  
         p.add_argument(
             "--percent-missing",
             type=float,
