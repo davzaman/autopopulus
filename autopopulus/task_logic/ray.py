@@ -29,6 +29,9 @@ from autopopulus.utils.log_utils import (
 from autopopulus.models.ap import AEImputer
 from autopopulus.data import CommonDataModule
 
+TOTAL_GPUS_ON_MACHINE = 4
+TOTAL_CPUS_ON_MACHINE = 32
+
 
 def create_autoencoder_with_tuning(
     args: Namespace, data: CommonDataModule, settings: Dict
@@ -103,7 +106,7 @@ def tune_model(
     logger = TensorBoardLogger(get_logdir(args))
 
     if args.num_gpus > 1:
-        nworkers = 4 // args.num_gpus
+        nworkers = TOTAL_GPUS_ON_MACHINE // args.num_gpus
         callback = TuneReportCallback
         strategy = RayStrategy(
             num_workers=nworkers,
@@ -142,14 +145,18 @@ def run_tune(
 
     data_type_time_dim_name = data.data_type_time_dim.name
 
+    ncpu = TOTAL_CPUS_ON_MACHINE // TOTAL_GPUS_ON_MACHINE
+
     if num_gpus_per_trial <= 1:
-        resources_per_trial = {"cpu": 8, "gpu": 1}
+        resources_per_trial = {"cpu": ncpu, "gpu": 1}
         args.num_gpus = 1
-        args.num_workers = 2
+        args.num_workers = 4
     else:  # Tune requires 1 extra CPU per trial to use for the Trainable driver.
+        ngroups = TOTAL_GPUS_ON_MACHINE // num_gpus_per_trial
         resources_per_trial = tune.PlacementGroupFactory(
             [{"CPU": 1}]
-            + [{"CPU": 7, "GPU": num_gpus_per_trial}] * (4 // num_gpus_per_trial),
+            + [{"CPU": TOTAL_CPUS_ON_MACHINE // ngroups - 1, "GPU": num_gpus_per_trial}]
+            * ngroups,
             strategy="PACK",
         )
 
