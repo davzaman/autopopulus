@@ -49,18 +49,14 @@ install(theme="solarized-dark")
 
 
 def get_imputation_logic(args: Namespace) -> Callable[[Namespace, DataT], None]:
-    # nothing done...just fully observed
-    if args.method == "none":
-        return baseline_static_imputation.fully_observed
+    if args.method in AE_METHOD_SETTINGS:
+        return ae_imputation_logic
+    elif hasattr(baseline_static_imputation, args.method) or hasattr(
+        baseline_longitudinal_imputation, args.method
+    ):
+        return baseline_imputation.baseline_imputation_logic
     else:
-        if args.method in AE_METHOD_SETTINGS:
-            return ae_imputation_logic
-        elif hasattr(baseline_static_imputation, args.method) or hasattr(
-            baseline_longitudinal_imputation, args.method
-        ):
-            return baseline_imputation.baseline_imputation_logic
-        else:
-            error(f"Method passed ({args.method}) is not a supported method.")
+        error(f"Method passed ({args.method}) is not a supported method.")
 
 
 def main():
@@ -190,8 +186,7 @@ def init_cli_args() -> Namespace:
         default="simple",
         choices=list(AE_METHOD_SETTINGS.keys())
         + get_module_function_names(baseline_static_imputation)
-        + get_module_function_names(baseline_longitudinal_imputation)
-        + ["none"],
+        + get_module_function_names(baseline_longitudinal_imputation),
         help="Which imputer to use, fully_observed for no imputation (include the fully observed flag in this case).",
     )
     # For MICE
