@@ -851,7 +851,11 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
                     "ground_truth": self._get_original_transform(ground_truth_pipeline),
                 },
             }
-            if self.feature_map is not None:
+            # TODO: currently we assume onehot_categorical, so nothing happens when you pick that.
+            if self.feature_map in [
+                "target_encode_categorical",
+                "discretize_continuous",
+            ]:
                 self.transforms["mapped"] = {
                     "data": data_pipeline.transform,
                     "ground_truth": ground_truth_pipeline.transform,
@@ -1238,7 +1242,7 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
             type=str2bool,
             default=False,
             help="Filter down to fully observed dataset flag.",
-        )  
+        )
         p.add_argument(
             "--percent-missing",
             type=float,
