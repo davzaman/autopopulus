@@ -6,18 +6,21 @@ from typing import Dict, Any, List, Tuple
 
 from pytorch_lightning.utilities import rank_zero_info
 from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.strategies.strategy import Strategy
 
 import torch
 
 import ray
 import ray.tune as tune
+import ray.air as air
 from ray.tune.schedulers.async_hyperband import ASHAScheduler
-
 from ray.tune.integration.pytorch_lightning import (
     TuneReportCallback as raytune_TuneReportCallback,
 )
+
 from ray_lightning import RayStrategy
-from ray_lightning.tune import TuneReportCallback, get_tune_resources
+from ray_lightning.tune import TuneReportCallback as raylightning_TuneReportCallback
+from ray_lightning.tune import get_tune_resources
 
 # Local
 from autopopulus.utils.log_utils import (
@@ -29,17 +32,12 @@ from autopopulus.utils.log_utils import (
 from autopopulus.models.ap import AEImputer
 from autopopulus.data import CommonDataModule
 
-TOTAL_GPUS_ON_MACHINE = 4
-TOTAL_CPUS_ON_MACHINE = 32
-
 
 def create_autoencoder_with_tuning(
     args: Namespace, data: CommonDataModule, settings: Dict
 ) -> AEImputer:
     logdir = get_logdir(args)
-    best_tune_logdir, best_model_config = run_tune(
-        args, data, settings, args.experiment_name, args.tune_n_samples
-    )
+    best_tune_logdir, best_model_config = run_tune(args, data, settings)
     # log.add_text("best_model_config", str(best_model_config))
     # Copy serialized model and logged values to local path, ignoring tune artifacts
     copy_log_from_tune(best_tune_logdir, logdir)
@@ -101,21 +99,11 @@ def tune_model(
     data: CommonDataModule,
     settings: Dict[str, Any],
     metrics: List[str],
+    callback: raytune_TuneReportCallback,
+    strategy: Strategy,
 ):
     """NOTE: YOU CANNOT PASS THE SUMMARYWRITER HERE IT WILL CAUSE A PROBLEM WITH MULTIPROCESSING: RuntimeError: Queue objects should only be shared between processes through inheritance"""
     logger = TensorBoardLogger(get_logdir(args))
-
-    if args.num_gpus > 1:
-        nworkers = TOTAL_GPUS_ON_MACHINE // args.num_gpus
-        callback = TuneReportCallback
-        strategy = RayStrategy(
-            num_workers=nworkers,
-            num_cpus_per_worker=nworkers * 4,
-            use_gpu=True,
-        )
-    else:
-        callback = raytune_TuneReportCallback
-        strategy = None  # no custom strategy, use pl defaults
 
     ae_imputer = AEImputer.from_argparse_args(
         args,
@@ -132,56 +120,95 @@ def run_tune(
     args: Namespace,
     data: CommonDataModule,
     settings: Dict[str, Any],
-    experiment_name: str,
-    tune_n_samples: int = 1,
 ) -> Tuple[str, Dict]:
-    # ref: https://docs.ray.io/en/latest/tune/examples/tune-pytorch-lightning.html
-    """Gets the checkpoint path and config of the best model.
-    https://docs.ray.io/en/master/tune/tutorials/tune-pytorch-lightning.html"""
-    # default port: 8265
+    """
+    Gets the checkpoint path and config of the best model.
+    Uses the total hardware on the machine and the gpus per trial requested
+        to determine how many CPUs per trial.
+    num_workers is not dynamically determined.
+        More workers means more parallel dataloading, but more overhead (slower start).
+
+    https://docs.ray.io/en/master/tune/tutorials/tune-pytorch-lightning.html
+    Ref: https://docs.ray.io/en/latest/tune/examples/tune-pytorch-lightning.html
+    """
+
+    # https://docs.ray.io/en/latest/ray-core/package-ref.html#ray-init
+    # dashboard default port: 8265, dashboard requires ray-default package
     ray.init(include_dashboard=True)
 
-    num_gpus_per_trial = 1
-
     data_type_time_dim_name = data.data_type_time_dim.name
+    ncpu_per_gpu = args.total_cpus_on_machine // args.total_gpus_on_machine
 
-    ncpu = TOTAL_CPUS_ON_MACHINE // TOTAL_GPUS_ON_MACHINE
+    # set args to pass in
+    args.num_workers = min(4, ncpu_per_gpu)
 
-    if num_gpus_per_trial <= 1:
-        resources_per_trial = {"cpu": ncpu, "gpu": 1}
-        args.num_gpus = 1
-        args.num_workers = 4
+    # get callback, strat, and resources per trial depending on ngpus per trial.
+    if args.n_gpus_per_trial <= 1:
+        args.num_gpus = args.n_gpus_per_trial
+
+        # Set callback and strat
+        callback = raytune_TuneReportCallback
+        strategy = None  # no custom strategy, use pl defaults
+
+        resources_per_trial = {"cpu": ncpu_per_gpu, "gpu": args.n_gpus_per_trial}
     else:  # Tune requires 1 extra CPU per trial to use for the Trainable driver.
-        ngroups = TOTAL_GPUS_ON_MACHINE // num_gpus_per_trial
-        resources_per_trial = tune.PlacementGroupFactory(
-            [{"CPU": 1}]
-            + [{"CPU": TOTAL_CPUS_ON_MACHINE // ngroups - 1, "GPU": num_gpus_per_trial}]
-            * ngroups,
-            strategy="PACK",
+        # ray_lightning won't call setup automatically in pl.Trainer (idk why)
+        # manually call it ourselves once, fixes the problem
+        data.setup("fit")
+        # trainer needs to see num_gpus 0 or else it will complain
+        # the GPUs WILL be used though.
+        args.num_gpus = 0  # https://github.com/ray-project/ray_lightning/issues/64
+
+        # Set callback and strat
+        callback = raylightning_TuneReportCallback
+        strategy = RayStrategy(
+            num_workers=args.n_gpus_per_trial,  # Actual number of GPUs determined by num_workers
+            num_cpus_per_worker=ncpu_per_gpu,
+            use_gpu=True,
+        )
+
+        # Get resources per trial
+        resources_per_trial = get_tune_resources(
+            num_workers=args.n_gpus_per_trial,
+            num_cpus_per_worker=ncpu_per_gpu,
+            use_gpu=True,
         )
 
     metrics = [
         f"AE/{data.data_type_time_dim.name}/val-loss",
         f"impute/{data_type_time_dim_name}/original/val-CWMAAPE-missingonly",
     ]
-    analysis = tune.run(
-        tune.with_parameters(
-            tune_model, args=args, data=data, settings=settings, metrics=metrics
-        ),
-        name=experiment_name,
-        local_dir=TUNE_LOG_DIR,
-        num_samples=tune_n_samples,
-        scheduler=ASHAScheduler(),
-        mode="min",
-        metric=metrics[1],
-        trial_name_creator=lambda trial: trial.trial_id,
-        # keep_checkpoints_num=1,
-        # checkpoint_at_end=True,  # checkpoitns the tune trials not the model
-        resources_per_trial=resources_per_trial,
-        config=get_tune_grid(args),
-    )
 
-    return (
-        analysis.get_best_logdir(metric=metrics[1], mode="min"),
-        analysis.get_best_config(metric=metrics[1], mode="min"),
+    # https://docs.ray.io/en/latest/tune/api_docs/execution.html#tuner
+    tuner = tune.Tuner(
+        tune.with_resources(
+            tune.with_parameters(
+                tune_model,
+                args=args,
+                data=data,
+                settings=settings,
+                metrics=metrics,
+                callback=callback,
+                strategy=strategy,
+            ),
+            resources=resources_per_trial,
+        ),
+        tune_config=tune.TuneConfig(
+            mode="min",
+            metric=metrics[1],
+            scheduler=ASHAScheduler(),
+            num_samples=args.tune_n_samples,
+            trial_name_creator=lambda trial: trial.trial_id,
+        ),
+        run_config=air.RunConfig(
+            name=args.experiment_name,
+            local_dir=TUNE_LOG_DIR,
+        ),
+        param_space=get_tune_grid(args),
     )
+    # https://docs.ray.io/en/latest/tune/api_docs/result_grid.html
+    results = tuner.fit()
+    # https://docs.ray.io/en/latest/ray-air/package-ref.html#ray.air.result.Result
+    best_result = results.get_best_result(metric=metrics[1], mode="min")
+
+    return (best_result.log_dir, best_result.config)

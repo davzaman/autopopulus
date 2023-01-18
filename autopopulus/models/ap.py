@@ -124,8 +124,8 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         ]
 
         # https://github.com/PyTorchLightning/pytorch-lightning/discussions/6761#discussioncomment-1152286
-        # Use DDP if there's more than 1 GPU, otherwise, it's not necessary.
         if strategy is None:
+            # Use DDP if there's more than 1 GPU, otherwise, it's not necessary.
             strategy = "ddp_find_unused_parameters_false" if num_gpus > 1 else None
             accelerator = "gpu" if num_gpus else "cpu"
         else:
@@ -278,6 +278,24 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
             type=int,
             default=0,
             help="When defining the distributions/choices to go over during hyperparameter tuning, how many samples to take.",
+        )
+        p.add_argument(
+            "--n-gpus-per-trial",
+            type=int,
+            default=1,
+            help="How many GPUs to use per hyperparameter trial when tuning.",
+        )
+        p.add_argument(
+            "--total-cpus-on-machine",
+            type=int,
+            default=0,
+            help="How many CPUs are on the machine running experiments.",
+        )
+        p.add_argument(
+            "--total-gpus-on-machine",
+            type=int,
+            default=0,
+            help="How many GPUs are on the machine running experiments.",
         )
         p.add_argument(
             "--fast-dev-run",
