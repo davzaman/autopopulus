@@ -26,7 +26,8 @@ if __name__ == "__main__":
     # packages installed by pip but not mamba (unique)
     pip_but_not_mamba = list(set(pip_pkgs) - set(yml["dependencies"]))
     # add pip-installed packages to yaml
-    yml["dependencies"].append("pip")  # need to install pip manually in the list
+    if "pip" not in yml["dependencies"]:  # need to install pip manually in the list
+        yml["dependencies"].append("pip")
     # https://stackoverflow.com/a/35245610/1888794
     yml["dependencies"].append({"pip": pip_but_not_mamba})
 

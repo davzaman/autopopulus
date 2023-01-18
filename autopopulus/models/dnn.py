@@ -80,7 +80,7 @@ class DNNClassifier(ClassifierMixin, BaseEstimator):
                 deterministic=True,
                 # gpus=self.num_gpus,
                 # accelerator="ddp" if self.num_gpus > 1 else None,
-                profiler="simple",  # or "advanced" which is more granular
+                # profiler="simple",  # or "advanced" which is more granular
                 checkpoint_callback=False,
                 callbacks=callbacks,
             )
@@ -305,7 +305,7 @@ if __name__ == "__main__":
 
     # TODO[LOW]: update this with new code
     from sklearn.model_selection import train_test_split
-    from main import init_cli_args
+    from autopopulus.main import init_cli_args
 
     args = init_cli_args()
     # seed for np, torch, python.random, pythonhashseed

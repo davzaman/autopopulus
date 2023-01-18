@@ -40,7 +40,7 @@ setup(
     extras_require={
         "dev": [
             # https://github.com/Lightning-AI/lightning/discussions/11926
-            "ray[tune]",
+            "ray[tune,default]",
             "guildai",
             "plotly",
             "nbstripout",

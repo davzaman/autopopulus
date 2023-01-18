@@ -11,6 +11,7 @@
       arg-skip: yes  #  don't include as arg, log to guild
       type: string
     fully-observed:
+      type: string
       required: no
       # arg-switch: yes  # ref: https://my.guild.ai/t/flag-not-recognized-no-module-named-batch-size/770/7
     feature-map:
