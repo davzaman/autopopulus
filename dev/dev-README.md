@@ -65,6 +65,15 @@ If you want to add new imputers:
   - add the name for individual guild operation.
   - add corresponding function to `*_experiments.py`
 
+## Ray[Tune]
+If using Ray[Tune], to monitor the tuning experiments with a dashboard you can use `tune.init(include_dashboard=True)`.
+However, if you are running into issues, you can check the logs at `cat /tmp/ray/session_latest/logs/dashboard.log` or `cat /tmp/ray/session_latest/logs/dashboard_agent.log`.
+It turns out you need `ray-default` in order to use the dashboard in addition to `ray-tune`.
+Ray Tune is on pip and conda-forge. You can check if conda-forge has the most up-to-date versions [here](https://github.com/conda-forge/ray-packages-feedstock).
+
+## ray-lightning
+It's very finicky, and I need to use the most up-to-date version on github.
+First uninstall `ray-lightning` and then reinstall with `pip install git+https://github.com/ray-project/ray_lightning@<desiredcommithash>`.
 
 # Includes:
 
@@ -82,21 +91,5 @@ GuildAI is closer to a Makefile + experiment tracking.
 It's very easy to plug in, just add in a `guild.yml` file and then some scripts to run all the different configurations I'd like.
 
 ## GuildAI
-My old runs are in my base environment (when i used to use guild there).
 
 Important [commands](https://my.guild.ai/t/commands-cheatsheet/193):
-- `guild ops`: which ops i can run
-- `guild run all-imputers --stage-trials`: concurrent execution for all my trials
-  -  Say I have a machine with 32 CPUs cores, and say i have 24 trials, then I'd create 24 queues for 24 threads,
-- `guild view`: can access tensorboard from here
-  - Currently has issues, use `guild tensorboard` instead. You can [filter](https://my.guild.ai/t/command-tensorboard/127).
-- `guild ls`: list run files
-  - `guild ls --sourcecode`: List source code
-  - `guild open --sourcecode`: Open in file explorer
-- `guild runs`: list runs
-  - `guild runs -n 1 -v` show info from latest run
-  - `guild runs rm`: Delete ALL runs
-  - `guild runs stop`: stop all running runs.
-  - `guild runs delete --started 'today'`: delete all runs that you ran today.
-- clean up runs: `guild runs rm --unlabeled`
-- [Debugging help](https://my.guild.ai/t/commands-cheatsheet/193#debug-an-operation)
