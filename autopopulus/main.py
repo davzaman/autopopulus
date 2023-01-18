@@ -144,6 +144,7 @@ def init_cli_args() -> Namespace:
     if "cure_ckd" in sys.argv:
         p = CureCKDDataLoader.add_data_args(p)
     if "crrt" in sys.argv:
+        # if this class' args are in the yml file/CLI then it will be a part of parse_known_args()[1] (it's unknown)
         p = CrrtDataLoader.add_data_args(p)
     p.add_argument(
         "--mimic-limit",

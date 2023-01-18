@@ -1215,7 +1215,7 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
             "--num-workers",
             type=int,
             default=4,
-            help="Number of workers for the pytorch dataset used in passing batches to the autoencoder.",
+            help="Number of workers for the pytorch dataloader used in passing batches to the autoencoder.",
         )
         p.add_argument(
             "--scale",
@@ -1240,7 +1240,7 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         p.add_argument(
             "--fully-observed",
             type=str2bool,
-            default=False,
+            default="no",
             help="Filter down to fully observed dataset flag.",
         )
         p.add_argument(
