@@ -24,7 +24,6 @@ setup(
         "keras",  # if using keras for dnn
         "sktime",
         "pypots",
-        "tensorflow",  # summary stuff for logging
         "regex",
         "cloudpickle",
         "tsfresh",

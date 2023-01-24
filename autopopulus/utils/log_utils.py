@@ -17,9 +17,6 @@ from pytorch_lightning.utilities import rank_zero_only
 from torch.utils.tensorboard import SummaryWriter
 from torch import isnan, tensor
 
-import tensorflow as tf
-from tensorflow.core.util.event_pb2 import Event
-
 
 from autopopulus.data import CommonDataModule
 from autopopulus.utils.impute_metrics import CWMAAPE, CWRMSE

@@ -12,7 +12,6 @@ import torch.nn as nn
 import torch.optim as optim
 import pytorch_lightning as pl
 
-import tensorflow as tf
 from torch.utils.tensorboard import SummaryWriter
 from sklearn.base import BaseEstimator, ClassifierMixin
 
@@ -67,23 +66,18 @@ class DNNClassifier(ClassifierMixin, BaseEstimator):
         self.num_gpus = num_gpus
         self.use_keras = use_keras
         self.seed = seed
-        if use_keras:
-            self.dnn = keras_dnn(self.lr, self.l2_penalty, self.dropout)
-        else:
-            self.dnn = DNNLightning(
-                self.lr, self.l2_penalty, self.dropout, input_dim, seed
-            )
-            callbacks = [EarlyStopping(monitor="DNN/val-loss", patience=5)]
-            self.trainer = pl.Trainer(
-                max_epochs=max_epochs,
-                logger=logger,
-                deterministic=True,
-                # gpus=self.num_gpus,
-                # accelerator="ddp" if self.num_gpus > 1 else None,
-                # profiler="simple",  # or "advanced" which is more granular
-                checkpoint_callback=False,
-                callbacks=callbacks,
-            )
+        self.dnn = DNNLightning(self.lr, self.l2_penalty, self.dropout, input_dim, seed)
+        callbacks = [EarlyStopping(monitor="DNN/val-loss", patience=5)]
+        self.trainer = pl.Trainer(
+            max_epochs=max_epochs,
+            logger=logger,
+            deterministic=True,
+            # gpus=self.num_gpus,
+            # accelerator="ddp" if self.num_gpus > 1 else None,
+            # profiler="simple",  # or "advanced" which is more granular
+            checkpoint_callback=False,
+            callbacks=callbacks,
+        )
 
     def fit(
         self,
@@ -126,8 +120,6 @@ class DNNClassifier(ClassifierMixin, BaseEstimator):
         """
         if isinstance(X, pd.DataFrame):
             X = X.values
-        if self.use_keras:
-            return tf.nn.sigmoid(self.dnn.predict(X)).numpy()
         logit = self.dnn(torch.Tensor(X))
         positive_class_probability = torch.sigmoid(logit).detach().numpy()
         negative_class_probability = 1 - positive_class_probability
@@ -243,63 +235,6 @@ class DNNLightning(pl.LightningModule):
         return pl.metrics.functional.classification.auc(recall, prec)
 
 
-def keras_dnn(
-    learning_rate: float,
-    l2_penalty: float,
-    dropout: float,
-    metrics=METRICS_TF,
-    output_bias=None,
-) -> tf.keras.Sequential:
-    """DNN but in Keras."""
-
-    if output_bias is not None:
-        output_bias = tf.keras.initializers.Constant(output_bias)
-    model = tf.keras.Sequential(
-        [
-            tf.keras.layers.Dense(
-                64,
-                kernel_regularizer=tf.keras.regularizers.l2(l2_penalty),
-                activation="relu",
-            ),
-            tf.keras.layers.Dropout(dropout),
-            tf.keras.layers.Dense(
-                64,
-                kernel_regularizer=tf.keras.regularizers.l2(l2_penalty),
-                activation="relu",
-            ),
-            tf.keras.layers.Dropout(dropout),
-            tf.keras.layers.Dense(
-                32,
-                kernel_regularizer=tf.keras.regularizers.l2(l2_penalty),
-                activation="relu",
-            ),
-            tf.keras.layers.Dropout(dropout),
-            tf.keras.layers.Dense(
-                16,
-                kernel_regularizer=tf.keras.regularizers.l2(l2_penalty),
-                activation="relu",
-            ),
-            tf.keras.layers.Dropout(dropout),
-            tf.keras.layers.Dense(
-                # 1, activation="sigmoid", bias_initializer=output_bias,
-                1,
-                bias_initializer=output_bias,
-            ),
-        ]
-    )
-
-    model.compile(
-        optimizer=tf.keras.optimizers.Adam(lr=learning_rate),
-        # loss=tf.keras.losses.BinaryCrossentropy(),
-        loss=tf.keras.losses.BinaryCrossentropy(
-            from_logits=True,
-        ),
-        metrics=metrics,
-    )
-
-    return model
-
-
 if __name__ == "__main__":
     from sklearn import datasets
 
@@ -310,7 +245,6 @@ if __name__ == "__main__":
     args = init_cli_args()
     # seed for np, torch, python.random, pythonhashseed
     pl.seed_everything(args.seed)
-    tf.random.set_seed(args.seed)
 
     bc = datasets.load_breast_cancer()
     X, y = bc["data"], bc["target"]
@@ -325,22 +259,9 @@ if __name__ == "__main__":
         args.batch_size,
         args.num_gpus,
     )
-    keras = DNNClassifier(
-        True, X_train.shape[1], max_epochs, args.seed, args.batch_size, args.num_gpus
-    )
-    keras2 = DNNClassifier(
-        True, X_train.shape[1], max_epochs, args.seed, args.batch_size, args.num_gpus
-    )
 
     pt.fit(X_train, y_train, X_test, y_test)
-    keras.fit(X_train, y_train, X_test, y_test)
-    keras2.fit(X_train, y_train, X_test, y_test)
     info(repr(pt.dnn))
-    info(keras.dnn.summary())
 
     pt_res = pt.predict(X_test)
     # info(pt.predict_proba(iris_df))
-    keras_res = keras.predict(X_test)
-    keras_res2 = keras2.predict(X_test)
-    info(f"Models do {'' if np.equal(keras_res, keras2).all() else 'NOT'} match.")
-    info(f"Models do {'' if np.equal(keras_res, pt_res).all() else 'NOT'} match.")

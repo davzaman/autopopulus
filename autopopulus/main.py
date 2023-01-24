@@ -8,12 +8,14 @@ from os.path import join, exists, dirname
 
 #### Traceback ####
 from rich.traceback import install
-from sklearn.exceptions import DataConversionWarning
 from rich import (
     print,
 )  # https://rich.readthedocs.io/en/stable/markup.html#console-markup
-import warnings
 
+install(theme="solarized-dark")
+
+from sklearn.exceptions import DataConversionWarning
+import warnings
 
 warnings.filterwarnings(action="ignore", category=DataConversionWarning)
 warnings.filterwarnings(action="ignore", category=FutureWarning)
@@ -44,8 +46,6 @@ from autopopulus.task_logic.ae_imputation import AE_METHOD_SETTINGS, ae_imputati
 from autopopulus.models.ae import AEDitto
 from autopopulus.models.prediction_models import Predictor
 from autopopulus.data.types import DataT  # Filter warnings
-
-install(theme="solarized-dark")
 
 
 def get_imputation_logic(args: Namespace) -> Callable[[Namespace, DataT], None]:
