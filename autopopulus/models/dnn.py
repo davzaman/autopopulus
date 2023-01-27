@@ -240,7 +240,7 @@ if __name__ == "__main__":
 
     # TODO[LOW]: update this with new code
     from sklearn.model_selection import train_test_split
-    from autopopulus.main import init_cli_args
+    from utils.get_set_cli_args import init_cli_args
 
     args = init_cli_args()
     # seed for np, torch, python.random, pythonhashseed

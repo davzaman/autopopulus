@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 
 from autopopulus.data.constants import PAD_VALUE
+from autopopulus.utils.utils import rank_zero_print
 
 
 class BatchSwapNoise(nn.Module):
@@ -128,7 +129,7 @@ class Print(nn.Module):
         super().__init__()
 
     def forward(self, x):
-        print(x)
+        rank_zero_print(x)
         return x
 
 

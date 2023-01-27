@@ -1,5 +1,5 @@
 from argparse import Namespace
-from logging import FileHandler, StreamHandler, basicConfig, info, INFO
+from logging import FileHandler, StreamHandler, basicConfig, INFO
 from shutil import copy
 from typing import Dict, List, Optional, Union
 
@@ -12,14 +12,13 @@ import pandas as pd
 
 from pytorch_lightning.loggers import LightningLoggerBase
 from pytorch_lightning.loggers.base import rank_zero_experiment
-from pytorch_lightning.utilities import rank_zero_info
-from pytorch_lightning.utilities import rank_zero_only
 from torch.utils.tensorboard import SummaryWriter
 from torch import isnan, tensor
 
 
 from autopopulus.data import CommonDataModule
 from autopopulus.utils.impute_metrics import CWMAAPE, CWRMSE
+from autopopulus.utils.utils import rank_zero_print
 
 TUNE_LOG_DIR = "tune_results"
 
@@ -80,7 +79,7 @@ def log_imputation_performance(
         for name, metricfn in metrics.items():
             metric = metricfn(est, true)
             metric_missing_only = metricfn(est, true, missing_mask)
-            rank_zero_info(
+            rank_zero_print(
                 f"{name}: {metric}.\n Missing cols only, {name}: {metric_missing_only}"
             )
             log.add_scalar(f"impute/{stage}-{name}", metric)

@@ -2,7 +2,8 @@ from argparse import Namespace
 from typing import Dict
 from numpy import ndarray
 from pandas import DataFrame
-from pytorch_lightning.utilities import rank_zero_info, rank_zero_warn
+from pytorch_lightning.utilities import rank_zero_warn
+from pytorch_lightning.utilities.rank_zero import rank_zero_only
 from pytorch_lightning.profiler import AdvancedProfiler
 from pytorch_lightning.loggers import TensorBoardLogger
 
@@ -13,6 +14,7 @@ from autopopulus.data import CommonDataModule
 from autopopulus.task_logic.ray import create_autoencoder_with_tuning
 from autopopulus.models.ap import AEImputer
 from autopopulus.utils.log_utils import get_logdir
+from autopopulus.utils.utils import rank_zero_print
 
 
 AE_METHOD_SETTINGS = {
@@ -97,6 +99,7 @@ AE_METHOD_SETTINGS = {
 }
 
 
+@rank_zero_only
 def ae_transform(
     data_module: CommonDataModule, ae_imputer: AEImputer, split_name: str
 ) -> ndarray:
@@ -117,7 +120,7 @@ def ae_imputation_logic(
                 "Specified a checkpoint and to run tuning, we default to loading the checkpoint."
                 " If this was not the intention, please do not specify a checkpoint."
             )
-        rank_zero_info(f"Loading AEImputer from {args.ae_from_checkpoint}")
+        rank_zero_print(f"Loading AEImputer from {args.ae_from_checkpoint}")
         ae_imputer = AEImputer.from_checkpoint(args)
         data.setup("fit")
     else:

@@ -1,8 +1,8 @@
 import torch
 from pytorch_lightning.loggers import TensorBoardLogger
+import argparse  # needed to guild knows to import flags
 
-from autopopulus.utils.cli_arg_utils import load_cli_args
-from autopopulus.main import init_cli_args
+from autopopulus.utils.get_set_cli_args import init_cli_args, load_cli_args
 from autopopulus.utils.utils import seed_everything
 from autopopulus.models.ap import AEImputer
 from autopopulus.utils.log_utils import get_serialized_model_path

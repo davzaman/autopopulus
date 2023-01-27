@@ -50,7 +50,7 @@ from autopopulus.models.evaluation import (
     bootstrap_confidence_interval,
     shapiro_wilk_test,
 )
-from autopopulus.utils.utils import CLIInitialized
+from autopopulus.utils.utils import CLIInitialized, rank_zero_print
 
 
 PREDICTOR_MODEL_METADATA = {
@@ -212,10 +212,10 @@ class Predictor(TransformerMixin, CLIInitialized):
                 )
 
                 # Run GridSearch on concatenated train+val
-                print(f"Starting fit of {model}")
+                rank_zero_print(f"Starting fit of {model}")
                 start = timer()
                 cv.fit(X_boot, y_boot)
-                print(f"Fit took {timer() - start} seconds.")
+                rank_zero_print(f"Fit took {timer() - start} seconds.")
                 # Evaluate on best model
                 metric_results = self.evaluate(
                     y_eval, cv.predict(X_eval), cv.predict_proba(X_eval)[:, 1]
@@ -286,8 +286,8 @@ class Predictor(TransformerMixin, CLIInitialized):
 
         if self.verbose:
             # print redundant with TP/etc information but it's formatted better
-            rank_zero_info(f"CM: {conf_matrix}")
-            rank_zero_info(performance)
+            rank_zero_print(f"CM: {conf_matrix}")
+            rank_zero_print(performance)
         return performance
 
     def build_models(self, n_jobs: int = -1) -> List[BaseEstimator]:

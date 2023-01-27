@@ -10,7 +10,6 @@ import regex as re
 from os.path import join
 import pandas as pd
 from functools import reduce
-from pytorch_lightning.utilities.rank_zero import rank_zero_info
 from logging import error
 
 #### Local Module ####
@@ -21,6 +20,7 @@ from autopopulus.data import (
     StaticFeatureAndLabel,
 )
 from autopopulus.utils.cli_arg_utils import YAMLStringDictToDict, YAMLStringListToList
+from autopopulus.utils.utils import rank_zero_print
 
 
 ENCODINGS = {
@@ -211,7 +211,7 @@ class CureCKDDataLoader(AbstractDatasetLoader):
             try:
                 longitudinal_df = pd.read_parquet(longitudinal_file_path)
             except Exception:
-                rank_zero_info("Longitudinal file not found, creating...")
+                rank_zero_print("Longitudinal file not found, creating...")
                 longitudinal_df = self.load_longitudinal(df)
                 # Need parquet to serialize multindex dfs
                 longitudinal_df.to_parquet(longitudinal_file_path)
@@ -240,7 +240,7 @@ class CureCKDDataLoader(AbstractDatasetLoader):
             with open(ctn_pickle_fname, "rb") as ctn_col_f:
                 self.continuous_cols = pickle.load(ctn_col_f)
         except IOError:
-            rank_zero_info("Pickled features and labels do not exist. Creating...")
+            rank_zero_print("Pickled features and labels do not exist. Creating...")
             df = self.load_preprocessed_data()
             # dump df
             df.to_feather(flattened_df_path)
@@ -373,7 +373,7 @@ class CureCKDDataLoader(AbstractDatasetLoader):
         """This is going to be serialized vs filter_subgroup which could chagne often and will happen ad-hoc."""
         # filter rows first
         age_mask = df["egfr_entry_age"] < 100
-        rank_zero_info("Dropping patients over 100 years old.")
+        rank_zero_print("Dropping patients over 100 years old.")
         df = df[age_mask].reset_index(drop=True)
 
         return df
@@ -391,7 +391,7 @@ class CureCKDDataLoader(AbstractDatasetLoader):
     def filter_highly_missing_columns(self, df: pd.DataFrame) -> pd.DataFrame:
         # Filter columns
         acceptable_missing_cols = df.isna().mean() < self.missingness_threshold
-        rank_zero_info(
+        rank_zero_print(
             f"Dropping the following columns for missing more than {self.missingness_threshold*99}% data:\n{df.columns[~acceptable_missing_cols]}"
         )
         for col in df.columns[~acceptable_missing_cols]:
@@ -422,7 +422,7 @@ class CureCKDDataLoader(AbstractDatasetLoader):
             map_year_to_feature_name(range_point)
             for range_point in range(self.time_window[0], self.time_window[1] + 1)
         ]
-        rank_zero_info(
+        rank_zero_print(
             f"Filtering features between {time_window_range[0]} and {time_window_range[-1]}."
         )
 
@@ -522,8 +522,7 @@ class CureCKDDataLoader(AbstractDatasetLoader):
 
 # Testing
 if __name__ == "__main__":
-    from autopopulus.main import init_cli_args
-    from autopopulus.utils.cli_arg_utils import load_cli_args
+    from utils.get_set_cli_args import init_cli_args, load_cli_args
     import sys
 
     load_cli_args()

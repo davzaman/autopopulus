@@ -2,10 +2,14 @@ from argparse import ArgumentParser, Namespace
 import inspect
 import os
 from inspect import getmembers, isfunction
-from typing import List, Union
+from typing import List, Union, Any
 
 import torch
-import pytorch_lightning as pl
+from pytorch_lightning import seed_everything as pl_seed_everything
+from pytorch_lightning.utilities.rank_zero import rank_zero_only
+from rich import (
+    print,
+)  # https://rich.readthedocs.io/en/stable/markup.html#console-markup
 
 
 def should_ampute(args: Namespace) -> bool:
@@ -16,12 +20,18 @@ def should_ampute(args: Namespace) -> bool:
     )
 
 
+# Printing with rich but only in rank zero
+@rank_zero_only
+def rank_zero_print(*args: Any, **kwargs: Any):
+    return print(*args, **kwargs)
+
+
 def seed_everything(seed: int):
     """Sets seeds and also makes cuda deterministic for pytorch."""
     os.environ["PYTHONHASHSEED"] = str(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-    pl.seed_everything(seed)
+    pl_seed_everything(seed)
     # RNN/LSTM determininsm error with cuda 10.1/10.2
     # Ref: https://pytorch.org/docs/stable/generated/torch.nn.LSTM.html#torch.nn.LSTM
     os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
