@@ -3,6 +3,7 @@ from os import getcwd
 from os.path import join
 from shutil import copytree, ignore_patterns, rmtree
 from typing import Dict, Any, List, Tuple
+import logging
 
 from pytorch_lightning.utilities import rank_zero_info
 from pytorch_lightning.loggers import TensorBoardLogger
@@ -105,6 +106,9 @@ def tune_model(
     """NOTE: YOU CANNOT PASS THE SUMMARYWRITER HERE IT WILL CAUSE A PROBLEM WITH MULTIPROCESSING: RuntimeError: Queue objects should only be shared between processes through inheritance"""
     logger = TensorBoardLogger(get_logdir(args))
 
+    # # Mock this function
+    # tune.report(**{"impute/STATIC/original/val-CWMAAPE-missingonly": 2})
+
     ae_imputer = AEImputer.from_argparse_args(
         args,
         logger=logger,
@@ -134,6 +138,8 @@ def run_tune(
 
     # https://docs.ray.io/en/latest/ray-core/package-ref.html#ray-init
     # dashboard default port: 8265, dashboard requires ray-default package
+    # ray.init(include_dashboard=True, logging_level=logging.DEBUG)
+    # ray.init(include_dashboard=True, local_mode=True)  # async actor does'nt work
     ray.init(include_dashboard=True)
 
     data_type_time_dim_name = data.data_type_time_dim.name
@@ -157,6 +163,8 @@ def run_tune(
         data.setup("fit")
         # trainer needs to see num_gpus 0 or else it will complain
         # the GPUs WILL be used though.
+        # You can expect to see `GPU available: False`
+        # Followed by: (RayExecutor pid=3938) GPU available: True (cuda), used: True (Please ignore the previous info [GPU used: False]).
         args.num_gpus = 0  # https://github.com/ray-project/ray_lightning/issues/64
 
         # Set callback and strat
