@@ -70,10 +70,13 @@ If using Ray[Tune], to monitor the tuning experiments with a dashboard you can u
 However, if you are running into issues, you can check the logs at `cat /tmp/ray/session_latest/logs/dashboard.log` or `cat /tmp/ray/session_latest/logs/dashboard_agent.log`.
 It turns out you need `ray-default` in order to use the dashboard in addition to `ray-tune`.
 Ray Tune is on pip and conda-forge. You can check if conda-forge has the most up-to-date versions [here](https://github.com/conda-forge/ray-packages-feedstock).
+Installation instructions from ray [here](https://docs.ray.io/en/latest/ray-overview/installation.html#installing-from-conda-forge).
 
 ## ray-lightning
 It's very finicky, and I need to use the most up-to-date version on github.
 First uninstall `ray-lightning` and then reinstall with `pip install git+https://github.com/ray-project/ray_lightning@<desiredcommithash>`.
+If using ray-lightning, expect `GPU Available: False`.
+This is fine, as we have to tell pytorch-lightning there are no GPUs so it [doesn't complain](https://github.com/ray-project/ray_lightning/issues/64).
 
 # Includes:
 
