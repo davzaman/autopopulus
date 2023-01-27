@@ -1,9 +1,8 @@
 # !/bin/bash
 num_queues=4
 
-"""
-These describe all the experiments that will be run with guild.
-"""
+# These describe all the experiments that will be run with guild.
+
 percent_missing=[0.33,0.66]
 feature_mapping=["onehot_categorical","target_encode_categorical","discretize_continuous"]
 feature_mapping_variational=["target_encode_categorical"]
