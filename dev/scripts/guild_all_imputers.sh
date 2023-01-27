@@ -39,7 +39,7 @@ isin() {  # https://stackoverflow.com/a/3686056 the other responses didn't work
 if isin "none" "$methods"; then
     echo "======================================================"
     echo "Staging no imputation..."
-    guild run train_predict --background method="none" fully-observed=yes
+    guild run main --background method="none" fully-observed=yes
 fi
 
 if isin "baseline" "$methods"; then
@@ -48,11 +48,11 @@ if isin "baseline" "$methods"; then
 
     if [ $all_data = true ]; then
         # When multiple flags have list values, Guild generates the cartesian product of all possible flag combinations.
-        guild run train_predict --background method=$baseline_imputers fully-observed=no
+        guild run main --background method=$baseline_imputers fully-observed=no
     fi
 
     if [ "$fully_observed" = true ]; then
-        guild run train_predict --background method=$baseline_imputers fully-observed=yes percent-missing=$percent_missing amputation-patterns="$(cat dev/amputation_pattern_grid.txt)"
+        guild run main --background method=$baseline_imputers fully-observed=yes percent-missing=$percent_missing amputation-patterns="$(cat dev/amputation_pattern_grid.txt)"
     fi
 fi
 

@@ -4,12 +4,13 @@ from guild.commands.run import run
 if __name__ == "__main__":
     run(
         [
-            # "main",
-            "train_predict",
+            "main",
+            # "train",
             "method=vae",
             "fully-observed=no",
             "feature-map=target_encode_categorical",
             "replace-nan-with=0",
             "--debug-sourcecode=.",
+            "-y",
         ]
     )

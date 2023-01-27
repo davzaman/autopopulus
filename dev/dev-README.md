@@ -4,7 +4,9 @@
 - `scripts/`: directory of helpful scripts for running experiments via guild.
 - `notebooks/`: directory of jupyter notebooks for experimental or adhoc scripts
 - `autopopulus/`: root directory for all the source code
-  - `main.py`: main logic. All experiments run through this.
+  - `impute.py`: main logic for training an imputer/running imputation. Serialized imputed output.
+  - `predict.py`: Loads imputed pickled data and runs predictions on them.
+  - `evaluate.py`: Loads trained imputer (autoencoders only) and runs it on the test dataset.
   - `data/`: data wrangling procedures (i.e. transforms) and data loading for pytorch modules.
   - `datasets/`: directory of data loading procedures for particular datasets.
   - `models/`: directory of defining model architectures (both imputation models and predictive models that aren't prepackaged) and their training procedures.
@@ -18,7 +20,7 @@ Run all the scripts here from the root of the project, not in `/dev/`.
 
 # Artifacts
 - `profiling-results`: directory containing output of profilers after running `profile_autoencoder.py`.
-- `serialized_models`: directory containing serialized models and test_dataloaders to evaluate autoencoders after training with `evaluate_imputer.py`.
+- `serialized_models`: directory containing serialized models, pickled imputed data, and test_dataloaders to do downstream predictions and evaluate autoencoders after training with `evaluate.py`.
 - `tune_results`: directory containing output of logging during tuning. Might be empty if tuning as part of automatic model selection.
 - `data_description/ae_type_name/predictor_model`: tensorboard logs of predictive preformance under a certain data (full, amputed, etc), aeutoencoder type (ap_new, etc), and predictor model (lr, rf).
 - `data_description/ae_type_name/lightning_logs`: tensorboard logs of training and evaluation metrics of autoencoder under certain data.
