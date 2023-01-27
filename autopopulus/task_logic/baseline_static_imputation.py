@@ -1,4 +1,5 @@
 from argparse import Namespace
+from typing import Dict
 
 from joblib import dump
 import miceforest as mf
@@ -13,7 +14,6 @@ from sklearn.impute import IterativeImputer, KNNImputer
 from autopopulus.data.transforms import SimpleImpute
 from autopopulus.data import CommonDataModule
 from autopopulus.utils.log_utils import get_serialized_model_path
-from autopopulus.task_logic.utils import InputDataSplit
 
 
 BASELINE_DATA_SETTINGS = {
@@ -23,8 +23,7 @@ BASELINE_DATA_SETTINGS = {
 }
 
 
-def none(args: Namespace, data: CommonDataModule) -> InputDataSplit:
-    data.setup("fit")
+def none(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
     return {
         "train": data.splits["data"]["train"],
         "val": data.splits["data"]["val"],
@@ -32,16 +31,16 @@ def none(args: Namespace, data: CommonDataModule) -> InputDataSplit:
     }
 
 
-def simple(args: Namespace, data: CommonDataModule) -> InputDataSplit:
+def simple(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
     imputer = SimpleImpute(data.dataset_loader.continuous_cols)
     X_train = imputer.fit_transform(data.splits["data"]["train"])
     X_val = imputer.transform(data.splits["data"]["val"])
     X_test = imputer.transform(data.splits["data"]["test"])
 
-    return (X_train, X_val, X_test)
+    return {"train": X_train, "val": X_val, "test": X_test}
 
 
-def knn(args: Namespace, data: CommonDataModule) -> InputDataSplit:
+def knn(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
     ## IMPUTE ##
     imputer = KNNImputer()
     X_train = imputer.fit_transform(data.splits["data"]["train"])
@@ -53,10 +52,10 @@ def knn(args: Namespace, data: CommonDataModule) -> InputDataSplit:
     X_val = pd.DataFrame(X_val, columns=data.columns["original"])
     X_test = pd.DataFrame(X_test, columns=data.columns["original"])
 
-    return (X_train, X_val, X_test)
+    return {"train": X_train, "val": X_val, "test": X_test}
 
 
-def mice(args: Namespace, data: CommonDataModule) -> InputDataSplit:
+def mice(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
     """Uses sklearn instead of miceforest package."""
     imputer = IterativeImputer(
         max_iter=args.mice_num_iterations, random_state=args.seed
@@ -73,10 +72,10 @@ def mice(args: Namespace, data: CommonDataModule) -> InputDataSplit:
     # Serialize Model
     dump(imputer, get_serialized_model_path("mice"))
 
-    return (X_train, X_val, X_test)
+    return {"train": X_train, "val": X_val, "test": X_test}
 
 
-def miceforest(args: Namespace, data: CommonDataModule) -> InputDataSplit:
+def miceforest(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
     ## IMPUTE ##
     imputer = mf.KernelDataSet(
         data.splits["data"]["train"],
@@ -91,4 +90,4 @@ def miceforest(args: Namespace, data: CommonDataModule) -> InputDataSplit:
     # Serialize Model
     dump(imputer, get_serialized_model_path("miceforest"))
 
-    return (X_train, X_val, X_test)
+    return {"train": X_train, "val": X_val, "test": X_test}

@@ -50,27 +50,21 @@ def get_serialized_model_path(
 
 
 def log_imputation_performance(
-    results: List[pd.DataFrame],
+    results: Dict[str, pd.DataFrame],
     data: CommonDataModule,
     log: SummaryWriter,
-    runtest: bool,
 ):
     """For a given imputation method, logs the performance for the following metrics (matches AE). Assumes results are in order: train, val, test."""
     metrics = {"RMSE": CWRMSE, "MAAPE": CWMAAPE}
-    if runtest:
-        stages = ["train", "val", "test"]
-    else:
-        stages = ["train", "val"]
+    for split, data in results.items():
+        est = results[split]
 
-    for stage_i, stage in enumerate(stages):
-        est = results[stage_i]
-
-        true = data.splits["ground_truth"][stage]
+        true = data.splits["ground_truth"][split]
         # if the original dataset contains nans and we're not filtering to fully observed, need to fill in ground truth too for metric computation
         ground_truth_non_missing_mask = ~np.isnan(true)
         true = true.where(ground_truth_non_missing_mask, est)
 
-        orig = data.splits["data"][stage]
+        orig = data.splits["data"][split]
         if isinstance(orig, pd.DataFrame):
             orig = tensor(orig.values)
         missing_mask = isnan(orig).bool()
@@ -82,8 +76,8 @@ def log_imputation_performance(
             rank_zero_print(
                 f"{name}: {metric}.\n Missing cols only, {name}: {metric_missing_only}"
             )
-            log.add_scalar(f"impute/{stage}-{name}", metric)
-            log.add_scalar(f"impute/{stage}-{name}-missingonly", metric_missing_only)
+            log.add_scalar(f"impute/{split}-{name}", metric)
+            log.add_scalar(f"impute/{split}-{name}-missingonly", metric_missing_only)
 
 
 def get_logdir(args: Namespace) -> str:

@@ -30,7 +30,7 @@ def baseline_imputation_logic(
     # will create train/val/test
     data.setup("fit")
 
-    X_train, X_val, X_test = fn(args, data)
+    imputed_data = fn(args, data)
 
     ## LOGGING ##
     if (
@@ -38,9 +38,7 @@ def baseline_imputation_logic(
     ):  # Logging here if baseline experiment (not fully observed)
         log = get_summarywriter(get_logdir(args))
         if args.fully_observed and log:
-            log_imputation_performance(
-                [X_train, X_val, X_test], data, log, args.runtest
-            )
+            log_imputation_performance(imputed_data, data, log)
             log.close()
 
-    return {"train": X_train, "val": X_val, "test": X_test}
+    return imputed_data
