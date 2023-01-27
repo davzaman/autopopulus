@@ -98,3 +98,4 @@ It's very easy to plug in, just add in a `guild.yml` file and then some scripts 
 ## GuildAI
 
 Important [commands](https://my.guild.ai/t/commands-cheatsheet/193):
+If you want to port-forward `guild view` ui from VSCODE you're going to need to set the host: `guild view -h 127.0.0.1`
