@@ -37,6 +37,7 @@ if __name__ == "__main__":
     num_gpus = 2
     num_workers = 4
     optimn = "Adam"
+    max_epoch = 3
 
     p = ArgumentParser()
     p.add_argument("--profilers", type=str, default=None, action=YAMLStringListToList())
@@ -123,6 +124,7 @@ if __name__ == "__main__":
             datamodule=data,
             fast_dev_run=fast_dev_run,
             profiler=profiler,
+            max_epochs=max_epoch,
         )
 
         model.fit(data)

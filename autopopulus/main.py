@@ -6,6 +6,8 @@ from argparse import ArgumentParser, Namespace
 import pickle as pk
 from os.path import join, exists, dirname
 
+from pytorch_lightning.utilities import rank_zero_info
+
 #### Traceback ####
 from rich.traceback import install
 from rich import (
@@ -20,8 +22,6 @@ import warnings
 warnings.filterwarnings(action="ignore", category=DataConversionWarning)
 warnings.filterwarnings(action="ignore", category=FutureWarning)
 
-
-from pytorch_lightning.utilities import rank_zero_info
 
 #### Local Module ####
 from autopopulus.utils.cli_arg_utils import (

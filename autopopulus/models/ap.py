@@ -2,6 +2,7 @@ import cloudpickle
 from typing import Optional, Union
 from argparse import ArgumentParser, Namespace
 import pandas as pd
+import warnings
 from sklearn.base import TransformerMixin, BaseEstimator
 
 #### Pytorch ####
@@ -13,10 +14,12 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.utilities.rank_zero import rank_zero_only
+from pytorch_lightning.utilities.rank_zero import LightningDeprecationWarning
 from pytorch_lightning.callbacks import Callback
 from pytorch_lightning.profiler import Profiler
 from pytorch_lightning.strategies.strategy import Strategy
 
+warnings.filterwarnings(action="ignore", category=LightningDeprecationWarning)
 
 # Local
 from autopopulus.models.ae import AEDitto
