@@ -96,7 +96,7 @@ class SimpleImpute(TransformerMixin, BaseEstimator):
 
 
 def simple_impute_tensor(
-    X: Tensor,
+    data: Tensor,
     non_missing_mask: Tensor,
     ctn_col_idxs: Tensor,
     bin_col_idxs: Tensor,
@@ -105,6 +105,7 @@ def simple_impute_tensor(
 ) -> Tensor:
     # TODO: what to do if whole column is nan?
     # TODO: what to do if none missing
+    X = data.clone()  # if we dont copy, batch["original"]["data"] will change too
     means = []
     for ctn_col in ctn_col_idxs:
         mean = X[:, ctn_col].nanmean()
