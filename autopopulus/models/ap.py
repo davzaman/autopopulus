@@ -289,6 +289,12 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
             help="How many GPUs to use per hyperparameter trial when tuning.",
         )
         p.add_argument(
+            "--num-gpus",
+            type=int,
+            default=4,
+            help="Number of gpus for the pytorch dataset used in passing batches to the autoencoder.",
+        )
+        p.add_argument(
             "--total-cpus-on-machine",
             type=int,
             default=0,

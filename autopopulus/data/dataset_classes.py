@@ -1205,12 +1205,7 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
             default=128,
             help="When training the autoencoder, set the batch size.",
         )
-        p.add_argument(
-            "--num-gpus",
-            type=int,
-            default=4,
-            help="Number of gpus for the pytorch dataset used in passing batches to the autoencoder.",
-        )
+
         p.add_argument(
             "--num-workers",
             type=int,

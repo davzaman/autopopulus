@@ -51,7 +51,6 @@ standard = {
     "val_test_size": 0.5,
     "test_size": 0.5,
     "batch_size": 2,
-    "num_gpus": 0,
     "percent_missing": 0.33,
     # "missingness_mechanism": "MCAR",
 }
