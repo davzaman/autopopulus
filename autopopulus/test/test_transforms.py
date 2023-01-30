@@ -425,8 +425,10 @@ class TestTransforms(unittest.TestCase):
 
         # bin cols should still be bin but can be homogeneous
         for bin_col_idx in bin_cols_idxs:
+            X_col = X[:, bin_col_idx]
+            # deal with Nans in X by ignoring them because we're only checking still bin
             np.testing.assert_array_equal(
-                imputed[:, bin_col_idx].unique(), X[:, bin_col_idx].unique()
+                imputed[:, bin_col_idx].unique(), X_col[~X_col.isnan()].unique()
             )
         # onehots should still be onehot
         for onehot_group_idx in onehot_group_idxs:
@@ -620,11 +622,11 @@ class TestTransforms(unittest.TestCase):
         # make the encoding random
         rng = default_rng()
         enc.mapping = {
-            k: series.map(lambda enc_v: rng.random())
-            for k, series in enc.mapping.items()
+            colname: series_mapping.map(lambda enc_v: rng.random())
+            for colname, series_mapping in enc.mapping.items()
         }
         unencoded_tensor = invert_target_encoding_tensor(
-            torch.tensor(enc.fit_transform(df, y).values),
+            torch.tensor(enc.transform(df, y).values),
             {
                 "inverse_transform": enc.ordinal_encoder.inverse_transform,
                 "mapping": {
