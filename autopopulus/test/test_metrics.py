@@ -148,148 +148,161 @@ class TestMetrics(unittest.TestCase):
     def test_static_multicat_continuous(self, df):
         assume(
             (not df.isna().any().any())
-            and (len(df) > 1)
             and (np.isinf(df).values.sum() == 0)
             # large values in float aren't properly represented and I will get the wrong results
-            and ((df.values > 1e16).sum() == 0)
+            # numbers are represented with: sign, exponent, fraction
+            # so even if a float is just an integer, 1003 => 1.003e3
+            # the last digit is at most risk of being messed up/unreliable.
+            and ((df.values > 1e10).sum() == 0)
         )
-        tensor_df = torch.tensor(df.values)
+        # apparently hypothesis can't satisfy this assumption along with the others
+        # I can't return early or else the whole test dies
+        if len(df) > 1:
+            tensor_df = torch.tensor(df.values)
 
-        maape_elwise = MAAPEMetric(scale_to_01=True)
-        rmse_elwise = RMSEMetric()
+            maape_elwise = MAAPEMetric(scale_to_01=True)
+            rmse_elwise = RMSEMetric()
 
-        with self.subTest("No Mask"):
-            self.assertAlmostEqual(
-                0, CWRMSE(tensor_df, tensor_df).item(), places=WITHIN
-            )
-            self.assertAlmostEqual(
-                0, CWMAAPE(tensor_df, tensor_df).item(), places=WITHIN
-            )
-            self.assertAlmostEqual(
-                0, rmse_elwise(tensor_df, tensor_df).item(), places=WITHIN
-            )
-            self.assertAlmostEqual(
-                0, maape_elwise(tensor_df, tensor_df).item(), places=WITHIN
-            )
-
-            ctn_col_idx = hypothesis["ctn_cols_idx"][0]
-
-            # Now if they dont exactly equal each other
-            with self.subTest("Not Equal"):
-                # Create an error in one of the places
-                error_df = df.copy()
-                diff = 6
-                # subtraction happens in np cuz with torch i was getting the wrong values
-                error_df.iloc[0, ctn_col_idx] = df.iloc[0, ctn_col_idx] - diff
-                error_df = torch.tensor(error_df.values)
-
+            with self.subTest("No Mask"):
                 self.assertAlmostEqual(
-                    (diff**2 / len(df) / df.shape[1]) ** 0.5,
-                    CWRMSE(error_df, tensor_df).item(),
-                    places=WITHIN,
+                    0, CWRMSE(tensor_df, tensor_df).item(), places=WITHIN
                 )
                 self.assertAlmostEqual(
-                    np.arctan(abs(diff / tensor_df[0, ctn_col_idx] + EPSILON)).item()
-                    / len(df)
-                    / df.shape[1],
-                    CWMAAPE(error_df, tensor_df).item(),
-                    places=WITHIN,
+                    0, CWMAAPE(tensor_df, tensor_df).item(), places=WITHIN
                 )
                 self.assertAlmostEqual(
-                    (diff**2 / (len(df) * df.shape[1])) ** 0.5,
-                    rmse_elwise(error_df, tensor_df).item(),
-                    places=WITHIN,
+                    0, rmse_elwise(tensor_df, tensor_df).item(), places=WITHIN
                 )
                 self.assertAlmostEqual(
-                    (2 / pi)
-                    * np.arctan(abs(diff / tensor_df[0, ctn_col_idx] + EPSILON)).item()
-                    / (len(df) * df.shape[1]),
-                    maape_elwise(error_df, tensor_df).item(),
-                    places=WITHIN,
+                    0, maape_elwise(tensor_df, tensor_df).item(), places=WITHIN
                 )
 
-        with self.subTest("Mask"):
-            missing_mask = torch.zeros_like(tensor_df).to(bool)
-            missing_mask[0, ctn_col_idx] = True
-            self.assertAlmostEqual(
-                0, CWRMSE(tensor_df, tensor_df, missing_mask).item(), places=WITHIN
-            )
-            self.assertAlmostEqual(
-                0, CWMAAPE(tensor_df, tensor_df, missing_mask).item(), places=WITHIN
-            )
-            self.assertAlmostEqual(
-                0, rmse_elwise(tensor_df, tensor_df, missing_mask).item(), places=WITHIN
-            )
-            self.assertAlmostEqual(
-                0,
-                maape_elwise(tensor_df, tensor_df, missing_mask).item(),
-                places=WITHIN,
-            )
+                ctn_col_idx = hypothesis["ctn_cols_idx"][0]
 
-            # Now if they dont exactly equal each other inside the mask
-            with self.subTest("Not Equal inside mask"):
-                error_df = df.copy()
-                error_df.iloc[0, ctn_col_idx] = df.iloc[0, ctn_col_idx] - diff
-                error_df = torch.tensor(error_df.values)
-                self.assertAlmostEqual(
-                    0,
-                    CWRMSE(error_df, tensor_df, missing_mask).item(),
-                    places=WITHIN,
-                )
-                self.assertAlmostEqual(
-                    0,
-                    CWMAAPE(error_df, tensor_df, missing_mask).item(),
-                    places=WITHIN,
-                )
-                self.assertAlmostEqual(
-                    0,
-                    rmse_elwise(error_df, tensor_df, missing_mask).item(),
-                    places=WITHIN,
-                )
-                self.assertAlmostEqual(
-                    0,
-                    maape_elwise(error_df, tensor_df, missing_mask).item(),
-                    places=WITHIN,
-                )
-
-                # make sure that the value is still the same even if the values outside the mask don't match, since we don't care about them and don't want to count them
-                with self.subTest("Not Equal outside mask"):
-                    new_diff = 4
+                # Now if they dont exactly equal each other
+                with self.subTest("Not Equal"):
+                    # Create an error in one of the places
                     error_df = df.copy()
-                    error_df.iloc[0, ctn_col_idx] = error_df.iloc[0, ctn_col_idx] - diff
-                    error_df.iloc[1, ctn_col_idx] = (
-                        error_df.iloc[1, ctn_col_idx] - new_diff
-                    )
+                    diff = 6
+                    # subtraction happens in np cuz with torch i was getting the wrong values
+                    error_df.iloc[0, ctn_col_idx] = df.iloc[0, ctn_col_idx] - diff
                     error_df = torch.tensor(error_df.values)
+
                     self.assertAlmostEqual(
-                        # -1 from # samples bc we are ignoring 1 element in the same feature
-                        ((new_diff**2 / (len(df) - 1) / df.shape[1]) ** 0.5),
-                        CWRMSE(error_df, tensor_df, missing_mask).item(),
+                        (diff**2 / len(df) / df.shape[1]) ** 0.5,
+                        CWRMSE(error_df, tensor_df).item(),
                         places=WITHIN,
                     )
                     self.assertAlmostEqual(
                         np.arctan(
-                            abs(new_diff / (tensor_df[1, ctn_col_idx] + EPSILON))
+                            abs(diff / tensor_df[0, ctn_col_idx] + EPSILON)
                         ).item()
-                        / (len(df) - 1)
+                        / len(df)
                         / df.shape[1],
-                        CWMAAPE(error_df, tensor_df, missing_mask).item(),
+                        CWMAAPE(error_df, tensor_df).item(),
                         places=WITHIN,
                     )
                     self.assertAlmostEqual(
-                        (new_diff**2 / ((len(df) * df.shape[1]) - 1)) ** 0.5,
-                        rmse_elwise(error_df, tensor_df, missing_mask).item(),
+                        (diff**2 / (len(df) * df.shape[1])) ** 0.5,
+                        rmse_elwise(error_df, tensor_df).item(),
                         places=WITHIN,
                     )
                     self.assertAlmostEqual(
                         (2 / pi)
                         * np.arctan(
-                            abs(new_diff / (tensor_df[1, ctn_col_idx] + EPSILON))
+                            abs(diff / tensor_df[0, ctn_col_idx] + EPSILON)
                         ).item()
-                        / ((len(df) * df.shape[1]) - 1),
+                        / (len(df) * df.shape[1]),
+                        maape_elwise(error_df, tensor_df).item(),
+                        places=WITHIN,
+                    )
+
+            with self.subTest("Mask"):
+                missing_mask = torch.zeros_like(tensor_df).to(bool)
+                missing_mask[0, ctn_col_idx] = True
+                self.assertAlmostEqual(
+                    0, CWRMSE(tensor_df, tensor_df, missing_mask).item(), places=WITHIN
+                )
+                self.assertAlmostEqual(
+                    0, CWMAAPE(tensor_df, tensor_df, missing_mask).item(), places=WITHIN
+                )
+                self.assertAlmostEqual(
+                    0,
+                    rmse_elwise(tensor_df, tensor_df, missing_mask).item(),
+                    places=WITHIN,
+                )
+                self.assertAlmostEqual(
+                    0,
+                    maape_elwise(tensor_df, tensor_df, missing_mask).item(),
+                    places=WITHIN,
+                )
+
+                # Now if they dont exactly equal each other inside the mask
+                with self.subTest("Not Equal inside mask"):
+                    error_df = df.copy()
+                    error_df.iloc[0, ctn_col_idx] = df.iloc[0, ctn_col_idx] - diff
+                    error_df = torch.tensor(error_df.values)
+                    self.assertAlmostEqual(
+                        0,
+                        CWRMSE(error_df, tensor_df, missing_mask).item(),
+                        places=WITHIN,
+                    )
+                    self.assertAlmostEqual(
+                        0,
+                        CWMAAPE(error_df, tensor_df, missing_mask).item(),
+                        places=WITHIN,
+                    )
+                    self.assertAlmostEqual(
+                        0,
+                        rmse_elwise(error_df, tensor_df, missing_mask).item(),
+                        places=WITHIN,
+                    )
+                    self.assertAlmostEqual(
+                        0,
                         maape_elwise(error_df, tensor_df, missing_mask).item(),
                         places=WITHIN,
                     )
+
+                    # make sure that the value is still the same even if the values outside the mask don't match, since we don't care about them and don't want to count them
+                    with self.subTest("Not Equal outside mask"):
+                        new_diff = 4
+                        error_df = df.copy()
+                        error_df.iloc[0, ctn_col_idx] = (
+                            error_df.iloc[0, ctn_col_idx] - diff
+                        )
+                        error_df.iloc[1, ctn_col_idx] = (
+                            error_df.iloc[1, ctn_col_idx] - new_diff
+                        )
+                        error_df = torch.tensor(error_df.values)
+                        self.assertAlmostEqual(
+                            # -1 from # samples bc we are ignoring 1 element in the same feature
+                            ((new_diff**2 / (len(df) - 1) / df.shape[1]) ** 0.5),
+                            CWRMSE(error_df, tensor_df, missing_mask).item(),
+                            places=WITHIN,
+                        )
+                        self.assertAlmostEqual(
+                            np.arctan(
+                                abs(new_diff / (tensor_df[1, ctn_col_idx] + EPSILON))
+                            ).item()
+                            / (len(df) - 1)
+                            / df.shape[1],
+                            CWMAAPE(error_df, tensor_df, missing_mask).item(),
+                            places=WITHIN,
+                        )
+                        self.assertAlmostEqual(
+                            (new_diff**2 / ((len(df) * df.shape[1]) - 1)) ** 0.5,
+                            rmse_elwise(error_df, tensor_df, missing_mask).item(),
+                            places=WITHIN,
+                        )
+                        self.assertAlmostEqual(
+                            (2 / pi)
+                            * np.arctan(
+                                abs(new_diff / (tensor_df[1, ctn_col_idx] + EPSILON))
+                            ).item()
+                            / ((len(df) * df.shape[1]) - 1),
+                            maape_elwise(error_df, tensor_df, missing_mask).item(),
+                            places=WITHIN,
+                        )
 
     @settings(
         suppress_health_check=[HealthCheck(3), HealthCheck.filter_too_much],
