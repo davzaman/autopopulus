@@ -56,8 +56,8 @@ def log_imputation_performance(
 ):
     """For a given imputation method, logs the performance for the following metrics (matches AE). Assumes results are in order: train, val, test."""
     metrics = {"RMSE": CWRMSE, "MAAPE": CWMAAPE}
-    for split, data in results.items():
-        est = results[split]
+    for split, imputed_data in results.items():
+        est = imputed_data
 
         true = data.splits["ground_truth"][split]
         # if the original dataset contains nans and we're not filtering to fully observed, need to fill in ground truth too for metric computation
