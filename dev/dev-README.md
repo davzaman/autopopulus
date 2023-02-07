@@ -14,6 +14,11 @@
   - `test/`: directory of tests for autopopulus
   - `utils/`: directory of genral utils (logging, discretization,  profiling-one-off-script, etc).
 
+## Testing
+The tests use `hypothesis`, which can be finicky.
+If it cannot satisfy asssumptions, just try running that individual test again.
+Maybe even try running another test and then run that test.
+
 ## Dev Structure
 These are files I can use to run experiments/etc without them being tracked as part of the projecct.
 Run all the scripts here from the root of the project, not in `/dev/`. 
@@ -99,3 +104,15 @@ It's very easy to plug in, just add in a `guild.yml` file and then some scripts 
 
 Important [commands](https://my.guild.ai/t/commands-cheatsheet/193):
 If you want to port-forward `guild view` ui from VSCODE you're going to need to set the host: `guild view -h 127.0.0.1`
+
+## Aim
+Aim is less an experiment tracker and more a better metric visualizer.
+If you have issues installing do the following:
+```shell
+pip install Cython==3.0.0a9
+pip uninstall aim
+pip install --no-binary :aim: aim==3.15.1
+```
+Currently this fix doesn't work for 3.15.2 nor 3.16.
+
+First you need to do `aim init` in the base directory.
