@@ -84,6 +84,6 @@ def baseline_imputation_logic(
         log = BasicLogger(args=args, experiment_name=args.experiment_name)
         # if args.fully_observed:
         log_baseline_imputation_performance(imputed_data, data, log)
-    log.close()
+        log.close()
 
     return imputed_data
