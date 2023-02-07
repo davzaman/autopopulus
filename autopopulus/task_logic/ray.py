@@ -6,7 +6,6 @@ from typing import Dict, Any, List, Tuple
 import logging
 
 from pytorch_lightning.utilities import rank_zero_info
-from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.strategies.strategy import Strategy
 
 import torch
@@ -25,8 +24,9 @@ from ray_lightning.tune import get_tune_resources
 
 # Local
 from autopopulus.utils.log_utils import (
+    AutoencoderLogger,
+    BasicLogger,
     copy_log_from_tune,
-    get_logdir,
     get_serialized_model_path,
     TUNE_LOG_DIR,
 )
@@ -37,7 +37,7 @@ from autopopulus.data import CommonDataModule
 def create_autoencoder_with_tuning(
     args: Namespace, data: CommonDataModule, settings: Dict
 ) -> AEImputer:
-    logdir = get_logdir(args)
+    logdir = BasicLogger.get_logdir(**BasicLogger.get_base_context_from_args(args))
     best_tune_logdir, best_model_config = run_tune(args, data, settings)
     # log.add_text("best_model_config", str(best_model_config))
     # Copy serialized model and logged values to local path, ignoring tune artifacts
@@ -103,8 +103,7 @@ def tune_model(
     callback: raytune_TuneReportCallback,
     strategy: Strategy,
 ):
-    """NOTE: YOU CANNOT PASS THE SUMMARYWRITER HERE IT WILL CAUSE A PROBLEM WITH MULTIPROCESSING: RuntimeError: Queue objects should only be shared between processes through inheritance"""
-    logger = TensorBoardLogger(get_logdir(args))
+    logger = AutoencoderLogger(args)
 
     # # Mock this function
     # tune.report(**{"impute/STATIC/original/val-CWMAAPE-missingonly": 2})

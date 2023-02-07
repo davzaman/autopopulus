@@ -4,7 +4,7 @@ from typing import Optional, Union, Dict
 import numpy as np
 import pandas as pd
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
-from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.loggers.base import LightningLoggerBase
 
 #### Pytorch ####
 import torch
@@ -12,7 +12,6 @@ import torch.nn as nn
 import torch.optim as optim
 import pytorch_lightning as pl
 
-from torch.utils.tensorboard import SummaryWriter
 from sklearn.base import BaseEstimator, ClassifierMixin
 
 from autopopulus.models.utils import ResetSeed
@@ -54,7 +53,7 @@ class DNNClassifier(ClassifierMixin, BaseEstimator):
         lr: float = 1e-3,
         l2_penalty: float = 1e-4,
         dropout: float = 0.5,
-        logger: Optional[TensorBoardLogger] = None,
+        logger: Optional[LightningLoggerBase] = None,
     ):
         self.input_dim = input_dim
         self.max_epochs = max_epochs

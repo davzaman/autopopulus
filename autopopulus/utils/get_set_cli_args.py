@@ -53,6 +53,18 @@ def init_cli_args() -> Namespace:
         default=True,
         help="print information to shell",
     )
+    p.add_argument(
+        "--experiment-name",
+        type=str,
+        default="myexperiment",
+        help="When running tuning, what experiment name to set. The guild file also shares this name.",
+    )
+    p.add_argument(
+        "--aim-hash",
+        type=str,
+        default=None,
+        help="Hash to continue the same Aim Run across impute/predict scripts/tasks.",
+    )
 
     #### DATASET LOADING ####
     p.add_argument(

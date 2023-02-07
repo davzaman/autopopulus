@@ -20,7 +20,7 @@ warnings.filterwarnings(action="ignore", category=FutureWarning)
 
 #### Local Module ####
 from autopopulus.utils.get_set_cli_args import init_cli_args, load_cli_args
-from autopopulus.utils.log_utils import init_new_logger
+from autopopulus.utils.log_utils import init_sys_logger
 from autopopulus.utils.utils import rank_zero_print, seed_everything, should_ampute
 from autopopulus.datasets import DATA_LOADERS
 from autopopulus.data import CommonDataModule
@@ -51,7 +51,7 @@ def main():
     #     rank_zero_print(args)
     seed_everything(args.seed)
 
-    init_new_logger()
+    init_sys_logger()
 
     # Assumes dataset name is kosher from argparse
     data_loader = DATA_LOADERS[args.dataset].from_argparse_args(args)

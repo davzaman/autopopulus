@@ -5,10 +5,12 @@ __pycache__/
 
 options.yml
 *.prof
+.aim/
 mlruns/
 notebooks/
 tune_results/
 fil-result/
+F.O./
 full/
 serialized_models/
 profiling-results/

@@ -2,10 +2,10 @@ from os.path import join
 import pickle as pk
 
 
-from autopopulus.utils.log_utils import get_logdir
 from autopopulus.models.prediction_models import Predictor
 from utils.get_set_cli_args import init_cli_args, load_cli_args
 from autopopulus.utils.utils import rank_zero_print, seed_everything
+from utils.log_utils import BasicLogger
 
 
 def main():
@@ -26,7 +26,11 @@ def main():
     rank_zero_print(f"Beginning downstream prediction on {args.data_type_time_dim}")
 
     predictor = Predictor.from_argparse_args(
-        args, logdir=get_logdir(args), data_type_time_dim=args.data_type_time_dim
+        args,
+        base_logger_context=BasicLogger.get_base_context_from_args(args),
+        experiment_name=args.experiment_name,
+        parent_run_hash=args.aim_hash if hasattr(args, "aim_hash") else None,
+        data_type_time_dim=args.data_type_time_dim,
     )
     predictor.fit(imputed_data, labels)
 

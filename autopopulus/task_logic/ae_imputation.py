@@ -5,17 +5,13 @@ from pandas import DataFrame
 from pytorch_lightning.utilities import rank_zero_warn
 from pytorch_lightning.utilities.rank_zero import rank_zero_only
 from pytorch_lightning.profiler import AdvancedProfiler
-from pytorch_lightning.loggers import TensorBoardLogger
 
 ## Local Modules
 from autopopulus.data import CommonDataModule
-
-# Import from task_logic.<desired tuning module>: currently optuna not supported
 from autopopulus.task_logic.ray import create_autoencoder_with_tuning
 from autopopulus.models.ap import AEImputer
-from autopopulus.utils.log_utils import get_logdir
+from autopopulus.utils.log_utils import AutoencoderLogger
 from autopopulus.utils.utils import rank_zero_print
-
 
 AE_METHOD_SETTINGS = {
     "vanilla": {"train": {}},
@@ -131,7 +127,7 @@ def ae_imputation_logic(
         else:  # If not tuning assume we've been given a specific setting for hyperparams
             ae_imputer = AEImputer.from_argparse_args(
                 args,
-                logger=TensorBoardLogger(get_logdir(args)),
+                logger=AutoencoderLogger(args),
                 tune_callback=None,
                 # profiler=AdvancedProfiler(
                 #     dirpath="profiling-results", filename="advanced-real"

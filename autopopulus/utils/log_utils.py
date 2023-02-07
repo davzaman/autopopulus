@@ -1,29 +1,40 @@
 from argparse import Namespace
 from logging import FileHandler, StreamHandler, basicConfig, INFO
 from shutil import copy
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from regex import search
 from os.path import join, exists
 from os import makedirs, walk
 import sys
-import numpy as np
-import pandas as pd
 
-from pytorch_lightning.loggers import LightningLoggerBase
-from pytorch_lightning.loggers.base import rank_zero_experiment
 from torch.utils.tensorboard import SummaryWriter
-from torch import isnan, tensor
 
-
-from autopopulus.data import CommonDataModule
-from autopopulus.utils.impute_metrics import CWMAAPE, CWRMSE
-from autopopulus.utils.utils import rank_zero_print
+from aim import Run, Text
 
 TUNE_LOG_DIR = "tune_results"
+LOGGER_TYPE = "TensorBoard"
+# LOGGER_TYPE = "Aim"
+
+# Ref: https://stackoverflow.com/a/6794451/1888794
+# Import Logger everywhere you want to use a logger.
+if LOGGER_TYPE == "TensorBoard":
+    from pytorch_lightning.loggers import TensorBoardLogger
+elif LOGGER_TYPE == "Aim":
+    from aim.pytorch_lightning import AimLogger
 
 
-def init_new_logger(fname: Optional[str] = None):
+# Treat like a class for easy semantics to compare to BasicLogger
+def AutoencoderLogger(args: Optional[Namespace] = None):
+    if LOGGER_TYPE == "TensorBoard":
+        base_context = BasicLogger.get_base_context_from_args(args)
+        return TensorBoardLogger(save_dir=BasicLogger.get_logdir(**base_context))
+    elif LOGGER_TYPE == "Aim":
+        # return AimLogger(experiment="lightning_logs")
+        return AimLogger(experiment=args.experiment_name)
+
+
+def init_sys_logger(fname: Optional[str] = None):
     handlers = [StreamHandler(sys.stdout)]
     if fname is not None:
         handlers.append(FileHandler(fname))
@@ -49,94 +60,152 @@ def get_serialized_model_path(
     return serialized_model_path
 
 
-def log_imputation_performance(
-    results: Dict[str, pd.DataFrame],
-    data: CommonDataModule,
-    log: SummaryWriter,
-):
-    """For a given imputation method, logs the performance for the following metrics (matches AE). Assumes results are in order: train, val, test."""
-    metrics = {"RMSE": CWRMSE, "MAAPE": CWMAAPE}
-    for split, imputed_data in results.items():
-        est = imputed_data
+class BasicLogger:
+    def __init__(
+        self,
+        run_hash: Optional[str] = None,
+        experiment_name: Optional[str] = None,
+        predictive_model: Optional[str] = None,
+        base_context: Optional[Dict[str, Any]] = None,
+        args: Optional[Namespace] = None,
+    ) -> None:
+        """
+        This is used for baseline_imputation, and prediction performance.
+        If base context is passed, it uses it. Otherwise it looks for args.
+        This is especially required if using tensorboard, otherwise you won't get a logger.
+        """
+        if base_context is None and args is not None:
+            base_context = self.get_base_context_from_args(args)
 
-        true = data.splits["ground_truth"][split]
-        # if the original dataset contains nans and we're not filtering to fully observed, need to fill in ground truth too for metric computation
-        ground_truth_non_missing_mask = ~np.isnan(true)
-        true = true.where(ground_truth_non_missing_mask, est)
+        if LOGGER_TYPE == "TensorBoard":
+            if base_context is None and args is None:
+                self.logger = None
+            else:
+                # Get the universal logger for tensorboard.
+                self.logger = SummaryWriter(
+                    log_dir=self.get_logdir(
+                        **base_context, predictive_model=predictive_model
+                    )
+                )
+        elif LOGGER_TYPE == "Aim":
+            # return Run(repo=target_path)
+            self.logger = Run(run_hash=run_hash, experiment=experiment_name)
+            self.logger["hparams"] = base_context
 
-        orig = data.splits["data"][split]
-        if isinstance(orig, pd.DataFrame):
-            orig = tensor(orig.values)
-        missing_mask = isnan(orig).bool()
+        self.base_context = base_context
 
-        # START HERE
-        for name, metricfn in metrics.items():
-            metric = metricfn(est, true)
-            metric_missing_only = metricfn(est, true, missing_mask)
-            rank_zero_print(
-                f"{name}: {metric}.\n Missing cols only, {name}: {metric_missing_only}"
+    @classmethod
+    @staticmethod
+    def get_base_context_from_args(args: Namespace) -> Dict[str, Any]:
+        return {
+            k: getattr(args, k) if hasattr(args, k) else None
+            for k in [
+                "method",
+                "amputation_patterns",
+                "percent_missing",
+                "trial_num",
+            ]
+        }
+
+    @classmethod
+    @staticmethod
+    def get_logdir(
+        method: str,  # impute method
+        amputation_patterns: Optional[List[Dict]] = None,
+        percent_missing: Optional[float] = None,
+        trial_num: Optional[int] = None,
+        predictive_model: Optional[str] = None,
+    ) -> str:
+        """Get logging directory based on experiment settings."""
+        # if tune_prefix is empty string, os.path.join will ignore it
+        tune_prefix = (
+            join(TUNE_LOG_DIR, f"trial_{trial_num}") if trial_num is not None else ""
+        )
+        # Missingness scenario could be 1 mech or mixed
+        if amputation_patterns:
+            pattern_mechanisms = ",".join(
+                [pattern["mechanism"] for pattern in amputation_patterns]
             )
-            log.add_scalar(f"impute/{split}-{name}", metric)
-            log.add_scalar(f"impute/{split}-{name}-missingonly", metric_missing_only)
-
-
-def get_logdir(args: Namespace) -> str:
-    """Get logging directory based on experiment settings."""
-    prefix = f"{TUNE_LOG_DIR}/trial_{args.trial_num}/" if "trial_num" in args else ""
-    # Missingness scenario could be 1 mech or mixed
-    if args.amputation_patterns:
-        pattern_mechanisms = ",".join(
-            [pattern["mechanism"] for pattern in args.amputation_patterns]
-        )
-        dir_name = (
-            f"{prefix}F.O./{args.percent_missing}/{pattern_mechanisms}/{args.method}"
-        )
-    else:
-        dir_name = f"{prefix}full/{args.method}"
-    if not exists(dir_name):
-        makedirs(dir_name)
-    return dir_name
-
-
-def get_summarywriter(
-    logdir: Optional[str], predictive_model: Optional[str] = None
-) -> SummaryWriter:
-    """Get the universal logger for tensorboard."""
-    if not logdir:
-        return
-    if predictive_model:
-        return SummaryWriter(log_dir=join(logdir, predictive_model))
-    return SummaryWriter(log_dir=logdir)
-
-
-def add_scalars(
-    logger: SummaryWriter,
-    tag_scalar_dict: Dict[str, float],
-    global_step: Optional[int] = None,
-    walltime: Optional[float] = None,
-    prefix: Optional[str] = None,
-) -> None:
-    """Adds scalars from dict but not to same plot."""
-    if not logger:
-        return
-    for tag, scalar_value in tag_scalar_dict.items():
-        if prefix:
-            logger.add_scalar(f"{prefix}/{tag}", scalar_value, global_step, walltime)
+            dir_name = join(
+                tune_prefix, "F.O.", percent_missing, pattern_mechanisms, method
+            )
         else:
-            logger.add_scalar(tag, scalar_value, global_step, walltime)
+            dir_name = join(tune_prefix, "full", method)
 
+        if predictive_model:
+            dir_name = join(dir_name, predictive_model)
 
-def add_all_text(
-    logger: SummaryWriter,
-    tag_scalar_dict: Dict[str, str],
-    global_step: Optional[int] = None,
-    walltime: Optional[float] = None,
-) -> None:
-    """Adds text from dict."""
-    if not logger:
-        return
-    for tag, text_string in tag_scalar_dict.items():
-        logger.add_text(tag, text_string, global_step, walltime)
+        if not exists(dir_name):
+            makedirs(dir_name)
+        return dir_name
+
+    def add_scalar(
+        self,
+        metric: float,
+        name: str,
+        global_step: Optional[int] = None,
+        walltime: Optional[float] = None,
+        context: Optional[Dict[str, Any]] = None,
+        # formatting name for tensorboard using context, relies on "{name}" being used in the format string
+        tb_name_format: Optional[str] = None,
+    ):
+        if not self.logger:
+            return
+        if isinstance(self.logger, SummaryWriter):
+            logged_name = name
+            if tb_name_format is not None:
+                tb_name_format.format(name=name, **context)
+            self.logger.add_scalar(logged_name, metric, global_step, walltime)
+        elif isinstance(self.logger, Run):
+            self.logger.track(metric, name, global_step, context={**context})
+
+    def add_scalars(
+        self,
+        tag_scalar_dict: Dict[str, float],
+        global_step: Optional[int] = None,
+        walltime: Optional[float] = None,
+        context: Optional[Dict[str, Any]] = None,
+        tb_name_format: Optional[str] = None,
+    ) -> None:
+        """Adds scalars from dict but not to same plot."""
+        if not self.logger:
+            return
+        for name, metric in tag_scalar_dict.items():
+            self.add_scalar(
+                metric,
+                name,
+                global_step,
+                walltime,
+                context=context,
+                tb_name_format=tb_name_format,
+            )
+
+    def add_all_text(
+        self,
+        tag_scalar_dict: Dict[str, str],
+        global_step: Optional[int] = None,
+        walltime: Optional[float] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Adds text from dict."""
+        if not self.logger:
+            return
+        for tag, text_string in tag_scalar_dict.items():
+            if isinstance(self.logger, SummaryWriter):
+                self.logger.add_text(tag, text_string, global_step, walltime)
+            elif isinstance(self.logger, Run):
+                self.logger.add_text(
+                    Text(text_string),
+                    tag,
+                    global_step,
+                    context={**context},
+                )
+
+    def close(self):
+        if self.logger is not None:
+            if isinstance(self.logger, Run):
+                print(f"Aim Logger Hash: {self.logger.hash}")
+            self.logger.close()
 
 
 def copy_log_from_tune(

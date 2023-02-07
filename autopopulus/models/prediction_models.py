@@ -45,7 +45,7 @@ from sktime.transformations.panel.tsfresh import TSFreshFeatureExtractor
 from autopopulus.data.constants import PATIENT_ID
 from autopopulus.data.types import DataTypeTimeDim
 from autopopulus.utils.cli_arg_utils import YAMLStringListToList
-from autopopulus.utils.log_utils import add_scalars, get_summarywriter
+from autopopulus.utils.log_utils import BasicLogger
 from autopopulus.models.evaluation import (
     bootstrap_confidence_interval,
     shapiro_wilk_test,
@@ -153,14 +153,18 @@ class Predictor(TransformerMixin, CLIInitialized):
         predictors: List[str],
         num_bootstraps: int,
         data_type_time_dim: DataTypeTimeDim = DataTypeTimeDim.STATIC,
-        logdir: Optional[str] = None,
+        base_logger_context: Optional[Dict[str, Any]] = None,
+        experiment_name: Optional[str] = None,
+        parent_run_hash: Optional[str] = None,
         verbose: bool = False,
     ):
         super().__init__()
         self.seed = seed
         self.num_bootstraps = num_bootstraps
         self.data_type_time_dim = data_type_time_dim
-        self.logdir = logdir
+        self.base_logger_context = base_logger_context
+        self.experiment_name = experiment_name
+        self.parent_run_hash = parent_run_hash
         self.verbose = verbose
         self.model_names = predictors
         self.model = self.build_models()
@@ -185,7 +189,13 @@ class Predictor(TransformerMixin, CLIInitialized):
                 X["test"], y["test"], self.X_transforms[modeln]
             )
 
-            log = get_summarywriter(self.logdir, modeln)
+            # We can't initialize earlier because we need predictive model in the logdir for tensorboard
+            logger = BasicLogger(
+                run_hash=self.parent_run_hash,
+                experiment_name=self.experiment_name,
+                base_context=self.base_logger_context,
+                predictive_model=modeln,
+            )
 
             # Set GridSearch with a hold-out validation instead of CV (via predefinedsplit)
             # indicate indices: -1 @ indices for train, 0 for evaluation
@@ -221,18 +231,18 @@ class Predictor(TransformerMixin, CLIInitialized):
                     y_eval, cv.predict(X_eval), cv.predict_proba(X_eval)[:, 1]
                 )
                 # plot across all bootstraps
-                add_scalars(log, metric_results, b, prefix="predict")
+                logger.add_scalars(
+                    metric_results,
+                    global_step=b,
+                    context={"step": "predict", "predictive_model": modeln},
+                    tb_name_format="{step}/{name}",
+                )
                 # save performance across bootstrap samples to form CI
                 bootstrap_metrics.append(metric_results)
 
             # Roll up results for logging, assuming they all have the same metric keys
-            bootstrap_metrics_rolled = {
-                metricn: [metrics[metricn] for metrics in bootstrap_metrics]
-                for metricn in bootstrap_metrics[0]
-            }
-            self._log_performance_statistics(bootstrap_metrics_rolled, log)
-            if log:
-                log.close()
+            # self._log_performance_statistics(bootstrap_metrics, logger, modeln)
+            logger.close()
         return self
 
     def transform(self, X: Union[ndarray, DataFrame]) -> ndarray:
@@ -417,10 +427,15 @@ class Predictor(TransformerMixin, CLIInitialized):
 
     def _log_performance_statistics(
         self,
-        bootstrap_performance: Dict[str, List[float]],
-        log: Optional[SummaryWriter] = None,
+        bootstrap_metrics: List[Dict[str, float]],
+        logger: BasicLogger,
+        modeln: str,
     ) -> None:
         """Compute Mean, CI, normality test across bootstrap samples"""
+        bootstrap_performance: Dict[str, List[float]] = {
+            metricn: [metrics[metricn] for metrics in bootstrap_metrics]
+            for metricn in bootstrap_metrics[0]
+        }
         mean_performance = {
             f"{k}-mean": mean(v) for k, v in bootstrap_performance.items()
         }
@@ -435,11 +450,12 @@ class Predictor(TransformerMixin, CLIInitialized):
             ci_upper[f"{k}-upper"] = upper
 
         #### LOGGING ####
-        prefix = "predict-aggregate"
-        add_scalars(log, mean_performance, prefix=prefix)
-        add_scalars(log, ci_lower, prefix=prefix)
-        add_scalars(log, ci_upper, prefix=prefix)
-        add_scalars(log, normality, prefix=prefix)
+        for metrics in [mean_performance, ci_lower, ci_upper, normality]:
+            logger.add_scalars(
+                metrics,
+                context={"step": "predict-aggregate", "predictive_model": modeln},
+                tb_name_format="{step}/{name}",
+            )
 
     ###################
     #    INTERFACE    #

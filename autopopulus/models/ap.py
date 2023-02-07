@@ -12,18 +12,21 @@ from torch.utils.data import DataLoader
 ## Lightning ##
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
-from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.utilities.rank_zero import rank_zero_only
 from pytorch_lightning.utilities.rank_zero import LightningDeprecationWarning
 from pytorch_lightning.callbacks import Callback
 from pytorch_lightning.profiler import Profiler
 from pytorch_lightning.strategies.strategy import Strategy
+from pytorch_lightning.loggers.base import LightningLoggerBase
 
 warnings.filterwarnings(action="ignore", category=LightningDeprecationWarning)
 
 # Local
 from autopopulus.models.ae import AEDitto
-from autopopulus.utils.log_utils import get_logdir, get_serialized_model_path
+from autopopulus.utils.log_utils import (
+    AutoencoderLogger,
+    get_serialized_model_path,
+)
 from autopopulus.data import CommonDataModule
 from autopopulus.data.types import DataTypeTimeDim
 from autopopulus.data.constants import PATIENT_ID
@@ -44,7 +47,7 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         self,
         max_epochs: int = 100,
         patience: int = 7,
-        logger: Optional[TensorBoardLogger] = None,
+        logger: Optional[LightningLoggerBase] = None,
         tune_callback: Optional[Callback] = None,
         strategy: Optional[Strategy] = None,
         trial_num: Optional[int] = None,
@@ -106,7 +109,7 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
 
     @staticmethod
     def create_trainer(
-        logger: TensorBoardLogger,
+        logger: LightningLoggerBase,
         data_type_time_dim_name: str,
         patience: int,
         max_epochs: int,
@@ -229,7 +232,7 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
             if ae_from_checkpoint is not None
             else args.ae_from_checkpoint
         )
-        logger = TensorBoardLogger(get_logdir(args))
+        logger = AutoencoderLogger(args)
         kwargs["tune_callback"] = None
         ae_imputer = cls.from_argparse_args(args, logger=logger, **kwargs)
         ae_imputer.ae = ae_imputer.load_autoencoder(checkpoint)
@@ -270,12 +273,7 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
             help="Using early stopping when training the underlying autoencoder for Autopopulus, set the patience for early stopping.",
         )
         # Tuning
-        p.add_argument(
-            "--experiment-name",
-            type=str,
-            default="myexperiment",
-            help="When running tuning, what experiment name to set. The guild file also shares this name.",
-        )
+
         p.add_argument(
             "--tune-n-samples",
             type=int,

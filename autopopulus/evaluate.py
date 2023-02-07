@@ -1,5 +1,4 @@
 import torch
-from pytorch_lightning.loggers import TensorBoardLogger
 import argparse  # needed to guild knows to import flags
 
 from autopopulus.utils.get_set_cli_args import init_cli_args, load_cli_args
