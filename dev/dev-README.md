@@ -66,6 +66,18 @@ SimpleDatasetLoader(
   - debugging/code edits submitted as an issue [here](https://github.com/YerevaNN/mimic3-benchmarks/issues/102)
 - After preprocessing, I zipped the original MIMIC3 CSVs to save space with `zip mimic3.ziip -r physionet.org/files/mimiciii/1.4/`. To unzip: `unzip mimic3.zip -d /mimic3`.
 
+# Environment
+Install the env with conda or mamba. With mamba:
+```shell
+env_name=""
+env_file="env.yml"
+mamba create -n $env_name --no-default-packages -y
+mamba activate $env_name
+mamba env update -n $env_name -f $env_file
+```
+
+You might see `AttributeError: module 'typing' has no attribute '_ClassVar'`, in which case [`pip uninstall dataclasses`](https://github.com/ray-project/tune-sklearn/issues/181#issuecomment-782598003).
+
 # Experiments
 If you want to add new imputers:
   - add the name to the `guild.yml` options for method under the `imputer` operation.
