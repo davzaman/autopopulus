@@ -4,6 +4,10 @@ import re
 import sys
 import subprocess
 
+# Enforce you're in the right env
+ output = subprocess.run(["conda", "list"], stdout=subprocess.PIPE).stdout.decode("utf-8")
+env_name = re.search(r"(?:/mambaforge/envs/)(\w+)\b", str(output)).groups()[-1]
+assert env_name == "ap", "You're not in the right conda environment. Did you forget to `mamba activate ap`?"
 
 #############
 #  Options  #
