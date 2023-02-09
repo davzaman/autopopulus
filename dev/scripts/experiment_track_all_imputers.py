@@ -5,7 +5,7 @@ import sys
 import subprocess
 
 # Enforce you're in the right env
- output = subprocess.run(["conda", "list"], stdout=subprocess.PIPE).stdout.decode("utf-8")
+output = subprocess.run(["conda", "list"], stdout=subprocess.PIPE).stdout.decode("utf-8")
 env_name = re.search(r"(?:/mambaforge/envs/)(\w+)\b", str(output)).groups()[-1]
 assert env_name == "ap", "You're not in the right conda environment. Did you forget to `mamba activate ap`?"
 
@@ -39,12 +39,12 @@ replace_nan_with = ["simple", "0"]
 ####################################
 # experiment switches: all experiments: none, baseline, ae, vae
 # chosen_methods=[ "none", "baseline", "ae", "vae" ]
-chosen_methods = ["ae"]
+chosen_methods = ["none", "baseline", "ae", "vae"]
 experiment_tracker = "guild"
 # fully_observed=no uses entire dataset
 all_data = True
 # fully_observed=yes will ampute and impute a missingness scenario
-fully_observed = True
+fully_observed = False
 
 if fully_observed:
     with open("dev/amputation_pattern_grid.txt", "r") as f:
