@@ -24,6 +24,7 @@ setup(
         "keras",  # if using keras for dnn
         "sktime",
         "pypots",
+        "pyampute",
         "regex",
         "cloudpickle",
         "tsfresh",
