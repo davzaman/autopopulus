@@ -25,6 +25,8 @@ def force_np(*tensors: torch.Tensor) -> np.ndarray:
         elif isinstance(tensor, torch.Tensor):
             if tensor.device != torch.device("cpu"):
                 tensor = tensor.cpu()
+            if tensor.dtype == torch.bfloat16:
+                tensor = tensor.to(torch.float16)
             np_data.append(tensor.numpy())
         else:
             np_data.append(tensor)

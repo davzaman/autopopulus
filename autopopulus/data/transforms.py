@@ -34,7 +34,10 @@ def identity(x: Any) -> Any:
 
 
 def tensor_to_numpy(tensor: Tensor) -> np.ndarray:
-    nparr = tensor.detach().cpu().numpy()
+    tensor_cpu = tensor.detach().cpu()
+    if tensor_cpu.dtype == torch.bfloat16:
+        tensor_cpu = tensor_cpu.to(torch.float16)
+    nparr = tensor_cpu.numpy()
     if len(nparr.shape) == 3:  # If longitudinal reshape to 2d, keeping nfeatures
         nfeatures = nparr.shape[-1]
         series_len = nparr.shape[0]
