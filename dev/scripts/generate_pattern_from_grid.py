@@ -4,8 +4,10 @@ import json
 DATASETS = ["cure_ckd"]
 MISSINGNESS_MECHANISMS = ["MCAR", "MAR", "MNAR(G)", "MNAR(Y)", "MNAR"]
 SCORE_TO_PROBABILITY_FUNCTIONS = ["sigmoid-mid", "sigmoid-tail"]
-NUM_INCOMPLETE = ["1", "many"]
-NUM_OBSERVED = ["1", "many"]
+# NUM_INCOMPLETE = ["1", "many"]
+# NUM_OBSERVED = ["1", "many"]
+NUM_INCOMPLETE = ["many"]
+NUM_OBSERVED = ["many"]
 FEATURES_INVOLVED = {
     "cure_ckd": {
         "static": {
