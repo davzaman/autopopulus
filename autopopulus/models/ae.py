@@ -790,11 +790,11 @@ class AEDitto(pl.LightningModule):
             non_missing_mask = (~isnan(data)).bool()
 
         # Sigmoid/softmax and threshold but in original space
-        data = binary_column_threshold(
-            data, self.col_idxs_by_type["original"].get("binary", []), 0.5
+        reconstruct_batch = binary_column_threshold(
+            reconstruct_batch, self.col_idxs_by_type["original"].get("binary", []), 0.5
         )  # do nothing if no "binary" cols (empty list [])
-        data = onehot_column_threshold(
-            data, self.col_idxs_by_type["original"].get("onehot", [])
+        reconstruct_batch = onehot_column_threshold(
+            reconstruct_batch, self.col_idxs_by_type["original"].get("onehot", [])
         )  # do nothing if no "binary" cols (empty list [])
 
         # Keep original where it's not missing
@@ -806,6 +806,8 @@ class AEDitto(pl.LightningModule):
             ground_truth_non_missing_mask, reconstruct_batch
         )
 
+        if imputed.isnan().sum():
+            print("hi")
         return imputed, ground_truth, non_missing_mask
 
     @staticmethod
