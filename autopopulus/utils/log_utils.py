@@ -127,7 +127,7 @@ class BasicLogger:
                 [pattern["mechanism"] for pattern in amputation_patterns]
             )
             dir_name = join(
-                tune_prefix, "F.O.", percent_missing, pattern_mechanisms, method
+                tune_prefix, "F.O.", str(percent_missing), pattern_mechanisms, method
             )
         else:
             dir_name = join(tune_prefix, "full", method)
