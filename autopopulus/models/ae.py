@@ -348,12 +348,12 @@ class AEDitto(pl.LightningModule):
             ground_truth,
             non_missing_mask,
         ) = self.get_imputed_tensor_from_model_output(
-            data.detach().cpu(),
-            reconstruct_batch.detach().cpu(),
-            ground_truth.detach().cpu(),
-            non_missing_mask.detach().cpu(),
-            batch["original"]["data"].detach().cpu(),
-            batch["original"]["ground_truth"].detach().cpu(),
+            data.detach().cpu().float(),
+            reconstruct_batch.detach().cpu().float(),
+            ground_truth.detach().cpu().float(),
+            non_missing_mask.detach().cpu().float(),
+            batch["original"]["data"].detach().cpu().float(),
+            batch["original"]["ground_truth"].detach().cpu().float(),
         )
 
         return (
