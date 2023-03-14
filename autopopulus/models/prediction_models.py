@@ -235,7 +235,7 @@ class Predictor(TransformerMixin, CLIInitialized):
                     metric_results,
                     global_step=b,
                     context={"step": "predict", "predictive_model": modeln},
-                    tb_name_format="{step}/{name}",
+                    tb_name_format="{predictive_model}/{step}/{name}",
                 )
                 # save performance across bootstrap samples to form CI
                 bootstrap_metrics.append(metric_results)
@@ -454,7 +454,7 @@ class Predictor(TransformerMixin, CLIInitialized):
             logger.add_scalars(
                 metrics,
                 context={"step": "predict-aggregate", "predictive_model": modeln},
-                tb_name_format="{step}/{name}",
+                tb_name_format="{predictive_model}/{step}/{name}",
             )
 
     ###################
