@@ -5,9 +5,13 @@ import sys
 import subprocess
 
 # Enforce you're in the right env
-output = subprocess.run(["conda", "list"], stdout=subprocess.PIPE).stdout.decode("utf-8")
+output = subprocess.run(["conda", "list"], stdout=subprocess.PIPE).stdout.decode(
+    "utf-8"
+)
 env_name = re.search(r"(?:/mambaforge/envs/)(\w+)\b", str(output)).groups()[-1]
-assert env_name == "ap", "You're not in the right conda environment. Did you forget to `mamba activate ap`?"
+assert (
+    env_name == "ap"
+), "You're not in the right conda environment. Did you forget to `mamba activate ap`?"
 
 #############
 #  Options  #
@@ -39,12 +43,14 @@ replace_nan_with = ["simple", "0"]
 ####################################
 # experiment switches: all experiments: none, baseline, ae, vae
 # chosen_methods=[ "none", "baseline", "ae", "vae" ]
-chosen_methods = ["none", "baseline", "ae", "vae"]
+chosen_methods = ["vae"]
 experiment_tracker = "guild"
+# if use_queues nonzero, will use queues, specify the number of queues (parralellism).
+guild_use_queues: int = 1
 # fully_observed=no uses entire dataset
-all_data = True
+all_data = False
 # fully_observed=yes will ampute and impute a missingness scenario
-fully_observed = False
+fully_observed = True
 
 if fully_observed:
     with open("dev/amputation_pattern_grid.txt", "r") as f:
@@ -58,9 +64,10 @@ def cli_str(obj) -> str:
 
 def run_command(command_args: Dict[str, str]):
     if experiment_tracker == "guild":
+        base = "guild run main "
+        base += "--stage" if guild_use_queues else "--background"
         subprocess.run(
-            "guild run main --background".split()
-            + [f"{name}={val}" for name, val in command_args.items()]
+            base.split() + [f"{name}={val}" for name, val in command_args.items()]
         )
     elif experiment_tracker == "aim":
         command = [sys.executable, "autopopulus/impute.py"]
@@ -108,9 +115,9 @@ for method in chosen_methods:
             }
             run_command(fully_observed_command_args)
 
-# print("======================================================")
-# print("Starting Queues...")
-# num_queues = 4
-# for _ in range(num_queues):
-# run_command('guild run queue  -y')
-# run_command('guild view -h 127.0.0.1')
+if experiment_tracker == "guild" and guild_use_queues:
+    print("======================================================")
+    print("Starting Queues...")
+    for _ in range(guild_use_queues):
+        subprocess.run("guild run queue run-once=yes -y")
+    # run_command('guild view -h 127.0.0.1')
