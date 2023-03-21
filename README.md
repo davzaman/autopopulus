@@ -21,3 +21,17 @@ All methods are implemented natively, but for reference:
 
 ## Collaborators
 Parts of code either additionally reviewed or provided by [Panayiotis Petousis](https://github.com/panas89) and [Tyler Davis](https://github.com/TylerADavis).
+
+# Citation
+If you use this framework in your work please cite it
+```
+@INPROCEEDINGS{9630135,
+  author={Zamanzadeh, Davina J. and Petousis, Panayiotis and Davis, Tyler A. and Nicholas, Susanne B. and Norris, Keith C. and Tuttle, Katherine R. and Bui, Alex A. T. and Sarrafzadeh, Majid},
+  booktitle={2021 43rd Annual International Conference of the IEEE Engineering in Medicine & Biology Society (EMBC)}, 
+  title={Autopopulus: A Novel Framework for Autoencoder Imputation on Large Clinical Datasets}, 
+  year={2021},
+  volume={},
+  number={},
+  pages={2303-2309},
+  doi={10.1109/EMBC46164.2021.9630135}}
+```
