@@ -29,7 +29,7 @@ from autopopulus.utils.log_utils import (
 )
 from autopopulus.data import CommonDataModule
 from autopopulus.data.types import DataTypeTimeDim
-from autopopulus.data.constants import PATIENT_ID
+from autopopulus.data.constants import PATIENT_ID, TIME_LEVEL
 from autopopulus.utils.utils import CLIInitialized
 from autopopulus.data.dataset_classes import (
     CommonDatasetWithTransform,
@@ -213,7 +213,8 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         # (n samples, t padded time points, f features) -> 2d pd df
         if self.longitudinal:
             index = pd.MultiIndex.from_product(
-                [range(s) for s in preds.shape], names=[PATIENT_ID, "time", "feature"]
+                [range(s) for s in preds.shape],
+                names=[PATIENT_ID, TIME_LEVEL, "feature"],
             )
             index = index.set_levels(level=PATIENT_ID, levels=ids)
             preds_df = pd.DataFrame(preds.flatten(), index=index).unstack(

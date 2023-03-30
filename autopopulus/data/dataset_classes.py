@@ -30,6 +30,7 @@ from torch.utils.data import DataLoader
 from autopopulus.data.constants import (
     PAD_VALUE,
     PATIENT_ID,
+    TIME_LEVEL,
 )
 from autopopulus.data.utils import enforce_numpy, explode_nans
 from autopopulus.data.types import (
@@ -532,6 +533,15 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
                     pattern["mechanism"] = "MNAR"
         return X
 
+    @staticmethod
+    def regex_safe_colname(coln: str) -> str:
+        """
+        When looking up pd.str.contains(str) the passed str has to be regex safe.
+        If a column has regex keywords in it like `+` then there's a problem.
+        e.g., 'IONIZED CA++,CORRECTED_min' from crrt dataset.
+        """
+        return coln.replace("+", "\+")
+
     def _set_col_idxs_by_type(self):
         """
         Dictionary with list of indices as ndarray (which can be used as indexer) of continuous cols and categorical cols in the tensor.
@@ -557,14 +567,14 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
                     [
                         self.columns["original"].get_loc(col)
                         for col in self.columns["original"]
-                        if ctn_cols.str.contains(col).any()
+                        if ctn_cols.str.contains(self.regex_safe_colname(col)).any()
                     ]
                 ),
                 "categorical": array(
                     [
                         self.columns["original"].get_loc(col)
                         for col in self.columns["original"]
-                        if cat_cols.str.contains(col).any()
+                        if cat_cols.str.contains(self.regex_safe_colname(col)).any()
                     ]
                 ),
             }
@@ -573,7 +583,11 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         # useful for target encoding
         if self.dataset_loader.onehot_prefixes is not None:
             self.col_idxs_by_type["original"]["onehot"]: List[List[int]] = [
-                where(self.columns["original"].str.contains(col))[0]
+                where(
+                    self.columns["original"].str.contains(
+                        f"^{self.regex_safe_colname(col)}"
+                    )
+                )[0]
                 for col in self.dataset_loader.onehot_prefixes
             ]
             # If its missing argwhere() returns an empty array that i don't want.
@@ -690,20 +704,26 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
             return self.dataset_loader.split_ids
 
         # TODO[LOW]: enforce pt id is the same name for all dataset
-        # pick pt id if longitudinal portion of data (multiindex)
-        level = PATIENT_ID if isinstance(X.index, MultiIndex) else None
+        # pick pt id if longitudinal portion of data or multiindex
+        is_multiindex = isinstance(X.index, MultiIndex)
+        level = PATIENT_ID if is_multiindex else None
         sample_ids = X.index.unique(level).values
+        # multiindex but not longitudinal (CRRT has multiple treatments per pt)
+        if is_multiindex and TIME_LEVEL not in X.index.names:
+            labels = y.groupby(PATIENT_ID).first()
+        else:
+            labels = y
 
         train_val_ids, test_ids = train_test_split(
             sample_ids,
             test_size=self.val_test_size,
-            stratify=y,
+            stratify=labels,
             random_state=self.seed,
         )
         train_ids, val_ids = train_test_split(
             train_val_ids,
             test_size=self.test_size,
-            stratify=y[train_val_ids],
+            stratify=labels[train_val_ids],
             random_state=self.seed,
         )
 

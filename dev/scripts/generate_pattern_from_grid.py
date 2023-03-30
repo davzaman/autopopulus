@@ -1,7 +1,7 @@
 import json
+from os.path import join
 
-# DATASETS=[cure_ckd, crrt]
-DATASETS = ["cure_ckd"]
+DATASETS = ["cure_ckd", "crrt"]
 MISSINGNESS_MECHANISMS = ["MCAR", "MAR", "MNAR(G)", "MNAR(Y)", "MNAR"]
 SCORE_TO_PROBABILITY_FUNCTIONS = ["sigmoid-mid", "sigmoid-tail"]
 # NUM_INCOMPLETE = ["1", "many"]
@@ -19,7 +19,14 @@ FEATURES_INVOLVED = {
             ],
             "influence_missing": ["egfr_entry_age", "egfr_entry_period_av_count"],
         }
-    }
+    },
+    "crrt": {
+        "static": {
+            "missing": ["PHARM_SUBCLASS_POTASSIUM", "BLOOD LACTATE_mean"],
+            # 10 = immunization and screening for infectious disease
+            "influence_missing": ["AGE", "dx_CCS_CODE_10"],
+        }
+    },
 }
 
 
@@ -75,12 +82,14 @@ if __name__ == "__main__":
                         )
                         patterns.append([pattern])
 
-    # Might have to move it do dev/scripts/ after
-    with open("amputation_pattern_grid.txt", "w") as f:
-        # json.dump(patterns, f)
+        # Might have to move it do dev/scripts/ after
+        with open(join("dev", f"{dataset}_amputation_pattern_grid.txt"), "w") as f:
+            # json.dump(patterns, f)
 
-        # To be able to pass to guild each patterns "list of dicts"
-        # needs to be a string and each patterns entry needs to be comma separated with no whitespace
-        f.write(
-            json.dumps([str(pattern) for pattern in patterns], separators=(",", ":"))
-        )
+            # To be able to pass to guild each patterns "list of dicts"
+            # needs to be a string and each patterns entry needs to be comma separated with no whitespace
+            f.write(
+                json.dumps(
+                    [str(pattern) for pattern in patterns], separators=(",", ":")
+                )
+            )

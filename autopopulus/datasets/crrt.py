@@ -9,13 +9,32 @@ from autopopulus.data.types import (
     LongitudinalFeatureAndLabel,
     StaticFeatureAndLabel,
 )
+from autopopulus.utils.utils import rank_zero_print
+from autopopulus.data.constants import PATIENT_ID, TIME_LEVEL
+
+RACE_COLS = [
+    f"RACE_{race}"
+    for race in [
+        "American Indian or Alaska Native",
+        "Asian",
+        "Black or African American",
+        "Multiple Races",
+        "Native Hawaiian or Other Pacific Islander",
+        "Unknown",
+        "White or Caucasian",
+    ]
+]
 
 CRRT_STATIC_FILE_NAME = "df_[startdate-7d,startdate].parquet"
 CRRT_LONGITUDINAL_FILE_NAME = "df_1Dagg_[startdate-7d,startdate].parquet"
-CRRT_CAT_COLS = []
-CRRT_STATIC_CTN_COLS = []
-CRRT_FLATTENED_LONGITUDINAL_COLS = []
-CRRT_ONEHOT_PREFIXES = []
+CRRT_BIN_COLS = ["SEX", "ETHNICITY", "surgery_indicator"]
+CRRT_CAT_COLS = CRRT_BIN_COLS + RACE_COLS
+CRRT_ONEHOT_PREFIXES = ["ALLERGEN_ID", "RACE", "TOBACCO_USER", "SMOKING_TOB_STATUS"]
+"""
+Prefix a OR b = (a|b) followed by _ and 1+ characters of any char.
+{ diagnoses: dx, meds: PHARM_SUBCLASS, problems: pr, procedures: CPT }
+"""
+CATEGORICAL_COL_REGEX = r"(dx|PHARM_SUBCLASS|pr|CPT|)_.*"
 
 
 class CrrtDataLoader(AbstractDatasetLoader):
@@ -23,24 +42,21 @@ class CrrtDataLoader(AbstractDatasetLoader):
         self,
         crrt_data_path: str,
         crrt_static_file_name: str = CRRT_STATIC_FILE_NAME,
-        cure_ckd_longitudinal_file_name: str = CRRT_LONGITUDINAL_FILE_NAME,
+        crrt_longitudinal_file_name: str = CRRT_LONGITUDINAL_FILE_NAME,
         crrt_categorical_cols: List[str] = CRRT_CAT_COLS,
-        crrt_static_continuous_cols: List[str] = CRRT_STATIC_CTN_COLS,
-        crrt_longitudinal_cols: List[str] = CRRT_FLATTENED_LONGITUDINAL_COLS,
         crrt_onehot_prefixes: List[str] = CRRT_ONEHOT_PREFIXES,
         crrt_target: str = "recommend_crrt",
+        crrt_missingness_threshold: float = 0.8,
     ) -> None:
         self.data_path = crrt_data_path
         # keys: static, longitudinal
         self.preproc_file_name = crrt_static_file_name
-        self.longitudinal_file_name = cure_ckd_longitudinal_file_name
+        self.longitudinal_file_name = crrt_longitudinal_file_name
+        # Set in `load_features_and_labels` using the df cols and a regex
         self.categorical_cols = crrt_categorical_cols
-        self.static_continuous_cols = crrt_static_continuous_cols
-        self.flattened_longitudinal_cols = crrt_longitudinal_cols
         self.onehot_prefixes = crrt_onehot_prefixes
         self.target = crrt_target
-
-        self.continuous_cols = crrt_static_continuous_cols + crrt_longitudinal_cols
+        self.missingness_threshold = crrt_missingness_threshold
 
     def load_features_and_labels(
         self, data_type_time_dim: Optional[DataTypeTimeDim] = DataTypeTimeDim.STATIC
@@ -55,12 +71,30 @@ class CrrtDataLoader(AbstractDatasetLoader):
             else self.longitudinal_file_name
         )
         preprocessed_df = pd.read_parquet(join(self.data_path, fname))
+
+        if data_type_time_dim == DataTypeTimeDim.STATIC:
+            static_features = pd.read_parquet(
+                join(self.data_path, "static_data.parquet")
+            )
+            # Merge would mess it up since static doesn't have UNIVERSAL_TIME_COL_NAME, join will broadcast.
+            preprocessed_df = preprocessed_df.join(static_features, how="inner")
+        mapping = {"IP_PATIENT_ID": PATIENT_ID, "DATE": TIME_LEVEL}
+        preprocessed_df.index.names = [
+            mapping[name] if name in mapping else name
+            for name in preprocessed_df.index.names
+        ]
+        preprocessed_df = self.preprocess_data(preprocessed_df)
         df, labels = (
             preprocessed_df.drop(self.target, axis=1),
             preprocessed_df[self.target],
         )
+
+        # set after preproc so we don't include dropped cols.
+        self.categorical_cols = df.columns.intersection(self.categorical_cols)
+        self.continuous_cols = df.columns.difference(self.categorical_cols)
+
         # return (df.drop("patient_id", axis=1), labels)
-        return (self.preprocess_data(df), labels)
+        return (df, labels)
 
     def preprocess_data(self, df: pd.DataFrame) -> pd.DataFrame:
         """Pre-processes the data for use by ML model."""
@@ -69,6 +103,7 @@ class CrrtDataLoader(AbstractDatasetLoader):
             "Month",
             "Hospital name",
             "CRRT Total Days",
+            "CRRT Year",
             "End Date",
             "Machine",
             "ICU",
@@ -76,17 +111,23 @@ class CrrtDataLoader(AbstractDatasetLoader):
             "Transitioned to HD",
             "Comfort Care",
             "Expired ",
+            "KNOWN_DECEASED",
         ]
         df = df.drop(drop_columns, axis=1)
         # Get rid of "Unnamed" Column
         df = df.drop(df.columns[df.columns.str.contains("^Unnamed")], axis=1)
-        # drop columns with all nan values
-        df = df[df.columns[~df.isna().all()]]
 
         # Exclude pediatric data, adults considered 21+
-        is_adult_mask = df["Age"] >= 21
+        is_adult_mask = df["AGE"] >= 21
         df = df[is_adult_mask]
 
+        df = df.select_dtypes(["number"])
+
+        acceptable_missing_cols = df.isna().mean() < self.missingness_threshold
+        rank_zero_print(
+            f"Dropping the following columns for missing more than {self.missingness_threshold*100}% data:\n{df.columns[~acceptable_missing_cols]}"
+        )
+        df = df[df.columns[acceptable_missing_cols]]
         return df
 
     @staticmethod
@@ -117,7 +158,7 @@ class CrrtDataLoader(AbstractDatasetLoader):
 
 # Testing
 if __name__ == "__main__":
-    from utils.get_set_cli_args import init_cli_args, load_cli_args
+    from autopopulus.utils.get_set_cli_args import init_cli_args, load_cli_args
     import sys
 
     load_cli_args()
@@ -125,3 +166,4 @@ if __name__ == "__main__":
     args = init_cli_args()
     data_loader = CrrtDataLoader.from_argparse_args(args)
     X, y = data_loader.load_features_and_labels(args.data_type_time_dim)
+    print("Done!")
