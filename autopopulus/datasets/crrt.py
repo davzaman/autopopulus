@@ -11,6 +11,7 @@ from autopopulus.data.types import (
 )
 from autopopulus.utils.utils import rank_zero_print
 from autopopulus.data.constants import PATIENT_ID, TIME_LEVEL
+from autopopulus.data.utils import regex_safe_colname
 
 RACE_COLS = [
     f"RACE_{race}"
@@ -92,6 +93,12 @@ class CrrtDataLoader(AbstractDatasetLoader):
         # set after preproc so we don't include dropped cols.
         self.categorical_cols = df.columns.intersection(self.categorical_cols)
         self.continuous_cols = df.columns.difference(self.categorical_cols)
+        # keep only onehot prefixes that remain
+        self.onehot_prefixes = [
+            col
+            for col in self.onehot_prefixes
+            if df.columns.str.contains(f"^{regex_safe_colname(col)}").any()
+        ]
 
         # return (df.drop("patient_id", axis=1), labels)
         return (df, labels)
