@@ -36,7 +36,8 @@ imputer_groups = {
     "ae": ["vanilla", "dae", "batchswap"],
     "vae": ["vae", "dvae"],
 }
-replace_nan_with = ["simple", "0"]
+# replace_nan_with = ["simple", "0"]
+replace_nan_with = ["0"]
 
 ####################################
 #  Select experiments to run here  #
