@@ -36,6 +36,7 @@ from autopopulus.utils.impute_metrics import (
     categorical_accuracy,
 )
 from autopopulus.utils.cli_arg_utils import YAMLStringListToList, StringOrInt, str2bool
+from autopopulus.utils.utils import rank_zero_print
 from autopopulus.data import CommonDataModule
 from autopopulus.data.types import DataTypeTimeDim
 from autopopulus.data.constants import PAD_VALUE
@@ -807,7 +808,7 @@ class AEDitto(pl.LightningModule):
         )
 
         if imputed.isnan().sum():
-            print("hi")
+            rank_zero_print("WARNING: NaNs still found in imputed data.")
         return imputed, ground_truth, non_missing_mask
 
     @staticmethod

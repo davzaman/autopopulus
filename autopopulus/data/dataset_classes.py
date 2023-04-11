@@ -32,7 +32,12 @@ from autopopulus.data.constants import (
     PATIENT_ID,
     TIME_LEVEL,
 )
-from autopopulus.data.utils import enforce_numpy, explode_nans
+from autopopulus.data.utils import (
+    enforce_numpy,
+    explode_nans,
+    get_samples_from_index,
+    regex_safe_colname,
+)
 from autopopulus.data.types import (
     DataColumn,
     DataT,
@@ -222,15 +227,10 @@ class CommonTransformedDataset(Dataset):
         self.transformed_data = transformed_data
         self.longitudinal = longitudinal
 
-        # TODO[LOW]: Refactor out
-        def get_unique(index: Index) -> ndarray:
-            try:
-                return index.unique(PATIENT_ID)
-            except Exception:
-                return index.unique()
-
         # "original" should always exist and "data" should match "ground_truth" index.
-        self.split_ids = get_unique(self.transformed_data["original"]["data"].index)
+        self.split_ids = get_samples_from_index(
+            self.transformed_data["original"]["data"].index
+        )
 
     def __len__(self) -> int:
         return len(self.split_ids)
@@ -533,15 +533,6 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
                     pattern["mechanism"] = "MNAR"
         return X
 
-    @staticmethod
-    def regex_safe_colname(coln: str) -> str:
-        """
-        When looking up pd.str.contains(str) the passed str has to be regex safe.
-        If a column has regex keywords in it like `+` then there's a problem.
-        e.g., 'IONIZED CA++,CORRECTED_min' from crrt dataset.
-        """
-        return coln.replace("+", "\+")
-
     def _set_col_idxs_by_type(self):
         """
         Dictionary with list of indices as ndarray (which can be used as indexer) of continuous cols and categorical cols in the tensor.
@@ -567,14 +558,14 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
                     [
                         self.columns["original"].get_loc(col)
                         for col in self.columns["original"]
-                        if ctn_cols.str.contains(self.regex_safe_colname(col)).any()
+                        if ctn_cols.str.contains(regex_safe_colname(col)).any()
                     ]
                 ),
                 "categorical": array(
                     [
                         self.columns["original"].get_loc(col)
                         for col in self.columns["original"]
-                        if cat_cols.str.contains(self.regex_safe_colname(col)).any()
+                        if cat_cols.str.contains(regex_safe_colname(col)).any()
                     ]
                 ),
             }
@@ -584,10 +575,8 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         if self.dataset_loader.onehot_prefixes is not None:
             self.col_idxs_by_type["original"]["onehot"]: List[List[int]] = [
                 where(
-                    self.columns["original"].str.contains(
-                        f"^{self.regex_safe_colname(col)}"
-                    )
-                )[0]
+                    self.columns["original"].str.contains(f"^{regex_safe_colname(col)}")
+                )[0].tolist()
                 for col in self.dataset_loader.onehot_prefixes
             ]
             # If its missing argwhere() returns an empty array that i don't want.
@@ -702,17 +691,9 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         # Use pre-specified splits if user has them
         if hasattr(self.dataset_loader, "split_ids"):
             return self.dataset_loader.split_ids
-
         # TODO[LOW]: enforce pt id is the same name for all dataset
-        # pick pt id if longitudinal portion of data or multiindex
-        is_multiindex = isinstance(X.index, MultiIndex)
-        level = PATIENT_ID if is_multiindex else None
-        sample_ids = X.index.unique(level).values
-        # multiindex but not longitudinal (CRRT has multiple treatments per pt)
-        if is_multiindex and TIME_LEVEL not in X.index.names:
-            labels = y.groupby(PATIENT_ID).first()
-        else:
-            labels = y
+        sample_ids = get_samples_from_index(X.index)
+        labels = y
 
         train_val_ids, test_ids = train_test_split(
             sample_ids,
