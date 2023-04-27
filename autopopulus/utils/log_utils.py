@@ -152,9 +152,10 @@ class BasicLogger:
         if not self.logger:
             return
         if isinstance(self.logger, SummaryWriter):
-            logged_name = name
             if tb_name_format is not None:
-                tb_name_format.format(name=name, **context)
+                logged_name = tb_name_format.format(name=name, **context)
+            else:
+                logged_name = name
             self.logger.add_scalar(logged_name, metric, global_step, walltime)
         elif isinstance(self.logger, Run):
             self.logger.track(metric, name, global_step, context={**context})
