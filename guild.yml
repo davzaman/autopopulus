@@ -34,7 +34,6 @@
     main:
       description: Train and evaluate an imputer, run downstream predictions.
       label: ${method} ${experiment-name}
-      # plugins: summary
       env: # don't save pycache
         PYTHONDONTWRITEBYTECODE: 1
       sourcecode:
@@ -65,6 +64,7 @@
       description: Train an imputer and run predictions.
       label: ${method} ${experiment-name}
       main: autopopulus/impute
+      plugins: summary
       env: # don't save pycache
         PYTHONDONTWRITEBYTECODE: 1
       sourcecode:
