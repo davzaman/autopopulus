@@ -43,16 +43,19 @@ replace_nan_with = ["0"]
 #  Select experiments to run here  #
 ####################################
 # experiment switches: all experiments: none, baseline, ae, vae
-# chosen_methods=[ "none", "baseline", "ae", "vae" ]
+# chosen_methods = ["none", "baseline", "ae", "vae"]
 chosen_methods = ["none"]
-experiment_tracker = "guild"
+# experiment_tracker = "guild"
+experiment_tracker = "none"
 datasets = ["crrt"]
 # if use_queues nonzero, will use queues, specify the number of queues (parralellism).
 guild_use_queues: int = 1
 # fully_observed=no uses entire dataset
-all_data = False
+# all_data = False
+all_data = True
 # fully_observed=yes will ampute and impute a missingness scenario
-fully_observed = True
+# fully_observed = True
+fully_observed = False
 
 
 def cli_str(obj) -> str:
@@ -73,8 +76,19 @@ def run_command(command_args: Dict[str, str]):
             command += [f"--{name}", str(val)]
         output = subprocess.run(command, stdout=subprocess.PIPE).stdout.decode("utf-8")
         aim_hash = re.search(r"(?:Aim Logger Hash: )(\w+)\b", str(output)).groups()[-1]
+        command[1] = "autopopulus/evaluate.py"
+        subprocess.run(command + ["--aim-hash", aim_hash])
         command[1] = "autopopulus/predict.py"
         subprocess.run(command + ["--aim-hash", aim_hash])
+    elif experiment_tracker == "none":
+        command = [sys.executable, "autopopulus/impute.py"]
+        for name, val in command_args.items():
+            command += [f"--{name}", str(val)]
+        subprocess.run(command, stdout=subprocess.PIPE).stdout.decode("utf-8")
+        command[1] = "autopopulus/evaluate.py"
+        subprocess.run(command)
+        command[1] = "autopopulus/predict.py"
+        subprocess.run(command)
 
 
 for dataset in datasets:
