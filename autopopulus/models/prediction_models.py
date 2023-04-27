@@ -7,6 +7,8 @@ from numpy import ndarray, logspace, mean
 from numpy.random import Generator, default_rng
 from torch.utils.tensorboard import SummaryWriter
 from pytorch_lightning.utilities import rank_zero_info
+import re
+from lightgbm.basic import LightGBMError
 
 #### sklearn ####
 from sklearn.pipeline import Pipeline
@@ -224,7 +226,16 @@ class Predictor(TransformerMixin, CLIInitialized):
                 # Run GridSearch on concatenated train+val
                 rank_zero_print(f"Starting fit of {model}")
                 start = timer()
-                cv.fit(X_boot, y_boot)
+                try:
+                    cv.fit(X_boot, y_boot)
+                except ValueError:  # lightgbm has a weird issue with column names.
+                    # https://github.com/autogluon/autogluon/issues/399#issuecomment-623326629
+                    cv.fit(
+                        X_boot.rename(
+                            columns=lambda x: re.sub("[^A-Za-z0-9_]+", "", x)
+                        ),
+                        y_boot,
+                    )
                 rank_zero_print(f"Fit took {timer() - start} seconds.")
                 # Evaluate on best model
                 metric_results = self.evaluate(
