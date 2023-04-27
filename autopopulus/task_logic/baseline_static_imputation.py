@@ -37,6 +37,8 @@ def simple(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
     X_val = imputer.transform(data.splits["data"]["val"])
     X_test = imputer.transform(data.splits["data"]["test"])
 
+    dump(imputer, get_serialized_model_path("simple"))
+
     return {"train": X_train, "val": X_val, "test": X_test}
 
 
@@ -51,6 +53,8 @@ def knn(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
     X_train = pd.DataFrame(X_train, columns=data.columns["original"])
     X_val = pd.DataFrame(X_val, columns=data.columns["original"])
     X_test = pd.DataFrame(X_test, columns=data.columns["original"])
+
+    dump(imputer, get_serialized_model_path("knn"))
 
     return {"train": X_train, "val": X_val, "test": X_test}
 
