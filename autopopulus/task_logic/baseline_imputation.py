@@ -50,7 +50,7 @@ def log_baseline_imputation_performance(
     log: BasicLogger,
 ):
     """For a given imputation method, logs the performance for the following metrics (matches AE). Assumes results are in order: train, val, test."""
-    metrics = {"RMSE": CWRMSE, "MAAPE": CWMAAPE}
+    metrics = {"CWRMSE": CWRMSE, "CWMAAPE": CWMAAPE}
     for split, imputed_data in results.items():
         est = imputed_data
 

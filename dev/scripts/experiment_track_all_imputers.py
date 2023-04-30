@@ -44,18 +44,17 @@ replace_nan_with = ["0"]
 ####################################
 # experiment switches: all experiments: none, baseline, ae, vae
 # chosen_methods = ["none", "baseline", "ae", "vae"]
-chosen_methods = ["none"]
-# experiment_tracker = "guild"
-experiment_tracker = "none"
-datasets = ["crrt"]
+chosen_methods = ["baseline"]
+experiment_tracker = "guild"
+datasets = ["cure_ckd"]
 # if use_queues nonzero, will use queues, specify the number of queues (parralellism).
-guild_use_queues: int = 1
+guild_use_queues: int = 0
 # fully_observed=no uses entire dataset
-# all_data = False
-all_data = True
+all_data = False
+# all_data = True
 # fully_observed=yes will ampute and impute a missingness scenario
-# fully_observed = True
-fully_observed = False
+fully_observed = True
+# fully_observed = False
 
 
 def cli_str(obj) -> str:
