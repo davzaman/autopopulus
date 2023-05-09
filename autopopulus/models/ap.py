@@ -24,6 +24,7 @@ warnings.filterwarnings(action="ignore", category=LightningDeprecationWarning)
 # Local
 from autopopulus.models.ae import AEDitto
 from autopopulus.utils.log_utils import (
+    IMPUTE_METRIC_TAG_FORMAT,
     AutoencoderLogger,
     get_serialized_model_path,
 )
@@ -81,7 +82,6 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         )
         self.trainer = self.create_trainer(
             logger,
-            self.data_type_time_dim.name,
             self.patience,
             self.max_epochs,
             self.num_nodes,
@@ -93,7 +93,6 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         )
         self.inference_trainer = self.create_trainer(
             logger,
-            self.data_type_time_dim,
             self.patience,
             self.max_epochs,
             self.num_nodes,
@@ -110,7 +109,6 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
     @staticmethod
     def create_trainer(
         logger: LightningLoggerBase,
-        data_type_time_dim_name: str,
         patience: int,
         max_epochs: int,
         num_nodes: Optional[int] = None,
@@ -124,7 +122,13 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
             # ModelSummary(max_depth=3),
             EarlyStopping(
                 check_on_train_epoch_end=False,
-                monitor=f"AE/{data_type_time_dim_name}/val-loss",
+                monitor=IMPUTE_METRIC_TAG_FORMAT.format(
+                    name="loss",
+                    feature_space="original",
+                    filter_subgroup="all",
+                    reduction="NA",
+                    split="val",
+                ),
                 patience=patience,
             ),
         ]
@@ -233,9 +237,10 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
             if ae_from_checkpoint is not None
             else args.ae_from_checkpoint
         )
-        logger = AutoencoderLogger(args)
         kwargs["tune_callback"] = None
-        ae_imputer = cls.from_argparse_args(args, logger=logger, **kwargs)
+        ae_imputer = cls.from_argparse_args(
+            args, logger=AutoencoderLogger(args), **kwargs
+        )
         ae_imputer.ae = ae_imputer.load_autoencoder(checkpoint)
         return ae_imputer
 

@@ -6,7 +6,7 @@ if __name__ == "__main__":
         [
             "main",
             # "train",
-            "method=vae",
+            "method=vanilla",
             "fully-observed=no",
             "feature-map=target_encode_categorical",
             "replace-nan-with=0",

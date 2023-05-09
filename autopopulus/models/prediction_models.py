@@ -47,7 +47,7 @@ from sktime.transformations.panel.tsfresh import TSFreshFeatureExtractor
 from autopopulus.data.constants import PATIENT_ID
 from autopopulus.data.types import DataTypeTimeDim
 from autopopulus.utils.cli_arg_utils import YAMLStringListToList
-from autopopulus.utils.log_utils import BasicLogger
+from autopopulus.utils.log_utils import PREDICT_METRIC_TAG_FORMAT, BasicLogger
 from autopopulus.models.evaluation import (
     bootstrap_confidence_interval,
     shapiro_wilk_test,
@@ -170,6 +170,11 @@ class Predictor(TransformerMixin, CLIInitialized):
         self.verbose = verbose
         self.model_names = predictors
         self.model = self.build_models()
+        self.logger = BasicLogger(
+            run_hash=self.parent_run_hash,
+            experiment_name=self.experiment_name,
+            base_context=self.base_logger_context,
+        )
 
     def fit(self, X: Dict[str, DataFrame], y: Dict[str, DataFrame]):
         bootstrap_metrics = []
@@ -189,14 +194,6 @@ class Predictor(TransformerMixin, CLIInitialized):
             )
             X_eval, y_eval = self._preproc_predictor_data(
                 X["test"], y["test"], self.X_transforms[modeln]
-            )
-
-            # We can't initialize earlier because we need predictive model in the logdir for tensorboard
-            logger = BasicLogger(
-                run_hash=self.parent_run_hash,
-                experiment_name=self.experiment_name,
-                base_context=self.base_logger_context,
-                predictive_model=modeln,
             )
 
             # Set GridSearch with a hold-out validation instead of CV (via predefinedsplit)
@@ -242,18 +239,22 @@ class Predictor(TransformerMixin, CLIInitialized):
                     y_eval, cv.predict(X_eval), cv.predict_proba(X_eval)[:, 1]
                 )
                 # plot across all bootstraps
-                logger.add_scalars(
+                self.logger.add_scalars(
                     metric_results,
                     global_step=b,
-                    context={"step": "predict", "predictive_model": modeln},
-                    tb_name_format="{predictive_model}/{step}/{name}",
+                    context={
+                        "step": "predict",
+                        "predictor": modeln,
+                        "aggregate_type": "none",
+                    },
+                    tb_name_format=PREDICT_METRIC_TAG_FORMAT,
                 )
                 # save performance across bootstrap samples to form CI
                 bootstrap_metrics.append(metric_results)
 
             # Roll up results for logging, assuming they all have the same metric keys
-            # self._log_performance_statistics(bootstrap_metrics, logger, modeln)
-            logger.close()
+            # self._log_performance_statistics(bootstrap_metrics, modeln)
+            self.logger.close()
         return self
 
     def transform(self, X: Union[ndarray, DataFrame]) -> ndarray:
@@ -436,10 +437,9 @@ class Predictor(TransformerMixin, CLIInitialized):
         X, y = self._align_Xy(X, y)
         return (X, y)
 
-    def _log_performance_statistics(
+    def _log_agg_performance_statistics(
         self,
         bootstrap_metrics: List[Dict[str, float]],
-        logger: BasicLogger,
         modeln: str,
     ) -> None:
         """Compute Mean, CI, normality test across bootstrap samples"""
@@ -447,26 +447,26 @@ class Predictor(TransformerMixin, CLIInitialized):
             metricn: [metrics[metricn] for metrics in bootstrap_metrics]
             for metricn in bootstrap_metrics[0]
         }
-        mean_performance = {
-            f"{k}-mean": mean(v) for k, v in bootstrap_performance.items()
-        }
-        normality = {
-            f"{k}-isnormal": shapiro_wilk_test(v)
-            for k, v in bootstrap_performance.items()
-        }
-        ci_lower, ci_upper = {}, {}
+        perf = {"mean": {}, "isnormal": {}, "lowerci": {}, "upperci": {}}
         for k, v in bootstrap_performance.items():
+            perf["mean"][k] = mean(v)
+            perf["isnormal"][k] = shapiro_wilk_test(v)
             lower, upper = bootstrap_confidence_interval(v)
-            ci_lower[f"{k}-lower"] = lower
-            ci_upper[f"{k}-upper"] = upper
+            perf["lowerci"][k] = lower
+            perf["upperci"][k] = upper
 
         #### LOGGING ####
-        for metrics in [mean_performance, ci_lower, ci_upper, normality]:
-            logger.add_scalars(
-                metrics,
-                context={"step": "predict-aggregate", "predictive_model": modeln},
-                tb_name_format="{predictive_model}/{step}/{name}",
-            )
+        for agg_type, agg_perf in perf.items():
+            for metrics in agg_perf:
+                self.logger.add_scalars(
+                    metrics,
+                    context={
+                        "step": "predict",
+                        "predictor": modeln,
+                        "aggregate_type": agg_type,
+                    },
+                    tb_name_format=PREDICT_METRIC_TAG_FORMAT,
+                )
 
     ###################
     #    INTERFACE    #

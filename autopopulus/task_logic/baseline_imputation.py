@@ -5,14 +5,14 @@ import numpy as np
 from torch import isnan, tensor
 
 # Local
-from autopopulus.utils.log_utils import BasicLogger
+from autopopulus.utils.log_utils import IMPUTE_METRIC_TAG_FORMAT, BasicLogger
 from autopopulus.task_logic import (
     baseline_static_imputation,
     baseline_longitudinal_imputation,
 )
 from autopopulus.utils.utils import rank_zero_print
 from autopopulus.data import CommonDataModule
-from autopopulus.utils.impute_metrics import CWMAAPE, CWRMSE
+from autopopulus.utils.impute_metrics import CWMAAPE, CWRMSE, EWMAAPE, EWRMSE
 
 
 def baseline_imputation_logic(
@@ -50,7 +50,12 @@ def log_baseline_imputation_performance(
     log: BasicLogger,
 ):
     """For a given imputation method, logs the performance for the following metrics (matches AE). Assumes results are in order: train, val, test."""
-    metrics = {"CWRMSE": CWRMSE, "CWMAAPE": CWMAAPE}
+    metrics = [
+        {"name": "RMSE", "fn": CWRMSE, "reduction": "CW"},
+        {"name": "MAAPE", "fn": CWMAAPE, "reduction": "CW"},
+        {"name": "RMSE", "fn": EWRMSE, "reduction": "EW"},
+        {"name": "MAAPE", "fn": EWMAAPE, "reduction": "EW"},
+    ]
     for split, imputed_data in results.items():
         est = imputed_data
 
@@ -65,25 +70,33 @@ def log_baseline_imputation_performance(
         missing_mask = isnan(orig).bool()
 
         # START HERE
-        for name, metricfn in metrics.items():
-            metric = metricfn(est, true)
-            metric_missing_only = metricfn(est, true, missing_mask)
+        for metric in metrics.items():
+            val = metric["fn"](est, true)
+            val_missing_only = metric["fn"](est, true, missing_mask)
             rank_zero_print(
-                f"{name}: {metric}.\n Missing cols only, {name}: {metric_missing_only}"
+                f"{metric['name']}: {val}.\n Missing cols only, {metric['name']}: {val_missing_only}"
             )
             log.add_scalar(
-                metric,
-                name,
-                context={"step": "impute", "split": split},
-                tb_name_format="{step}/{split}-{name}",
-            )
-            log.add_scalar(
-                metric_missing_only,
-                name,
+                val,
+                metric["name"],
                 context={
                     "step": "impute",
                     "split": split,
-                    "subgroup": "missingonly",
+                    "feature_space": "original",
+                    "filter_subgroup": "all",
+                    "reduction": metric["reduction"],
                 },
-                tb_name_format="{step}/{split}-{name}-{subgroup}",
+                tb_name_format=IMPUTE_METRIC_TAG_FORMAT,
+            )
+            log.add_scalar(
+                val_missing_only,
+                metric["name"],
+                context={
+                    "step": "impute",
+                    "split": split,
+                    "feature_space": "original",
+                    "filter_subgroup": "missingonly",
+                    "reduction": metric["reduction"],
+                },
+                tb_name_format=IMPUTE_METRIC_TAG_FORMAT,
             )

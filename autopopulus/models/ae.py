@@ -37,6 +37,7 @@ from autopopulus.utils.impute_metrics import (
 )
 from autopopulus.utils.cli_arg_utils import YAMLStringListToList, StringOrInt, str2bool
 from autopopulus.utils.utils import rank_zero_print
+from autopopulus.utils.log_utils import IMPUTE_METRIC_TAG_FORMAT
 from autopopulus.data import CommonDataModule
 from autopopulus.data.types import DataTypeTimeDim
 from autopopulus.data.constants import PAD_VALUE
@@ -94,9 +95,11 @@ class AEDitto(pl.LightningModule):
         optimn: str = "Adam",
         activation: str = "ReLU",
         metrics: Optional[  # SEPARATE FROM LOSS, only for evaluation
-            Dict[  # NOTE: Any should be ... (kwargs) but not supported yet
-                str,
-                Union[Metric, Callable[[Tensor, Tensor, Any], Tensor]],
+            List[
+                Dict[  # NOTE: Any should be ... (kwargs) but not supported yet
+                    str,
+                    Union[str, Union[Metric, Callable[[Tensor, Tensor, Any], Tensor]]],
+                ]
             ]
         ] = None,
         replace_nan_with: Optional[Union[int, str]] = None,  # warm start
@@ -109,7 +112,6 @@ class AEDitto(pl.LightningModule):
         batchswap_corruption: Optional[float] = None,
         datamodule: Optional[CommonDataModule] = None,
     ):
-
         super().__init__()
         self.datamodule = datamodule
         self.lossn = lossn
@@ -119,18 +121,7 @@ class AEDitto(pl.LightningModule):
         self.l2_penalty = l2_penalty
         self.dropout = dropout
         self.activation = activation
-        # load the default, but they need to be initialized inside the module
-        # Ref: https://github.com/Lightning-AI/lightning/issues/4909#issuecomment-736645699
-        if metrics is None:
-            # cw/ew are separate bc cw are only implement in functions, not torchmetric modules.
-            self.cwmetrics = {"CWRMSE": CWRMSE, "CWMAAPE": CWMAAPE}
-            # Element-wise metrics, need to be initialized inside moduledict/list if i want the internal states to be placed on the correct device
-            self.ewmetrics = nn.ModuleDict(
-                {"EWRMSE": RMSEMetric(), "EWMAAPE": MAAPEMetric(scale_to_01=True)}
-            )
-        else:
-            self.cwmetrics = metrics
-            self.ewmetrics = []
+        self.init_metrics(metrics)
         # Other options
         self.replace_nan_with = replace_nan_with
         self.mvec = mvec
@@ -373,10 +364,17 @@ class AEDitto(pl.LightningModule):
 
     def shared_logging_step_end(self, outputs: Dict[str, float], split: str):
         """Log metrics + loss at end of step.
-        Compatible with dp mode: https://pytorch-lightning.readthedocs.io/en/latest/metrics.html#classification-metrics."""
+        Compatible with dp mode: https://pytorch-lightning.readthedocs.io/en/latest/metrics.html#classification-metrics.
+        """
         # Log loss
         self.log(
-            f"AE/{self.data_type_time_dim.name}/{split}-loss",
+            IMPUTE_METRIC_TAG_FORMAT.format(
+                name="loss",
+                feature_space="original",
+                filter_subgroup="all",
+                reduction="NA",
+                split=split,
+            ),
             outputs["loss"],
             on_step=False,
             on_epoch=True,
@@ -403,43 +401,80 @@ class AEDitto(pl.LightningModule):
     ):
         """Log all metrics whether cat/ctn."""
         # NOTE: if you add too many metrics it will mess up the progress bar
-        for metrics in [self.cwmetrics, self.ewmetrics]:
-            for name, metricfn in metrics.items():
-                if name == "Accuracy":
-                    metricfn = metricfn(
-                        self.col_idxs_by_type[ismapped]["binary"],
-                        self.col_idxs_by_type[ismapped]["onehot"],
-                    )
-                metric_name = (
-                    f"impute/{self.data_type_time_dim.name}/{ismapped}/{split}-{name}"
+        for metric in self.metrics:
+            if metric["name"] == "Accuracy":
+                metric["fn"] = metric["fn"](
+                    self.col_idxs_by_type[ismapped]["binary"],
+                    self.col_idxs_by_type[ismapped]["onehot"],
                 )
-                log_settings = {
-                    "on_step": False,
-                    "on_epoch": True,
-                    "prog_bar": False,
-                    "logger": True,
-                    "rank_zero_only": True,
-                }
+            context = {
+                "split": split,
+                "feature_space": ismapped,
+                "reduction": metric["reduction"],
+            }
 
-                self.log(metric_name, metricfn(pred, true), **log_settings)
-                # Compute metrics for missing only data
-                missing_only_mask = ~(non_missing_mask.bool())
-                if missing_only_mask.any():
-                    self.log(
-                        f"{metric_name}-missingonly",
-                        metricfn(pred, true, missing_only_mask),
-                        **log_settings,
-                    )
+            log_settings = {
+                "on_step": False,
+                "on_epoch": True,
+                "prog_bar": False,
+                "logger": True,
+                "rank_zero_only": True,
+            }
+
+            self.log(
+                IMPUTE_METRIC_TAG_FORMAT.format(
+                    name=metric["name"], filter_subgroup="all", **context
+                ),
+                metric["fn"](pred, true),
+                **log_settings,
+            )
+            # Compute metrics for missing only data
+            missing_only_mask = ~(non_missing_mask.bool())
+            if missing_only_mask.any():
+                self.log(
+                    IMPUTE_METRIC_TAG_FORMAT.format(
+                        name=metric["name"], filter_subgroup="missingonly", **context
+                    ),
+                    metric["fn"](pred, true, missing_only_mask),
+                    **log_settings,
+                )
 
     #######################
     #   Initialization    #
     #######################
+    def init_metrics(
+        self,
+        metrics: Optional[  # SEPARATE FROM LOSS, only for evaluation
+            List[
+                Dict[  # NOTE: Any should be ... (kwargs) but not supported yet
+                    str,
+                    Union[str, Union[Metric, Callable[[Tensor, Tensor, Any], Tensor]]],
+                ]
+            ]
+        ],
+    ):
+        """
+        Load the default, but they need to be initialized inside the module (during lightnignmodule.__init__).
+        Ref: https://github.com/Lightning-AI/lightning/issues/4909#issuecomment-736645699
+        cw/ew are separate bc cw are only implement in functions, not torchmetric modules.
+        torchmetrics need to be initialized inside moduledict/list if i want the internal states to be placed on the correct device
+        """
+        if metrics is None:
+            ewmetrics = nn.ModuleDict({"RMSE": RMSEMetric(), "MAAPE": MAAPEMetric()})
+            self.metrics = [
+                {"name": "RMSE", "fn": CWRMSE, "reduction": "CW"},
+                {"name": "MAAPE", "fn": CWMAAPE, "reduction": "CW"},
+            ] + [{"name": k, "fn": v, "reduction": "EW"} for k, v in ewmetrics.items()]
+        else:
+            self.metrics = metrics
+
     def setup(self, stage: str):
         """Might update the columns after initialization of AEDitto but before calling fit on wrapper class, so check right before calling fit here.
         This needs to happen on setup, so pl calls it before configure optimizers.
         Setup is useful for dynamically building models.
         Logic is here since datamodule.setup() will be called in trainer.fit() before self.setup().
-        https://pytorch-lightning.readthedocs.io/en/stable/common/lightning_module.html#setup"""
+        https://pytorch-lightning.readthedocs.io/en/stable/common/lightning_module.html#setup
+        """
         if stage == "fit" or stage == "train":
             self.hidden_and_cell_state = {}
             self.set_args_from_data()
@@ -537,7 +572,9 @@ class AEDitto(pl.LightningModule):
         # Add accuracy for number of bins correctly imputed if everything is discretized
         # Safe to assume "mapped" key exists for these feature maps
         if feature_map == "discretize_continuous":
-            self.cwmetrics["Accuracy"] = categorical_accuracy
+            self.metrics.append(
+                {"name": "Accuracy", "fn": categorical_accuracy, "reduction": "CW"}
+            )
             self.feature_map_inversion = lambda data_tensor: invert_discretize_tensor(
                 data_tensor,
                 self.groupby["mapped"]["discretized_ctn_cols"]["data"],
@@ -593,7 +630,7 @@ class AEDitto(pl.LightningModule):
                 self.col_idxs_by_type[self.data_version]["continuous"],
                 self.col_idxs_by_type[self.data_version]["binary"],
                 self.col_idxs_by_type[self.data_version]["onehot"],
-                loss_ctn=MAAPEMetric(scale_to_01=True),
+                loss_ctn=MAAPEMetric(),
             ),
         }
         assert (

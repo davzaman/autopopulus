@@ -18,6 +18,7 @@ from optuna.integration.pytorch_lightning import PyTorchLightningPruningCallback
 from autopopulus.data.dataset_classes import CommonDataModule
 from autopopulus.models.ap import AEImputer
 from autopopulus.utils.log_utils import (
+    IMPUTE_METRIC_TAG_FORMAT,
     AutoencoderLogger,
     BasicLogger,
     copy_log_from_tune,
@@ -110,8 +111,13 @@ def tune_model_optuna(
 
     config = get_tune_grid(args, trial)
     logger = AutoencoderLogger(args)
-    data_type_time_dim_name = data.data_type_time_dim.name
-    metric = f"impute/{data_type_time_dim_name}/original/val-CWMAAPE-missingonly"
+    metric = IMPUTE_METRIC_TAG_FORMAT.format(
+        name="MAAPE",
+        feature_space="original",
+        filter_subgroup="missingonly",
+        reduction="CW",
+        split="val",
+    )
 
     ae_imputer = AEImputer.from_argparse_args(
         args,

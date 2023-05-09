@@ -12,9 +12,30 @@ from torch.utils.tensorboard import SummaryWriter
 
 from aim import Run, Text
 
+from autopopulus.data.types import DataTypeTimeDim
+
 TUNE_LOG_DIR = "tune_results"
 LOGGER_TYPE = "TensorBoard"
 # LOGGER_TYPE = "Aim"
+
+"""
+For tensorboard, to make sure baseline and AE are logging using tensorboard the same way
+We split context between guild flags and stuff in the metric (which will go into the TB tag).
+
+IMPUTE:
+split: train/val/test
+feature_space: original/mapped
+filter_subgroup: all/missingonly
+reduction: CW/EW/NA (columnwise/errorwise/not applicable)
+
+PREDICT:
+aggregate_type: mean/cilower/ciupper/none
+"""
+IMPUTE_METRIC_TAG_FORMAT = (
+    "{split}/{feature_space}/{filter_subgroup}/{reduction}/{name}"
+)
+PREDICT_METRIC_TAG_FORMAT = "{predictor}/{aggregate_type}/{name}"
+
 
 # Ref: https://stackoverflow.com/a/6794451/1888794
 # Import Logger everywhere you want to use a logger.
@@ -65,7 +86,6 @@ class BasicLogger:
         self,
         run_hash: Optional[str] = None,
         experiment_name: Optional[str] = None,
-        predictive_model: Optional[str] = None,
         base_context: Optional[Dict[str, Any]] = None,
         args: Optional[Namespace] = None,
     ) -> None:
@@ -80,13 +100,8 @@ class BasicLogger:
         if LOGGER_TYPE == "TensorBoard":
             if base_context is None and args is None:
                 self.logger = None
-            else:
-                # Get the universal logger for tensorboard.
-                self.logger = SummaryWriter(
-                    log_dir=self.get_logdir(
-                        **base_context, predictive_model=predictive_model
-                    )
-                )
+            else:  # Get the universal logger for tensorboard.
+                self.logger = SummaryWriter(log_dir=self.get_logdir(**base_context))
         elif LOGGER_TYPE == "Aim":
             # return Run(repo=target_path)
             self.logger = Run(run_hash=run_hash, experiment=experiment_name)
@@ -104,6 +119,7 @@ class BasicLogger:
                 "amputation_patterns",
                 "percent_missing",
                 "trial_num",
+                "data_type_time_dim",
             ]
         }
 
@@ -114,26 +130,36 @@ class BasicLogger:
         amputation_patterns: Optional[List[Dict]] = None,
         percent_missing: Optional[float] = None,
         trial_num: Optional[int] = None,
-        predictive_model: Optional[str] = None,
+        data_type_time_dim: Optional[DataTypeTimeDim] = None,
+        put_impute_flags_in_path: bool = False,
     ) -> str:
-        """Get logging directory based on experiment settings."""
+        """
+        Get logging directory based on experiment settings.
+        This is the scalars "path" in tensorboard and guild.
+        """
         # if tune_prefix is empty string, os.path.join will ignore it
-        tune_prefix = (
-            join(TUNE_LOG_DIR, f"trial_{trial_num}") if trial_num is not None else ""
-        )
-        # Missingness scenario could be 1 mech or mixed
-        if amputation_patterns:
-            pattern_mechanisms = ",".join(
-                [pattern["mechanism"] for pattern in amputation_patterns]
-            )
-            dir_name = join(
-                tune_prefix, "F.O.", str(percent_missing), pattern_mechanisms, method
-            )
-        else:
-            dir_name = join(tune_prefix, "full", method)
-
-        if predictive_model:
-            dir_name = join(dir_name, predictive_model)
+        tune_prefix = ""
+        if data_type_time_dim is not None:
+            tune_prefix = join(tune_prefix, data_type_time_dim.name)
+        if trial_num is not None:
+            tune_prefix = join(tune_prefix, TUNE_LOG_DIR, f"trial_{trial_num}")
+        if put_impute_flags_in_path:
+            # Missingness scenario could be 1 mech or mixed
+            if amputation_patterns:
+                pattern_mechanisms = ",".join(
+                    [pattern["mechanism"] for pattern in amputation_patterns]
+                )
+                dir_name = join(
+                    tune_prefix,
+                    "F.O.",
+                    str(percent_missing),
+                    pattern_mechanisms,
+                    method,
+                )
+            else:
+                dir_name = join(tune_prefix, "full", method)
+        else:  # Flags wont go into path, use guild to get that info
+            dir_name = join(tune_prefix, method)
 
         if not exists(dir_name):
             makedirs(dir_name)

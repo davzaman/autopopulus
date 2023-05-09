@@ -24,6 +24,7 @@ from ray_lightning.tune import get_tune_resources
 
 # Local
 from autopopulus.utils.log_utils import (
+    IMPUTE_METRIC_TAG_FORMAT,
     AutoencoderLogger,
     BasicLogger,
     copy_log_from_tune,
@@ -182,9 +183,22 @@ def run_tune(
         )
 
     metrics = [
-        f"AE/{data.data_type_time_dim.name}/val-loss",
-        f"impute/{data_type_time_dim_name}/original/val-CWMAAPE-missingonly",
+        IMPUTE_METRIC_TAG_FORMAT.format(
+            name="loss",
+            feature_space="original",
+            filter_subgroup="all",
+            reduction="NA",
+            split="val",
+        ),
+        IMPUTE_METRIC_TAG_FORMAT.format(
+            name="MAAPE",
+            feature_space="original",
+            filter_subgroup="missingonly",
+            reduction="CW",
+            split="val",
+        ),
     ]
+    key_metric = metrics[1]
 
     # https://docs.ray.io/en/latest/tune/api_docs/execution.html#tuner
     tuner = tune.Tuner(
@@ -202,7 +216,7 @@ def run_tune(
         ),
         tune_config=tune.TuneConfig(
             mode="min",
-            metric=metrics[1],
+            metric=key_metric,
             scheduler=ASHAScheduler(),
             num_samples=args.tune_n_samples,
             trial_name_creator=lambda trial: trial.trial_id,
@@ -216,6 +230,6 @@ def run_tune(
     # https://docs.ray.io/en/latest/tune/api_docs/result_grid.html
     results = tuner.fit()
     # https://docs.ray.io/en/latest/ray-air/package-ref.html#ray.air.result.Result
-    best_result = results.get_best_result(metric=metrics[1], mode="min")
+    best_result = results.get_best_result(metric=key_metric, mode="min")
 
     return (best_result.log_dir, best_result.config)

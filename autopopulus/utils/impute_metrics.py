@@ -60,7 +60,7 @@ class MAAPEMetric(Metric):
     full_state_update: bool = False
 
     def __init__(
-        self, epsilon: float = EPSILON, scale_to_01: bool = False, **kwargs: Any
+        self, epsilon: float = EPSILON, scale_to_01: bool = True, **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
         self.epsilon = epsilon
@@ -72,15 +72,15 @@ class MAAPEMetric(Metric):
         self,
         preds: torch.Tensor,
         target: torch.Tensor,
-        mask: Optional[torch.BoolTensor] = None,
+        missing_indicators: Optional[torch.BoolTensor] = None,
     ):
         # preds, target = self._input_format(preds, target)
         assert preds.shape == target.shape
 
         row_maape = torch.arctan(torch.abs((target - preds) / (target + self.epsilon)))
-        if mask is not None:
-            row_maape *= ~mask
-            count = torch.sum(~mask)
+        if missing_indicators is not None:
+            row_maape *= missing_indicators
+            count = torch.sum(missing_indicators)
         else:
             count = target.numel()
         self.sum_errors += torch.sum(row_maape)
@@ -115,15 +115,16 @@ class RMSEMetric(Metric):
         self,
         preds: torch.Tensor,
         target: torch.Tensor,
-        mask: Optional[torch.BoolTensor] = None,
+        missing_indicators: Optional[torch.BoolTensor] = None,
     ):
         preds, target = format_tensor(preds, target)
         assert preds.shape == target.shape
 
         squared_error = torch.pow(preds - target, 2)
-        if mask is not None:
-            squared_error *= ~mask
-            count = torch.sum(~mask)
+        if missing_indicators is not None:
+            # mask_out_observed = missing_indicators
+            squared_error *= missing_indicators
+            count = torch.sum(missing_indicators)
         else:
             count = torch.tensor(target.numel(), device=self.device)
         self.sum_errors += torch.sum(squared_error)
@@ -157,7 +158,7 @@ class AccuracyMetric(Metric):
         self,
         preds: torch.Tensor,
         target: torch.Tensor,
-        mask: Optional[torch.BoolTensor] = None,
+        missing_indicators: Optional[torch.BoolTensor] = None,
     ):
         # preds, target, bin_cols_idx, onehot_cols_idx, mask = self._input_format(
         #     preds, target, bin_cols_idx, onehot_cols_idx, mask
@@ -168,10 +169,12 @@ class AccuracyMetric(Metric):
         target_cats = get_categories(target, self.bin_cols_idx, self.onehot_cols_idx)
 
         correct = predicted_cats.eq(target_cats).to(int)
-        if mask is not None:
-            mask = get_categories(mask, self.bin_cols_idx, self.onehot_cols_idx)
-            correct *= ~mask
-            count = torch.sum(~mask)
+        if missing_indicators is not None:
+            missing_indicators = get_categories(
+                missing_indicators, self.bin_cols_idx, self.onehot_cols_idx
+            )
+            correct *= missing_indicators
+            count = torch.sum(missing_indicators)
         else:
             count = target_cats.numel()
         self.num_correct += torch.sum(correct)
@@ -184,9 +187,10 @@ class AccuracyMetric(Metric):
 def CWMAAPE(
     predicted: torch.Tensor,
     target: torch.Tensor,
-    mask: Optional[torch.Tensor] = None,
+    missing_indicators: Optional[torch.Tensor] = None,
     epsilon: float = EPSILON,
     reduction: str = "mean",
+    scale_to_01: bool = True,
 ) -> torch.Tensor:
     """
     Mean Arctangent Absolute Percentage Error reduced column-wise.
@@ -195,15 +199,22 @@ def CWMAAPE(
     Note: result is NOT multiplied by 100
     """
     assert predicted.shape == target.shape
-    predicted, target, mask = force_np(predicted, target, mask)
+    predicted, target, missing_indicators = force_np(
+        predicted, target, missing_indicators
+    )
 
-    predicted = np.ma.masked_array(predicted, mask)
-    target = np.ma.masked_array(target, mask)
+    mask_out_observed = (
+        ~missing_indicators if missing_indicators is not None else missing_indicators
+    )
+    predicted = np.ma.masked_array(predicted, mask_out_observed)
+    target = np.ma.masked_array(target, mask_out_observed)
 
     if isinstance(predicted, np.ndarray):
         row_maape = np.arctan(np.abs((target - predicted) / (target + epsilon)))
 
     no_reduce = np.ma.mean(row_maape, axis=0)
+    if scale_to_01:  # range [0, pi/2] scale to [0, 1]
+        no_reduce *= 2 / pi
     if reduction == "none":
         return no_reduce
     if reduction == "sum":
@@ -214,16 +225,20 @@ def CWMAAPE(
 def CWRMSE(
     predicted: torch.Tensor,
     target: torch.Tensor,
-    mask: Optional[torch.Tensor] = None,
+    missing_indicators: Optional[torch.Tensor] = None,
     reduction: str = "mean",
     normalize: Optional[str] = None,
 ) -> torch.Tensor:
     """Column-wise reduction. Should work both for torch.Tensor and np.ndarray."""
     assert predicted.shape == target.shape
-    predicted, target, mask = force_np(predicted, target, mask)
-
-    predicted = np.ma.masked_array(predicted, mask)
-    target = np.ma.masked_array(target, mask)
+    predicted, target, missing_indicators = force_np(
+        predicted, target, missing_indicators
+    )
+    mask_out_observed = (
+        ~missing_indicators if missing_indicators is not None else missing_indicators
+    )
+    predicted = np.ma.masked_array(predicted, mask_out_observed)
+    target = np.ma.masked_array(target, mask_out_observed)
 
     if normalize == "mean":
         denom = np.ma.mean(target, axis=1)
@@ -233,12 +248,13 @@ def CWRMSE(
         denom = np.ma.max(target, axis=1) - np.ma.min(target, axis=1)
     else:
         denom = 1
-    no_reduce = np.ma.mean((predicted - target) ** 2, axis=0)
+    # RMSE per column: square root of the mean of squared diffs in that column
+    no_reduce = np.ma.mean((predicted - target) ** 2, axis=0) ** 0.5
     if reduction == "none":
-        return (no_reduce**0.5) / denom
+        return no_reduce / denom
     if reduction == "sum":
-        return (no_reduce.sum() ** 0.5) / denom
-    return (no_reduce.mean() ** 0.5) / denom
+        return no_reduce.sum() / denom
+    return no_reduce.mean() / denom
 
 
 def categorical_accuracy(
@@ -247,7 +263,7 @@ def categorical_accuracy(
     def accuracy_fn(
         predicted: torch.Tensor,
         target: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
+        missing_indicators: Optional[torch.Tensor] = None,
         reduction: str = "mean",
     ) -> torch.Tensor:
         """Log accuracy over all categorical variables."""
@@ -256,13 +272,16 @@ def categorical_accuracy(
         predicted_cats = get_categories(predicted, bin_col_idxs, onehot_cols_idx)
         target_cats = get_categories(target, bin_col_idxs, onehot_cols_idx)
 
-        if mask is not None:
-            mask = get_categories(mask, bin_col_idxs, onehot_cols_idx)
-            predicted_cats, target_cats, mask = force_np(
-                predicted_cats, target_cats, mask
+        if missing_indicators is not None:
+            missing_indicators = get_categories(
+                missing_indicators, bin_col_idxs, onehot_cols_idx
             )
-            predicted_cats = np.ma.masked_array(predicted_cats, mask)
-            target_cats = np.ma.masked_array(target_cats, mask)
+            predicted_cats, target_cats, missing_indicators = force_np(
+                predicted_cats, target_cats, missing_indicators
+            )
+            mask_out_observed = ~missing_indicators
+            predicted_cats = np.ma.masked_array(predicted_cats, mask_out_observed)
+            target_cats = np.ma.masked_array(target_cats, mask_out_observed)
             accuracy_per_bin = np.ma.mean((predicted_cats == target_cats), axis=0)
         else:  # no mask
             accuracy_per_bin = predicted_cats.eq(target_cats).to(float).mean(axis=0)
@@ -274,6 +293,28 @@ def categorical_accuracy(
         return accuracy_per_bin.mean()
 
     return accuracy_fn
+
+
+def EWMAAPE(
+    predicted: torch.Tensor,
+    target: torch.Tensor,
+    missing_indictors: Optional[torch.Tensor] = None,
+) -> float:
+    """Functional version of the torchmetric so I can use it on sklearn models."""
+    maape = MAAPEMetric(scale_to_01=True)
+    maape.update(predicted, target, missing_indictors)
+    return maape.compute()
+
+
+def EWRMSE(
+    predicted: torch.Tensor,
+    target: torch.Tensor,
+    missing_indicators: Optional[torch.Tensor] = None,
+) -> float:
+    """Functional version of the torchmetric so I can use it on sklearn models."""
+    rmse = RMSEMetric()
+    rmse.update(predicted, target, missing_indicators)
+    return rmse.compute()
 
 
 def get_categories(
