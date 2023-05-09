@@ -2,13 +2,18 @@ import unittest
 from unittest.mock import patch
 
 from torch.autograd import Variable
+from torch import long as torch_long
 import torch.nn as nn
-from torch import rand, randn, Generator, Tensor
+from torch import rand, randn, Generator, tensor
 from torch.nn.modules.dropout import Dropout
 from torch.nn.modules.loss import BCEWithLogitsLoss, MSELoss
+from torch.testing import assert_allclose
+from pytorch_lightning.loggers.base import DummyLogger
 
 from pandas import Series
+from numpy.testing import assert_array_equal
 
+from autopopulus.models.ap import AEImputer
 from autopopulus.models.ae import AEDitto
 from autopopulus.models.dnn import ResetSeed
 from autopopulus.models.utils import (
@@ -18,7 +23,17 @@ from autopopulus.models.utils import (
     OnehotColumnThreshold,
     ReconstructionKLDivergenceLoss,
 )
-from autopopulus.test.common_mock_data import splits
+from autopopulus.test.common_mock_data import (
+    splits,
+    X,
+    y,
+    columns,
+    col_idxs_by_type,
+    groupby,
+)
+from autopopulus.test.utils import get_dataset_loader
+from autopopulus.data import CommonDataModule
+from autopopulus.data.constants import PAD_VALUE
 
 seed = 0
 standard = {
@@ -26,32 +41,54 @@ standard = {
     "learning_rate": 0.1,
     "seed": seed,
 }
-layer_dims = [7, 3, 2, 3, 7]
+data_settings = {
+    "dataset_loader": get_dataset_loader(X["X"], y),
+    "seed": seed,
+    "val_test_size": 0.5,
+    "test_size": 0.5,
+    "batch_size": 2,
+}
+layer_dims = [6, 3, 2, 3, 6]
 EPSILON = 1e-10
+
+
+class TestAEImputer(unittest.TestCase):
+    @patch("autopopulus.data.dataset_classes.train_test_split")
+    def test_transform(self, mock_split):
+        mock_split.return_value = (X["X"].index, X["X"].index)
+        datamodule = CommonDataModule(**data_settings, scale=True)
+        # datamodule.columns = {"original": X["X"].columns}
+        datamodule.setup("fit")
+
+        aeimp = AEImputer(**standard, replace_nan_with=0, max_epochs=3)
+        # Turn off logging for testing
+        aeimp.trainer.loggers = [DummyLogger()] if aeimp.trainer.loggers else []
+        aeimp.fit(datamodule)
+        train_dataloader = datamodule.train_dataloader()
+        df = aeimp.transform(train_dataloader)
+
+        self.assertEqual(df.isna().sum().sum(), 0)
+        # the dataset is transformed so the values shouldn't be the same but the shape, columns, index should
+        assert_array_equal(df.index, X["X"].index)
+        assert_array_equal(df.columns, X["X"].columns)
+        self.assertEqual(df.shape, X["X"].shape)
 
 
 class TestAEDitto(unittest.TestCase):
     @patch("autopopulus.data.CommonDataModule")
     def mock_set_args_from_data(self, MockCommonDataModule):
-        self.nfeatures = {"original": 7}
+        self.nfeatures = {"original": len(columns["columns"])}
         self.col_idxs_by_type = {
             "original": {
-                "continuous": [0, 5],
-                "categorical": [1, 2, 3, 4, 6],
-                "binary": [1, 6],
-                "onehot": [[2, 3, 4]],
+                k: tensor(v, dtype=torch_long)
+                for k, v in col_idxs_by_type["original"].items()
             }
         }
         if hasattr(self, "col_idxs_set_empty"):
             for key in self.col_idxs_set_empty:
                 self.col_idxs_by_type["original"][key] = []
 
-        self.groupby = {
-            "original": {
-                "categorical_onehots": {2: "A", 3: "A", 4: "A"},
-                "binary_vars": {1: "b1", 6: "b2"},
-            }
-        }
+        self.groupby = groupby
         if hasattr(self, "groupby_set_empty"):
             for key in self.groupby_set_empty:
                 self.groupby["original"][key] = {}
@@ -60,6 +97,116 @@ class TestAEDitto(unittest.TestCase):
             "data": {"train": Series(splits["train"])}
         }
         self.datamodule = MockCommonDataModule()
+
+    @patch("autopopulus.models.ae.onehot_column_threshold")
+    @patch("autopopulus.models.ae.binary_column_threshold")
+    @patch.object(AEDitto, "set_args_from_data", mock_set_args_from_data)
+    def test_get_imputed_tensor_from_model_output(
+        self, mock_binary_column_threshold, mock_onehot_column_threshold
+    ):
+        ae = AEDitto(**standard, lossn="BCE")
+        ae.setup("fit")
+        fill_val = -5000
+
+        data = X["X"]
+        true = X["nomissing"]
+        non_missing_mask = ~data.isna()
+        # make it wrong in all the observed places and the same fill value for the missing ones
+        reconstruct_batch = tensor((data * -1).where(non_missing_mask, fill_val).values)
+        # Test these separately, they're noops here
+        mock_binary_column_threshold.return_value = reconstruct_batch
+        mock_onehot_column_threshold.return_value = reconstruct_batch
+        (
+            imputed,
+            res_ground_truth,
+            res_non_missing_mask,
+        ) = ae.get_imputed_tensor_from_model_output(
+            data=tensor(data.values),
+            reconstruct_batch=reconstruct_batch,
+            ground_truth=(ground_truth := tensor(true.values)),
+            non_missing_mask=tensor(non_missing_mask.values).bool(),
+            original_data=None,
+            original_ground_truth=None,
+        )
+        # observed values should be correct, missing values should be the fill value
+        assert_allclose(imputed, tensor(data.fillna(fill_val).values))
+        # should come out the same, no changes
+        assert_allclose(res_ground_truth, ground_truth)
+        # should come out the same, no changes
+        assert_allclose(res_non_missing_mask, tensor(non_missing_mask.values))
+
+        with self.subTest("NaNs in Ground Truth"):
+            (
+                imputed,
+                res_ground_truth,
+                res_non_missing_mask,
+            ) = ae.get_imputed_tensor_from_model_output(
+                data=tensor(data.values),
+                reconstruct_batch=reconstruct_batch,
+                ground_truth=tensor(data.values),  # data with missing values
+                non_missing_mask=tensor(non_missing_mask.values).bool(),
+                original_data=None,
+                original_ground_truth=None,
+            )
+            # observed values should be correct, missing values should be the fill value
+            assert_allclose(imputed, tensor(data.fillna(fill_val).values))
+            # should come out the same, no changes
+            assert_allclose(res_ground_truth, tensor(data.fillna(fill_val).values))
+            # should come out the same, no changes
+            assert_allclose(res_non_missing_mask, tensor(non_missing_mask.values))
+
+        with self.subTest("Feature Mapped Data"):
+            data_mapped = X["target_encoded"]
+            data_original = X["X"]
+            non_missing_mask_mapped = ~data_mapped.isna()
+            non_missing_mask_original = ~data_original.isna()
+            # make it wrong in all the observed places and the same fill value for the missing ones
+            reconstruct_batch_mapped = tensor(
+                (data_mapped * -1).where(non_missing_mask_mapped, fill_val).values
+            )
+            reconstruct_batch_original = tensor(
+                (data_original * -1).where(~data_original.isna(), fill_val).values
+            )
+            ae.feature_map_inversion = lambda x: reconstruct_batch_original
+
+            # Test these separately, they're noops here
+            mock_binary_column_threshold.return_value = reconstruct_batch_original
+            mock_onehot_column_threshold.return_value = reconstruct_batch_original
+            (
+                imputed,
+                res_ground_truth,
+                res_non_missing_mask,
+            ) = ae.get_imputed_tensor_from_model_output(
+                data=tensor(data_mapped.values),
+                reconstruct_batch=reconstruct_batch_mapped,
+                ground_truth=tensor(X["target_encoded_true"].values),
+                non_missing_mask=tensor(non_missing_mask_mapped.values).bool(),
+                original_data=tensor(data_original.values),
+                original_ground_truth=tensor(X["nomissing"].values),
+            )
+            # observed values should be correct, missing values should be the fill value
+            assert_allclose(imputed, tensor(data_original.fillna(fill_val).values))
+            # should be in original space
+            assert_allclose(res_ground_truth, tensor(X["nomissing"].values))
+            # should be in original space
+            assert_allclose(
+                res_non_missing_mask, tensor(non_missing_mask_original.values)
+            )
+
+    def test_idxs_to_tensor(self):
+        with self.subTest("List"):
+            l = [1, 2]
+            assert_allclose(AEDitto._idxs_to_tensor(l), tensor(l))
+
+        with self.subTest("List of List (No Padding)"):
+            l = [[1, 2], [3, 4]]
+            assert_allclose(AEDitto._idxs_to_tensor(l), tensor(l))
+
+        with self.subTest("List of List (Padding)"):
+            l = [[1, 2], [3]]
+            assert_allclose(
+                AEDitto._idxs_to_tensor(l), tensor([[1, 2], [3, PAD_VALUE]])
+            )
 
     @patch.object(AEDitto, "set_args_from_data", mock_set_args_from_data)
     def test_vae(self):
@@ -73,13 +220,13 @@ class TestAEDitto(unittest.TestCase):
 
         encoder = nn.ModuleList(
             [
-                nn.Linear(7, 3),
+                nn.Linear(6, 3),
                 nn.ReLU(inplace=True),
             ]
         )
         mu_var = nn.Linear(3, 2)
         decoder = nn.ModuleList(
-            [nn.Linear(2, 3), nn.ReLU(inplace=True), nn.Linear(3, 7)]
+            [nn.Linear(2, 3), nn.ReLU(inplace=True), nn.Linear(3, 6)]
         )
         self.assertEqual(ae.encoder.__repr__(), encoder.__repr__())
         self.assertEqual(ae.decoder.__repr__(), decoder.__repr__())
@@ -91,7 +238,7 @@ class TestAEDitto(unittest.TestCase):
         )
         self.assertEqual(
             pytorch_total_params,
-            2 * ((7 * 3) + (3 * 2)) + (3 * 2) + sum(layer_dims[1:]) + 2,
+            2 * ((6 * 3) + (3 * 2)) + (3 * 2) + sum(layer_dims[1:]) + 2,
         )
 
     @patch.object(AEDitto, "set_args_from_data", mock_set_args_from_data)
@@ -109,7 +256,7 @@ class TestAEDitto(unittest.TestCase):
 
             encoder = nn.ModuleList(
                 [
-                    nn.Linear(7, 3),
+                    nn.Linear(6, 3),
                     nn.ReLU(inplace=True),
                     nn.Linear(3, 2),
                     nn.ReLU(inplace=True),
@@ -119,7 +266,7 @@ class TestAEDitto(unittest.TestCase):
                 [
                     nn.Linear(2, 3),
                     nn.ReLU(inplace=True),
-                    nn.Linear(3, 7),
+                    nn.Linear(3, 6),
                 ]
             )
             self.assertEqual(ae.encoder.__repr__(), encoder.__repr__())
@@ -129,18 +276,18 @@ class TestAEDitto(unittest.TestCase):
                 p.numel() for p in ae.parameters() if p.requires_grad
             )
             self.assertEqual(
-                pytorch_total_params, 2 * ((7 * 3) + (3 * 2)) + sum(layer_dims[1:])
+                pytorch_total_params, 2 * ((6 * 3) + (3 * 2)) + sum(layer_dims[1:])
             )
 
         # Fractional hidden layer
         with self.subTest("Fractional hidden layer"):
             new_settings = standard.copy()
-            new_settings["hidden_layers"] = [0.5, 0.1, 0.05, 0.1, 0.5]
+            new_settings["hidden_layers"] = [0.6, 0.1, 0.05, 0.1, 0.6]
             ae = AEDitto(**new_settings)
             ae.setup("fit")
             encoder = nn.ModuleList(
                 [
-                    nn.Linear(7, 4),
+                    nn.Linear(6, 4),
                     nn.ReLU(inplace=True),
                     nn.Linear(4, 1),
                     nn.ReLU(inplace=True),
@@ -154,7 +301,7 @@ class TestAEDitto(unittest.TestCase):
                     nn.ReLU(inplace=True),
                     nn.Linear(1, 4),
                     nn.ReLU(inplace=True),
-                    nn.Linear(4, 7),
+                    nn.Linear(4, 6),
                 ]
             )
             self.assertEqual(ae.encoder.__repr__(), encoder.__repr__())
@@ -172,7 +319,7 @@ class TestAEDitto(unittest.TestCase):
             ae.setup("fit")
             encoder = nn.ModuleList(
                 [
-                    nn.Linear(7, 3),
+                    nn.Linear(6, 3),
                     nn.ReLU(inplace=True),
                     ResetSeed(seed),
                     Dropout(0.5),
@@ -188,7 +335,7 @@ class TestAEDitto(unittest.TestCase):
                     nn.ReLU(inplace=True),
                     ResetSeed(seed),
                     Dropout(0.5),
-                    nn.Linear(3, 7),
+                    nn.Linear(3, 6),
                 ]
             )
             self.assertEqual(ae.encoder.__repr__(), encoder.__repr__())
@@ -200,7 +347,7 @@ class TestAEDitto(unittest.TestCase):
         ae.setup("fit")
         encoder = nn.ModuleList(
             [
-                nn.LSTM(7, 3, batch_first=True),
+                nn.LSTM(6, 3, batch_first=True),
                 nn.ReLU(inplace=True),
                 nn.LSTM(3, 2, batch_first=True),
                 nn.ReLU(inplace=True),
@@ -210,18 +357,18 @@ class TestAEDitto(unittest.TestCase):
             [
                 nn.LSTM(2, 3, batch_first=True),
                 nn.ReLU(inplace=True),
-                nn.Linear(3, 7),
+                nn.Linear(3, 6),
             ]
         )
         self.assertEqual(ae.encoder.__repr__(), encoder.__repr__())
         self.assertEqual(ae.decoder.__repr__(), decoder.__repr__())
 
         with self.subTest("Apply Layers"):
-            X_long = rand(size=(7, 7, 7), generator=Generator().manual_seed(seed))
-            code = ae.encode("train", X_long, Tensor([7] * 7))
+            X_long = rand(size=(6, 6, 6), generator=Generator().manual_seed(seed))
+            code = ae.encode("train", X_long, tensor([6] * 6))
             self.assertEqual(ae.curr_rnn_depth, 1)
 
-            ae.decode("train", code, Tensor([7] * 7))
+            ae.decode("train", code, tensor([6] * 6))
             self.assertEqual(ae.curr_rnn_depth, 0)
 
     @patch.object(AEDitto, "set_args_from_data", mock_set_args_from_data)
@@ -233,7 +380,7 @@ class TestAEDitto(unittest.TestCase):
                 [
                     ResetSeed(seed),
                     Dropout(0.5),
-                    nn.Linear(7, 3),
+                    nn.Linear(6, 3),
                     nn.ReLU(inplace=True),
                     nn.Linear(3, 2),
                     nn.ReLU(inplace=True),
@@ -243,7 +390,7 @@ class TestAEDitto(unittest.TestCase):
                 [
                     nn.Linear(2, 3),
                     nn.ReLU(inplace=True),
-                    nn.Linear(3, 7),
+                    nn.Linear(3, 6),
                 ]
             )
             self.assertEqual(ae.encoder.__repr__(), encoder.__repr__())
@@ -255,7 +402,7 @@ class TestAEDitto(unittest.TestCase):
             encoder = nn.ModuleList(
                 [
                     BatchSwapNoise(0.5),
-                    nn.Linear(7, 3),
+                    nn.Linear(6, 3),
                     nn.ReLU(inplace=True),
                     nn.Linear(3, 2),
                     nn.ReLU(inplace=True),
@@ -265,7 +412,7 @@ class TestAEDitto(unittest.TestCase):
                 [
                     nn.Linear(2, 3),
                     nn.ReLU(inplace=True),
-                    nn.Linear(3, 7),
+                    nn.Linear(3, 6),
                 ]
             )
             self.assertEqual(ae.encoder.__repr__(), encoder.__repr__())
@@ -279,7 +426,7 @@ class TestAEDitto(unittest.TestCase):
                     BatchSwapNoise(0.5),
                     ResetSeed(seed),
                     Dropout(0.5),
-                    nn.Linear(7, 3),
+                    nn.Linear(6, 3),
                     nn.ReLU(inplace=True),
                     nn.Linear(3, 2),
                     nn.ReLU(inplace=True),
@@ -289,25 +436,25 @@ class TestAEDitto(unittest.TestCase):
                 [
                     nn.Linear(2, 3),
                     nn.ReLU(inplace=True),
-                    nn.Linear(3, 7),
+                    nn.Linear(3, 6),
                 ]
             )
             self.assertEqual(ae.encoder.__repr__(), encoder.__repr__())
             self.assertEqual(ae.decoder.__repr__(), decoder.__repr__())
 
     def test_ColumnThreshold(self):
-        data = Tensor([[-1, -1], [0, 0], [1, 1]])
+        data = tensor([[-1, -1], [0, 0], [1, 1]])
         with self.subTest("Empty indices"):
-            steps = BinColumnThreshold(Tensor([]).long())
+            steps = BinColumnThreshold(tensor([]).long())
             self.assertTrue(steps(data).equal(data))  # Do nothing
 
         with self.subTest("Set indices"):
-            steps = BinColumnThreshold(Tensor([0]).long())
+            steps = BinColumnThreshold(tensor([0]).long())
             # sigmoid when x<0 is < 0.5, when x=0 == 0.5, x>0 > 0.5 (should be 1)
-            self.assertTrue(steps(data).allclose(Tensor([[0, -1], [1, 0], [1, 1]])))
+            self.assertTrue(steps(data).allclose(tensor([[0, -1], [1, 0], [1, 1]])))
 
         with self.subTest("Longitudinal"):
-            data = Tensor(
+            data = tensor(
                 [
                     [
                         [-1, -1],  # T = 0
@@ -317,7 +464,7 @@ class TestAEDitto(unittest.TestCase):
                     [[-2, -2], [1, 1], [2, 2]],  # end pt 2
                 ]
             )
-            correct = Tensor(
+            correct = tensor(
                 [
                     [
                         [0, -1],  # T = 0
@@ -327,30 +474,30 @@ class TestAEDitto(unittest.TestCase):
                     [[0, -2], [1, 1], [1, 2]],  # end pt 2
                 ]
             )
-            steps = BinColumnThreshold(Tensor([0]).long())
+            steps = BinColumnThreshold(tensor([0]).long())
             # sigmoid when x<0 is < 0.5, when x=0 == 0.5, x>0 > 0.5 (should be 1)
             self.assertTrue(steps(data).allclose(correct))
 
     def test_SoftmaxOnehot(self):
-        data = Tensor([[0, 1, 3.4, 9], [1, 3, 3.4, 9], [2, 5, 3.4, 9]])
+        data = tensor([[0, 1, 3.4, 9], [1, 3, 3.4, 9], [2, 5, 3.4, 9]])
         with self.subTest("Empty indices"):
-            steps = OnehotColumnThreshold(Tensor([]).long())
+            steps = OnehotColumnThreshold(tensor([]).long())
             self.assertTrue(steps(data).equal(data))  # Do nothing
 
         with self.subTest("1 set of indices"):
-            steps = OnehotColumnThreshold(Tensor([[0, 1]]).long())
-            correct = Tensor([[0, 1, 3.4, 9], [0, 1, 3.4, 9], [0, 1, 3.4, 9]])
+            steps = OnehotColumnThreshold(tensor([[0, 1]]).long())
+            correct = tensor([[0, 1, 3.4, 9], [0, 1, 3.4, 9], [0, 1, 3.4, 9]])
             self.assertTrue(steps(data).allclose(correct))
 
         with self.subTest("Multiple Onehot Groups"):
             # the layer actually modifies the tensor in place so I ahve to do this again.
-            data = Tensor([[0, 1, 3.4, 9], [1, 3, 3.4, 9], [2, 5, 3.4, 9]])
-            steps = OnehotColumnThreshold(Tensor([[0, 1], [2, 3]]).long())
-            correct = Tensor([[0, 1, 0, 1], [0, 1, 0, 1], [0, 1, 0, 1]])
+            data = tensor([[0, 1, 3.4, 9], [1, 3, 3.4, 9], [2, 5, 3.4, 9]])
+            steps = OnehotColumnThreshold(tensor([[0, 1], [2, 3]]).long())
+            correct = tensor([[0, 1, 0, 1], [0, 1, 0, 1], [0, 1, 0, 1]]).float()
             self.assertTrue(steps(data).allclose(correct))
 
         with self.subTest("Longitudinal"):
-            data = Tensor(
+            data = tensor(
                 [
                     [
                         [0, 1],  # T = 0
@@ -360,7 +507,7 @@ class TestAEDitto(unittest.TestCase):
                     [[3.4, 9], [3.4, 9], [3.4, 9]],  # end pt 2
                 ]
             )
-            correct = Tensor(
+            correct = tensor(
                 [
                     [
                         [0, 1],  # T = 0
@@ -369,17 +516,17 @@ class TestAEDitto(unittest.TestCase):
                     ],  # End pt 1
                     [[0, 1], [0, 1], [0, 1]],  # end pt 2
                 ]
-            )
-            steps = OnehotColumnThreshold(Tensor([[0, 1]]).long())
+            ).float()
+            steps = OnehotColumnThreshold(tensor([[0, 1]]).long())
             self.assertTrue(steps(data).allclose(correct))
 
     def test_loss(self):
         var = Variable(randn(10, 10), requires_grad=True)
         with self.subTest("CEMSELoss"):
             loss = CtnCatLoss(
-                Tensor([0, 1, 2, 3]).long(),
-                Tensor([4, 5, 6]).long(),
-                Tensor([[7, 8, 9]]).long(),
+                tensor([0, 1, 2, 3]).long(),
+                tensor([4, 5, 6]).long(),
+                tensor([[7, 8, 9]]).long(),
             )
             res = loss(var, var)
             try:  # should get no errors

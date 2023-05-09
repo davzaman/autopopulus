@@ -185,9 +185,14 @@ class TestMetrics(unittest.TestCase):
                     error_df = torch.tensor(error_df.values)
                     # CW and EW should all match
                     rmse_true = ((diff**2 / len(df)) ** 0.5) / df.shape[1]
-                    maape_true = np.arctan(
-                        abs(diff / tensor_df[0, ctn_col_idx] + EPSILON)
-                    ).item() / (len(df) * df.shape[1])
+                    maape_true = (
+                        np.arctan(
+                            abs(diff / tensor_df[0, ctn_col_idx] + EPSILON)
+                        ).item()
+                        / (len(df) * df.shape[1])
+                        * 2
+                        / pi
+                    )
 
                     self.assertAlmostEqual(
                         rmse_true, CWRMSE(error_df, tensor_df).item(), places=WITHIN
@@ -337,17 +342,17 @@ class TestMetrics(unittest.TestCase):
                 )
 
         with self.subTest("Mask"):
-            missing_mask = torch.zeros_like(tensor_df).to(bool)
-            missing_mask[0, bin_col_idx] = True
+            missing_indicators = torch.ones_like(tensor_df).to(bool)
+            missing_indicators[0, bin_col_idx] = False
             with self.subTest("Not Equal inside Mask"):
                 self.assertAlmostEqual(
                     1,
-                    accuracy_fn(error_df, tensor_df, missing_mask).item(),
+                    accuracy_fn(error_df, tensor_df, missing_indicators).item(),
                     places=WITHIN,
                 )
                 self.assertAlmostEqual(
                     1,
-                    accuracy_elwise(error_df, tensor_df, missing_mask).item(),
+                    accuracy_elwise(error_df, tensor_df, missing_indicators).item(),
                     places=WITHIN,
                 )
 
@@ -362,7 +367,7 @@ class TestMetrics(unittest.TestCase):
                     # 2 error, but ignoring 1 position
                     (((N - 1 - 1) / (N - 1)) + F - 1) / F,
                     categorical_accuracy(hypothesis["cat_cols_idx"], [])(
-                        error_df, tensor_df, missing_mask
+                        error_df, tensor_df, missing_indicators
                     ).item(),
                     places=WITHIN,
                 )
@@ -371,7 +376,7 @@ class TestMetrics(unittest.TestCase):
                     / (
                         N * F - 1
                     ),  # error in 1 non-masked cells when theres 1 cell less
-                    accuracy_elwise(error_df, tensor_df, missing_mask).item(),
+                    accuracy_elwise(error_df, tensor_df, missing_indicators).item(),
                     places=WITHIN,
                 )
 

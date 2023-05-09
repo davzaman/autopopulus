@@ -36,7 +36,6 @@ def main():
     )
 
     if args.bootstrap_eval_imputer:
-        # assuming you have a DataLoader object named "train_loader"
         test_dataset = test_dataloader.dataset
         gen = default_rng(args.seed)
         for b in tqdm(range(args.num_bootstraps)):

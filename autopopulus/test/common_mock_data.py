@@ -83,6 +83,23 @@ columns = {  # Contains continuous, binary, and onehot
     "no_onehot": ["age", "weight", "ismale", "fries"],
 }
 
+col_idxs_by_type = {
+    "original": {
+        "continuous": [0, 1],
+        "categorical": [2, 3, 4, 5],
+        "binary": [2],
+        "onehot": [[3, 4, 5]],
+    }
+}
+
+groupby = {
+    "original": {
+        "categorical_onehots": {3: "fries", 4: "fries", 5: "fries"},
+        "binary_vars": {2: "ismale"},
+    }
+}
+
+
 discretization = {
     "cuts": [
         [(0, 20), (20, 40), (40, 80)],
@@ -107,7 +124,7 @@ X = {
     "X": DataFrame(
         [
             [44, nan, 0, 0, 1, 0],
-            [39, 57.2, 1, 0, 0, 1],
+            [49, 57.2, 1, 0, 0, 1],
             [26, 26.3, 0, nan, nan, nan],
             [16, 73.4, 1, 1, 0, 0],
             [nan, 56.5, 1, 0, 1, 0],
@@ -182,6 +199,17 @@ X = {
         columns=columns["no_onehot"],
     ),
     "target_encoded": DataFrame(
+        [
+            [44, nan, 0.01, 0.6],
+            [49, 57.2, 0.1, 0.7],
+            [26, 26.3, 0.01, nan],
+            [16, 73.4, 0.1, 0.5],
+            [nan, 56.5, 0.1, 0.6],
+            [57, 29.6, 0.01, 0.5],
+        ],
+        columns=columns["no_onehot"],
+    ),
+    "target_encoded_true": DataFrame(
         [
             [44, 15.1, 0.01, 0.6],
             [49, 57.2, 0.1, 0.7],

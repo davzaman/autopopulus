@@ -26,24 +26,10 @@ from autopopulus.data.transforms import identity
 from autopopulus.test.utils import (
     build_onehot_from_hypothesis,
     create_fake_disc_data,
+    get_dataset_loader,
     mock_disc_data,
 )
 from data.utils import onehot_multicategorical_column
-
-
-def get_dataset_loader(data, label) -> SimpleDatasetLoader:
-    return SimpleDatasetLoader(
-        data,
-        label,
-        **{
-            "continuous_cols": columns["ctn_cols"],
-            "categorical_cols": list(
-                set(columns["columns"]) - set(columns["ctn_cols"])
-            ),
-            "onehot_prefixes": columns["onehot_prefix_names"],
-        },
-    )
-
 
 standard = {
     # "dataset_loader": get_dataset_loader(X["X"], y),
