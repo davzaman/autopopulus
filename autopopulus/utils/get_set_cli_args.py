@@ -125,6 +125,12 @@ def init_cli_args() -> Namespace:
         + get_module_function_names(baseline_longitudinal_imputation),
         help="Which imputer to use, fully_observed for no imputation (include the fully observed flag in this case).",
     )
+    p.add_argument(
+        "--bootstrap-eval-imputer",
+        type=bool,
+        default=False,
+        help="Do bootstrap sampling to produce a distribution of metrics on the test set for autoencoder imputers.",
+    )
     # For MICE
     p.add_argument(
         "--mice-num-iterations",

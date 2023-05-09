@@ -3,6 +3,7 @@ import inspect
 import os
 from inspect import getmembers, isfunction
 from typing import List, Union, Any
+import numpy as np
 
 import torch
 from pytorch_lightning import seed_everything as pl_seed_everything
@@ -45,6 +46,19 @@ def seed_everything(seed: int):
     # os.environ["NCCL_P2P_DISABLE"] = "1"
     # os.environ["NCCL_DEBUG"] = "WARN"
     # os.environ["PL_TORCH_DISTRIBUTED_BACKEND"] = "gloo"
+
+
+def resample_indices_only(
+    n_samples: int, generator: np.random.Generator, replace: bool = True
+) -> np.ndarray:
+    # Adapted from from sklearn.utils.resample but I don't want to apply it to an array
+    if replace:
+        indices = generator.integers(0, n_samples, size=(n_samples,))
+    else:
+        indices = np.arange(n_samples)
+        generator.shuffle(indices)
+        indices = indices[:n_samples]
+    return indices
 
 
 def get_module_function_names(module) -> List[str]:
