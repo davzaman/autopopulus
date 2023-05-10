@@ -183,8 +183,6 @@ class TestMetrics(unittest.TestCase):
                     # subtraction happens in np cuz with torch i was getting the wrong values
                     error_df.iloc[0, ctn_col_idx] = df.iloc[0, ctn_col_idx] - diff
                     error_df = torch.tensor(error_df.values)
-                    # CW and EW should all match
-                    rmse_true = ((diff**2 / len(df)) ** 0.5) / df.shape[1]
                     maape_true = (
                         np.arctan(
                             abs(diff / tensor_df[0, ctn_col_idx] + EPSILON)
@@ -195,19 +193,22 @@ class TestMetrics(unittest.TestCase):
                     )
 
                     self.assertAlmostEqual(
-                        rmse_true, CWRMSE(error_df, tensor_df).item(), places=WITHIN
+                        ((diff**2 / len(df)) ** 0.5) / df.shape[1],
+                        CWRMSE(error_df, tensor_df).item(),
+                        places=WITHIN,
                     )
                     self.assertAlmostEqual(
                         maape_true, CWMAAPE(error_df, tensor_df).item(), places=WITHIN
                     )
+                    ew_rmse_true = ((diff**2) / len(df) / df.shape[1]) ** 0.5
                     self.assertAlmostEqual(
-                        rmse_true, EWRMSE(error_df, tensor_df).item(), places=WITHIN
+                        ew_rmse_true, EWRMSE(error_df, tensor_df).item(), places=WITHIN
                     )
                     self.assertAlmostEqual(
                         maape_true, EWMAAPE(error_df, tensor_df).item(), places=WITHIN
                     )
                     self.assertAlmostEqual(
-                        rmse_true,
+                        ew_rmse_true,
                         rmse_elwise(error_df, tensor_df).item(),
                         places=WITHIN,
                     )
