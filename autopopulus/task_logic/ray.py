@@ -106,9 +106,6 @@ def tune_model(
 ):
     logger = AutoencoderLogger(args)
 
-    # # Mock this function
-    # tune.report(**{"impute/STATIC/original/val-CWMAAPE-missingonly": 2})
-
     ae_imputer = AEImputer.from_argparse_args(
         args,
         logger=logger,

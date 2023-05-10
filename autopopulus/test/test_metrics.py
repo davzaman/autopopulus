@@ -7,7 +7,6 @@ from hypothesis import assume, given, HealthCheck, settings, strategies as st
 from hypothesis.extra.pandas import data_frames
 
 from autopopulus.utils.impute_metrics import (
-    CWMAAPE,
     CWRMSE,
     EWRMSE,
     EWMAAPE,
@@ -165,7 +164,7 @@ class TestMetrics(unittest.TestCase):
             maape_elwise = MAAPEMetric()
             rmse_elwise = RMSEMetric()
 
-            metrics_list = [CWRMSE, CWMAAPE, rmse_elwise, maape_elwise, EWRMSE, EWMAAPE]
+            metrics_list = [CWRMSE, rmse_elwise, maape_elwise, EWRMSE, EWMAAPE]
 
             with self.subTest("No Mask"):
                 for metric in metrics_list:
@@ -197,9 +196,6 @@ class TestMetrics(unittest.TestCase):
                         CWRMSE(error_df, tensor_df).item(),
                         places=WITHIN,
                     )
-                    self.assertAlmostEqual(
-                        maape_true, CWMAAPE(error_df, tensor_df).item(), places=WITHIN
-                    )
                     ew_rmse_true = ((diff**2) / len(df) / df.shape[1]) ** 0.5
                     self.assertAlmostEqual(
                         ew_rmse_true, EWRMSE(error_df, tensor_df).item(), places=WITHIN
@@ -229,8 +225,7 @@ class TestMetrics(unittest.TestCase):
                         places=WITHIN,
                     )
 
-                # Now if they dont exactly equal each other inside the mask
-                with self.subTest("Not Equal inside mask"):
+                with self.subTest("Observed Value Not Equal"):
                     error_df = df.copy()
                     error_df.iloc[0, ctn_col_idx] = df.iloc[0, ctn_col_idx] - diff
                     error_df = torch.tensor(error_df.values)
@@ -242,10 +237,11 @@ class TestMetrics(unittest.TestCase):
                             places=WITHIN,
                         )
 
-                    # make sure that the value is still the same even if the values outside the mask don't match, since we don't care about them and don't want to count them
-                    with self.subTest("Not Equal outside mask"):
+                    # make sure that the value is still the same even if the values observed don't match, since we don't care about them and don't want to count them
+                    with self.subTest("Missing Value Not Equal"):
                         new_diff = 4
                         error_df = df.copy()
+                        # this one will be ignored because it's "observed"
                         error_df.iloc[0, ctn_col_idx] = (
                             error_df.iloc[0, ctn_col_idx] - diff
                         )
@@ -259,18 +255,10 @@ class TestMetrics(unittest.TestCase):
                             CWRMSE(error_df, tensor_df, missing_indicators).item(),
                             places=WITHIN,
                         )
-                        self.assertAlmostEqual(
-                            np.arctan(
-                                abs(new_diff / (tensor_df[1, ctn_col_idx] + EPSILON))
-                            ).item()
-                            / (len(df) - 1)
-                            / df.shape[1],
-                            CWMAAPE(error_df, tensor_df, missing_indicators).item(),
-                            places=WITHIN,
-                        )
-                        ew_rmse_true = (new_diff**2) ** 0.5 / (
-                            (len(df) * df.shape[1]) - 1
-                        )
+                        # all elements but 1 are observed
+                        ew_rmse_true = (
+                            (new_diff**2) / ((len(df) * df.shape[1]) - 1)
+                        ) ** 0.5
                         ew_maape_true = np.arctan(
                             abs(new_diff / (tensor_df[1, ctn_col_idx] + EPSILON))
                         ).item() / ((len(df) * df.shape[1]) - 1)

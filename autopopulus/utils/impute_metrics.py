@@ -1,4 +1,5 @@
 from re import I
+from deprecated import deprecated
 from typing import Any, Callable, Iterable, List, Optional
 import numpy as np
 import pandas as pd
@@ -49,10 +50,14 @@ def format_tensor(*tensors: torch.Tensor) -> Iterable[torch.Tensor]:
 class MAAPEMetric(Metric):
     """
     Element-wise MAAPE.
+    This is computationally the same as column-wise.
+        EW: sum(sum(arctan(abs((true - pred) / true))))/(nrows * ncols)
+        CW: mean(mean(arctan(abs((true - pred) / true))))
     This might be useless as the feature-map inversion cannot be done on the gpu especially since we need to reorder stuff as pandas df.
     https://torchmetrics.readthedocs.io/en/stable/pages/implement.html
     https://github.com/Lightning-AI/metrics/tree/master/src/torchmetrics/regression.mape.py
     https://github.com/allenai/allennlp/tree/main/allennlp/training/metrics
+    https://gist.github.com/bshishov/5dc237f59f019b26145648e2124ca1c9
     """
 
     is_differentiable: bool = True
@@ -96,6 +101,9 @@ class MAAPEMetric(Metric):
 class RMSEMetric(Metric):
     """
     Element-wise RMSE.
+    This is computationally different from column-wise (order of sqrt and sum matters).
+        EW: sqrt(sum(sum((true - pred)**2)) / (nrows * ncols))
+        CW: mean(sqrt(mean((true - pred)**2)))
     This might be useless as the feature-map inversion cannot be done on the gpu especially since we need to reorder stuff as pandas df.
     https://torchmetrics.readthedocs.io/en/stable/pages/implement.html
     https://github.com/Lightning-AI/metrics/blob/master/src/torchmetrics/regression/mse.py
@@ -122,7 +130,6 @@ class RMSEMetric(Metric):
 
         squared_error = torch.pow(preds - target, 2)
         if missing_indicators is not None:
-            # mask_out_observed = missing_indicators
             squared_error *= missing_indicators
             count = torch.sum(missing_indicators)
         else:
@@ -182,44 +189,6 @@ class AccuracyMetric(Metric):
 
     def compute(self) -> float:
         return self.num_correct / self.total
-
-
-def CWMAAPE(
-    predicted: torch.Tensor,
-    target: torch.Tensor,
-    missing_indicators: Optional[torch.Tensor] = None,
-    epsilon: float = EPSILON,
-    reduction: str = "mean",
-    scale_to_01: bool = True,
-) -> torch.Tensor:
-    """
-    Mean Arctangent Absolute Percentage Error reduced column-wise.
-    MAPE but works around the divide by 0 issue.
-    Ref: https://gist.github.com/bshishov/5dc237f59f019b26145648e2124ca1c9
-    Note: result is NOT multiplied by 100
-    """
-    assert predicted.shape == target.shape
-    predicted, target, missing_indicators = force_np(
-        predicted, target, missing_indicators
-    )
-
-    mask_out_observed = (
-        ~missing_indicators if missing_indicators is not None else missing_indicators
-    )
-    predicted = np.ma.masked_array(predicted, mask_out_observed)
-    target = np.ma.masked_array(target, mask_out_observed)
-
-    if isinstance(predicted, np.ndarray):
-        row_maape = np.arctan(np.abs((target - predicted) / (target + epsilon)))
-
-    no_reduce = np.ma.mean(row_maape, axis=0)
-    if scale_to_01:  # range [0, pi/2] scale to [0, 1]
-        no_reduce *= 2 / pi
-    if reduction == "none":
-        return no_reduce
-    if reduction == "sum":
-        return no_reduce.sum()
-    return no_reduce.mean()
 
 
 def CWRMSE(

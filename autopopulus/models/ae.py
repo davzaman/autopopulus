@@ -30,7 +30,6 @@ from autopopulus.data.transforms import (
 )
 from autopopulus.utils.impute_metrics import (
     CWRMSE,
-    CWMAAPE,
     MAAPEMetric,
     RMSEMetric,
     categorical_accuracy,
@@ -264,13 +263,15 @@ class AEDitto(pl.LightningModule):
 
     def shared_step(self, batch, split: str) -> Tuple[float, Dict[str, float]]:
         ### Unpack ###
-        data_version = "mapped" if "mapped" in batch else "original"
+        data_feature_space = "mapped" if "mapped" in batch else "original"
         data, ground_truth = (
-            batch[data_version]["data"],
-            batch[data_version]["ground_truth"],
+            batch[data_feature_space]["data"],
+            batch[data_feature_space]["ground_truth"],
         )
         seq_len = (
-            batch[data_version]["seq_len"] if "seq_len" in batch[data_version] else None
+            batch[data_feature_space]["seq_len"]
+            if "seq_len" in batch[data_feature_space]
+            else None
         )
         # set this before filling in data with replacement (if doing so)
         non_missing_mask = ~(isnan(data)).bool()
@@ -283,9 +284,13 @@ class AEDitto(pl.LightningModule):
                 fn = simple_impute_tensor
                 kwargs = {
                     "non_missing_mask": non_missing_mask,
-                    "ctn_col_idxs": self.col_idxs_by_type[data_version]["continuous"],
-                    "bin_col_idxs": self.col_idxs_by_type[data_version]["binary"],
-                    "onehot_group_idxs": self.col_idxs_by_type[data_version]["onehot"],
+                    "ctn_col_idxs": self.col_idxs_by_type[data_feature_space][
+                        "continuous"
+                    ],
+                    "bin_col_idxs": self.col_idxs_by_type[data_feature_space]["binary"],
+                    "onehot_group_idxs": self.col_idxs_by_type[data_feature_space][
+                        "onehot"
+                    ],
                 }
             else:  # Replace nans with a single value provided
                 fn = nan_to_num
@@ -324,42 +329,45 @@ class AEDitto(pl.LightningModule):
                 # NOTE: if no mvec and no vae for some reason it says the loss is modifying the output in place, the clone is a quick hack
                 loss = self.loss(eval_pred.clone(), eval_true)
 
-            # TODO: everything to cpu here?
-            # save mapped outputs for evaluation
-            if "mapped" in batch:  # test not empty or None
-                self.metric_logging_step(
-                    reconstruct_batch.detach(),
-                    ground_truth.detach(),
-                    non_missing_mask.detach(),
-                    split,
-                    "mapped",
-                )
-
+        #### Evaluations ####
+        detached_data = (
+            data.detach().cpu(),
+            reconstruct_batch.detach().cpu(),
+            ground_truth.detach().cpu(),
+            non_missing_mask.detach().cpu(),
+        )
         (
             pred,
             ground_truth,
             non_missing_mask,
         ) = self.get_imputed_tensor_from_model_output(
-            data.detach().cpu().float(),
-            reconstruct_batch.detach().cpu().float(),
-            ground_truth.detach().cpu().float(),
-            non_missing_mask.detach().cpu().float(),
+            *detached_data,
             batch["original"]["data"].detach().cpu().float(),
             batch["original"]["ground_truth"].detach().cpu().float(),
+            "original",
         )
 
-        return (
-            (
-                loss,
-                {
-                    "loss": loss.item(),
-                    "pred": pred,
-                    "ground_truth": ground_truth,
-                    "non_missing_mask": non_missing_mask,
-                },
+        if split == "predict":  # Just get the predictions there's no loss/evaluation
+            return pred
+
+        # evaluate in mapped feature space
+        if "mapped" in batch:  # test not empty or None
+            # assumes detached_data has not been changed
+            self.metric_logging_step(
+                *self.get_imputed_tensor_from_model_output(
+                    *detached_data, None, None, "mapped"
+                ),
+                split,
+                "mapped",
             )
-            if split != "predict"
-            else pred  # Just get the predictions there's no loss/etc
+        return (
+            loss,
+            {
+                "loss": loss.item(),
+                "pred": pred,
+                "ground_truth": ground_truth,
+                "non_missing_mask": non_missing_mask,
+            },
         )
 
     def shared_logging_step_end(self, outputs: Dict[str, float], split: str):
@@ -397,19 +405,20 @@ class AEDitto(pl.LightningModule):
         true: Tensor,
         non_missing_mask: Tensor,
         split: str,
-        ismapped: str,
+        data_feature_space: str,
     ):
         """Log all metrics whether cat/ctn."""
         # NOTE: if you add too many metrics it will mess up the progress bar
         for metric in self.metrics:
+            metric_fn = metric["fn"]
             if metric["name"] == "Accuracy":
-                metric["fn"] = metric["fn"](
-                    self.col_idxs_by_type[ismapped]["binary"],
-                    self.col_idxs_by_type[ismapped]["onehot"],
+                metric_fn = metric["fn"](
+                    self.col_idxs_by_type[data_feature_space]["binary"],
+                    self.col_idxs_by_type[data_feature_space]["onehot"],
                 )
             context = {
                 "split": split,
-                "feature_space": ismapped,
+                "feature_space": data_feature_space,
                 "reduction": metric["reduction"],
             }
 
@@ -425,7 +434,7 @@ class AEDitto(pl.LightningModule):
                 IMPUTE_METRIC_TAG_FORMAT.format(
                     name=metric["name"], filter_subgroup="all", **context
                 ),
-                metric["fn"](pred, true),
+                metric_fn(pred, true),
                 **log_settings,
             )
             # Compute metrics for missing only data
@@ -435,7 +444,7 @@ class AEDitto(pl.LightningModule):
                     IMPUTE_METRIC_TAG_FORMAT.format(
                         name=metric["name"], filter_subgroup="missingonly", **context
                     ),
-                    metric["fn"](pred, true, missing_only_mask),
+                    metric_fn(pred, true, missing_only_mask),
                     **log_settings,
                 )
 
@@ -463,7 +472,6 @@ class AEDitto(pl.LightningModule):
             ewmetrics = nn.ModuleDict({"RMSE": RMSEMetric(), "MAAPE": MAAPEMetric()})
             self.metrics = [
                 {"name": "RMSE", "fn": CWRMSE, "reduction": "CW"},
-                {"name": "MAAPE", "fn": CWMAAPE, "reduction": "CW"},
             ] + [{"name": k, "fn": v, "reduction": "EW"} for k, v in ewmetrics.items()]
         else:
             self.metrics = metrics
@@ -812,37 +820,40 @@ class AEDitto(pl.LightningModule):
         non_missing_mask: Tensor,
         original_data: Optional[Tensor],
         original_ground_truth: Optional[Tensor],
+        data_feature_space: str,  # original/mapped
     ) -> Tuple[Tensor, Tensor, Tensor]:
         """
-        1. Invert any feature mapping
+        Assumes all tensors passed in are detached.
+        This function should not mutate the inputs.
+        1. Invert any feature mapping (if passing original data)
         2. sigmoid/softmax categorical columns only + threshold
         3. keep original values where it's not missing.
         """
+        # don't modify the original one passed in
+        pred = reconstruct_batch.clone()
         # get unmapped versions of everything
         if original_data is not None and original_ground_truth is not None:
             if self.feature_map_inversion is not None:
-                reconstruct_batch = self.feature_map_inversion(reconstruct_batch)
+                pred = self.feature_map_inversion(pred)
             data = original_data
             ground_truth = original_ground_truth
             # re-compute non_missing_mask
             non_missing_mask = (~isnan(data)).bool()
 
         # Sigmoid/softmax and threshold but in original space
-        reconstruct_batch = binary_column_threshold(
-            reconstruct_batch, self.col_idxs_by_type["original"].get("binary", []), 0.5
+        pred = binary_column_threshold(
+            pred, self.col_idxs_by_type[data_feature_space].get("binary", []), 0.5
         )  # do nothing if no "binary" cols (empty list [])
-        reconstruct_batch = onehot_column_threshold(
-            reconstruct_batch, self.col_idxs_by_type["original"].get("onehot", [])
+        pred = onehot_column_threshold(
+            pred, self.col_idxs_by_type[data_feature_space].get("onehot", [])
         )  # do nothing if no "binary" cols (empty list [])
 
         # Keep original where it's not missing
-        imputed = data.where(non_missing_mask, reconstruct_batch)
+        imputed = data.where(non_missing_mask, pred)
         # If the original dataset contains nans (no fully observed), we need to fill in ground_truth too for the metric computation
         # potentially nan in different places than data if amputing (should do nothing if originally fully observed/amputing)
         ground_truth_non_missing_mask = (~isnan(ground_truth)).bool()
-        ground_truth = ground_truth.where(
-            ground_truth_non_missing_mask, reconstruct_batch
-        )
+        ground_truth = ground_truth.where(ground_truth_non_missing_mask, pred)
 
         if imputed.isnan().sum():
             rank_zero_print("WARNING: NaNs still found in imputed data.")

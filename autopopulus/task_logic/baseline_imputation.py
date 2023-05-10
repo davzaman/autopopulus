@@ -12,7 +12,7 @@ from autopopulus.task_logic import (
 )
 from autopopulus.utils.utils import rank_zero_print
 from autopopulus.data import CommonDataModule
-from autopopulus.utils.impute_metrics import CWMAAPE, CWRMSE, EWMAAPE, EWRMSE
+from autopopulus.utils.impute_metrics import CWRMSE, EWMAAPE, EWRMSE
 
 
 def baseline_imputation_logic(
@@ -52,7 +52,6 @@ def log_baseline_imputation_performance(
     """For a given imputation method, logs the performance for the following metrics (matches AE). Assumes results are in order: train, val, test."""
     metrics = [
         {"name": "RMSE", "fn": CWRMSE, "reduction": "CW"},
-        {"name": "MAAPE", "fn": CWMAAPE, "reduction": "CW"},
         {"name": "RMSE", "fn": EWRMSE, "reduction": "EW"},
         {"name": "MAAPE", "fn": EWMAAPE, "reduction": "EW"},
     ]

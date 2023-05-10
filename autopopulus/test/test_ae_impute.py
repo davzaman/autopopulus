@@ -2,9 +2,8 @@ import unittest
 from unittest.mock import patch
 
 from torch.autograd import Variable
-from torch import long as torch_long
 import torch.nn as nn
-from torch import rand, randn, Generator, tensor
+from torch import Generator, nan_to_num, rand, randn, tensor, isnan, long as torch_long
 from torch.nn.modules.dropout import Dropout
 from torch.nn.modules.loss import BCEWithLogitsLoss, MSELoss
 from torch.testing import assert_allclose
@@ -60,7 +59,7 @@ class TestAEImputer(unittest.TestCase):
         # datamodule.columns = {"original": X["X"].columns}
         datamodule.setup("fit")
 
-        aeimp = AEImputer(**standard, replace_nan_with=0, max_epochs=3)
+        aeimp = AEImputer(**standard, replace_nan_with=0, max_epochs=3, num_gpus=0)
         # Turn off logging for testing
         aeimp.trainer.loggers = [DummyLogger()] if aeimp.trainer.loggers else []
         aeimp.fit(datamodule)
@@ -106,92 +105,107 @@ class TestAEDitto(unittest.TestCase):
     ):
         ae = AEDitto(**standard, lossn="BCE")
         ae.setup("fit")
-        fill_val = -5000
+        fill_val = tensor(-5000)
 
-        data = X["X"]
-        true = X["nomissing"]
-        non_missing_mask = ~data.isna()
+        data = tensor(X["X"].values)
+        true = tensor(X["nomissing"].values)
+        non_missing_mask = tensor(~X["X"].isna().values).bool()
         # make it wrong in all the observed places and the same fill value for the missing ones
-        reconstruct_batch = tensor((data * -1).where(non_missing_mask, fill_val).values)
+        reconstruct_batch = (data * -1).where(non_missing_mask, fill_val)
         # Test these separately, they're noops here
         mock_binary_column_threshold.return_value = reconstruct_batch
         mock_onehot_column_threshold.return_value = reconstruct_batch
+
+        inputs = (data, reconstruct_batch, true, non_missing_mask)
+        cloned_inputs = (x.clone() for x in inputs)
         (
             imputed,
             res_ground_truth,
             res_non_missing_mask,
         ) = ae.get_imputed_tensor_from_model_output(
-            data=tensor(data.values),
-            reconstruct_batch=reconstruct_batch,
-            ground_truth=(ground_truth := tensor(true.values)),
-            non_missing_mask=tensor(non_missing_mask.values).bool(),
+            *inputs,
             original_data=None,
             original_ground_truth=None,
+            data_feature_space="original",
         )
         # observed values should be correct, missing values should be the fill value
-        assert_allclose(imputed, tensor(data.fillna(fill_val).values))
+        assert_allclose(imputed, nan_to_num(data, fill_val))
         # should come out the same, no changes
-        assert_allclose(res_ground_truth, ground_truth)
+        assert_allclose(res_ground_truth, true)
         # should come out the same, no changes
-        assert_allclose(res_non_missing_mask, tensor(non_missing_mask.values))
+        assert_allclose(res_non_missing_mask, non_missing_mask)
+        # make sure the originals are not mutated
+        for tens, cloned_tens in zip(inputs, cloned_inputs):
+            assert_allclose(tens, cloned_tens)
 
         with self.subTest("NaNs in Ground Truth"):
+            inputs = (data, reconstruct_batch, data, non_missing_mask)
+            cloned_inputs = (x.clone() for x in inputs)
             (
                 imputed,
                 res_ground_truth,
                 res_non_missing_mask,
             ) = ae.get_imputed_tensor_from_model_output(
-                data=tensor(data.values),
-                reconstruct_batch=reconstruct_batch,
-                ground_truth=tensor(data.values),  # data with missing values
-                non_missing_mask=tensor(non_missing_mask.values).bool(),
+                *inputs,
                 original_data=None,
                 original_ground_truth=None,
+                data_feature_space="original",
             )
             # observed values should be correct, missing values should be the fill value
-            assert_allclose(imputed, tensor(data.fillna(fill_val).values))
+            assert_allclose(imputed, nan_to_num(data, fill_val))
+            # ground truth should have the predicted values filled in
+            assert_allclose(res_ground_truth, nan_to_num(data, fill_val))
             # should come out the same, no changes
-            assert_allclose(res_ground_truth, tensor(data.fillna(fill_val).values))
-            # should come out the same, no changes
-            assert_allclose(res_non_missing_mask, tensor(non_missing_mask.values))
+            assert_allclose(res_non_missing_mask, non_missing_mask)
+            # make sure the originals are not mutated
+            for tens, cloned_tens in zip(inputs, cloned_inputs):
+                assert_allclose(tens, cloned_tens)
 
         with self.subTest("Feature Mapped Data"):
-            data_mapped = X["target_encoded"]
-            data_original = X["X"]
-            non_missing_mask_mapped = ~data_mapped.isna()
-            non_missing_mask_original = ~data_original.isna()
+            data_mapped = tensor(X["target_encoded"].values)
+            data_original = tensor(X["X"].values)
+            non_missing_mask_mapped = ~(isnan(data_mapped))
+            non_missing_mask_original = ~(isnan(data_original))
             # make it wrong in all the observed places and the same fill value for the missing ones
-            reconstruct_batch_mapped = tensor(
-                (data_mapped * -1).where(non_missing_mask_mapped, fill_val).values
+            reconstruct_batch_mapped = (data_mapped * -1).where(
+                non_missing_mask_mapped, fill_val
             )
-            reconstruct_batch_original = tensor(
-                (data_original * -1).where(~data_original.isna(), fill_val).values
+            reconstruct_batch_original = (data_original * -1).where(
+                non_missing_mask_original, fill_val
             )
-            ae.feature_map_inversion = lambda x: reconstruct_batch_original
+            ground_truth_mapped = tensor(X["target_encoded_true"].values)
+            ground_truth_original = tensor(X["nomissing"].values)
 
+            # we simulate the mapping
+            ae.feature_map_inversion = lambda x: reconstruct_batch_original
             # Test these separately, they're noops here
             mock_binary_column_threshold.return_value = reconstruct_batch_original
             mock_onehot_column_threshold.return_value = reconstruct_batch_original
+
+            inputs = (
+                data_mapped,
+                reconstruct_batch_mapped,
+                non_missing_mask_mapped,
+                ground_truth_mapped,
+                data_original,
+                ground_truth_original,
+            )
+            cloned_inputs = (x.clone() for x in inputs)
             (
                 imputed,
                 res_ground_truth,
                 res_non_missing_mask,
             ) = ae.get_imputed_tensor_from_model_output(
-                data=tensor(data_mapped.values),
-                reconstruct_batch=reconstruct_batch_mapped,
-                ground_truth=tensor(X["target_encoded_true"].values),
-                non_missing_mask=tensor(non_missing_mask_mapped.values).bool(),
-                original_data=tensor(data_original.values),
-                original_ground_truth=tensor(X["nomissing"].values),
+                *inputs,
+                data_feature_space="original",  # even though it's mapped we want it in original
             )
             # observed values should be correct, missing values should be the fill value
-            assert_allclose(imputed, tensor(data_original.fillna(fill_val).values))
-            # should be in original space
-            assert_allclose(res_ground_truth, tensor(X["nomissing"].values))
-            # should be in original space
-            assert_allclose(
-                res_non_missing_mask, tensor(non_missing_mask_original.values)
-            )
+            assert_allclose(imputed, nan_to_num(data_original, fill_val))
+            assert_allclose(res_ground_truth, ground_truth_original)
+            assert_allclose(res_non_missing_mask, non_missing_mask_original)
+            # make sure the originals are not mutated
+            for tens, cloned_tens in zip(inputs, cloned_inputs):
+                assert_allclose(tens, cloned_tens)
 
     def test_idxs_to_tensor(self):
         with self.subTest("List"):

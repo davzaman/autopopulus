@@ -1097,16 +1097,16 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
             split_data = {k: v[split] for k, v in self.splits.items()}
         else:  # apply transform beforehand on the entire split
             split_data = {}
-            for data_version in self.transforms.keys():  # ["original", "mapped"]
-                split_data[data_version] = {}
+            for data_feature_space in self.transforms.keys():  # ["original", "mapped"]
+                split_data[data_feature_space] = {}
                 for (
                     data_role,
                     split_dfs,
                 ) in self.splits.items():  # ["data", "ground_truth"]
                     if data_role != "label":
                         # apply transform to particular split
-                        split_data[data_version][data_role] = self.transforms[
-                            data_version
+                        split_data[data_feature_space][data_role] = self.transforms[
+                            data_feature_space
                         ][data_role](split_dfs[split])
 
         return self._create_dataloader(split_data, apply_transform_adhoc)
