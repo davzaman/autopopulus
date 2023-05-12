@@ -846,14 +846,14 @@ class TestCommonDataModule(unittest.TestCase):
 
             self.assertEqual(
                 list(data.inverse_target_encode_map.keys()),
-                ["inverse_transform", "mapping"],
+                ["mapping", "ordinal_mapping"],
             )
-            self.assertIsNotNone(data.inverse_target_encode_map["inverse_transform"])
+            self.assertIsNotNone(data.inverse_target_encode_map["mapping"])
 
             # will have reordering and all the binary and multicat vars should be encoded
             self.assertEqual(
                 list(data.inverse_target_encode_map["mapping"].keys()),
-                [0, 3, 4],
+                data.columns["mapped"][[0, 3, 4]].tolist(),
             )
 
             # Leave it to test_transforms to see if combined_onehots is right
@@ -977,13 +977,13 @@ class TestCommonDataModule(unittest.TestCase):
 
             self.assertEqual(
                 list(data.inverse_target_encode_map.keys()),
-                ["inverse_transform", "mapping"],
+                ["mapping", "ordinal_mapping"],
             )
-            self.assertIsNotNone(data.inverse_target_encode_map["inverse_transform"])
+            self.assertIsNotNone(data.inverse_target_encode_map["mapping"])
             # nothing should be reordered, and all the binary and multicat vars should be encoded
             self.assertEqual(
                 list(data.inverse_target_encode_map["mapping"].keys()),
-                hypothesis["cat_cols_idx"],
+                data.columns["mapped"][hypothesis["cat_cols_idx"]].tolist(),
             )
 
             # no combining so no mapped groupby

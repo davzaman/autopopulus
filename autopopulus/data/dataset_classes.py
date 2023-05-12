@@ -1010,8 +1010,8 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
             target_encoder = data_pipeline.named_steps["target_encode_categorical"]
             # TODO: should there be data and ground_truth?
             self.inverse_target_encode_map = {
-                "mapping": target_encoder.mapping,  # Dict[str, Dict[int, float]]
-                "ordinal_mapping": target_encoder.ordinal_encoder.mapping,  # Dict[str, DataFrame]
+                "mapping": target_encoder.mapping,  # Dict[str, DataFrame]
+                "ordinal_mapping": target_encoder.ordinal_encoder.mapping,  # List[Dict[str, Union[str, DataFrame, dtype]]]
             }
 
             # This changes the cardinality of the dataset
