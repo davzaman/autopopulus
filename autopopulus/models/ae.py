@@ -8,13 +8,11 @@ from numpy import stack
 
 #### Pytorch ####
 from torch import (
-    device,
     exp,
     isnan,
     nan_to_num,
     randn_like,
     Tensor,
-    float as torch_float,
 )
 import torch.nn as nn
 import torch.optim as optim
@@ -41,18 +39,12 @@ from autopopulus.data.transforms import (
     invert_discretize_tensor,
     simple_impute_tensor,
 )
-from autopopulus.utils.impute_metrics import (
-    CWRMSE,
-    MAAPEMetric,
-    RMSEMetric,
-    categorical_accuracy,
-)
+from autopopulus.utils.impute_metrics import AccuracyMetric, MAAPEMetric, RMSEMetric
 from autopopulus.utils.cli_arg_utils import YAMLStringListToList, StringOrInt, str2bool
 from autopopulus.utils.utils import rank_zero_print
 from autopopulus.utils.log_utils import IMPUTE_METRIC_TAG_FORMAT
 from autopopulus.data import CommonDataModule
 from autopopulus.data.types import DataTypeTimeDim
-from autopopulus.data.constants import PAD_VALUE
 
 HiddenAndCellState = Tuple[Tensor, Tensor]
 MuLogVar = Tuple[Tensor, Tensor]
@@ -133,7 +125,7 @@ class AEDitto(pl.LightningModule):
         self.l2_penalty = l2_penalty
         self.dropout = dropout
         self.activation = activation
-        self.init_metrics(metrics)
+        self.metrics = metrics
         # Other options
         self.replace_nan_with = replace_nan_with
         self.mvec = mvec
@@ -426,12 +418,6 @@ class AEDitto(pl.LightningModule):
         """Log all metrics whether cat/ctn."""
         # NOTE: if you add too many metrics it will mess up the progress bar
         for metric in self.metrics:
-            metric_fn = metric["fn"]
-            if metric["name"] == "Accuracy":
-                metric_fn = metric["fn"](
-                    self.col_idxs_by_type[data_feature_space]["binary"],
-                    self.col_idxs_by_type[data_feature_space]["onehot"],
-                )
             context = {
                 "split": split,
                 "feature_space": data_feature_space,
@@ -446,11 +432,17 @@ class AEDitto(pl.LightningModule):
                 "rank_zero_only": True,
             }
 
+            if (
+                "Accuracy" in metric["name"]
+                and data_feature_space not in metric["name"]
+            ):  # skip iter (e.g., we're in mapped space but metric is Accuracy-original)
+                continue
+
             self.log(
                 IMPUTE_METRIC_TAG_FORMAT.format(
                     name=metric["name"], filter_subgroup="all", **context
                 ),
-                metric_fn(pred, true),
+                metric["fn"](pred, true),
                 **log_settings,
             )
             # Compute metrics for missing only data
@@ -460,44 +452,40 @@ class AEDitto(pl.LightningModule):
                     IMPUTE_METRIC_TAG_FORMAT.format(
                         name=metric["name"], filter_subgroup="missingonly", **context
                     ),
-                    metric_fn(pred, true, missing_only_mask),
+                    metric["fn"](pred, true, missing_only_mask),
                     **log_settings,
                 )
 
     #######################
     #   Initialization    #
     #######################
-    def init_metrics(
-        self,
-        metrics: Optional[  # SEPARATE FROM LOSS, only for evaluation
-            List[
-                Dict[  # NOTE: Any should be ... (kwargs) but not supported yet
-                    str,
-                    Union[str, Union[Metric, Callable[[Tensor, Tensor, Any], Tensor]]],
-                ]
-            ]
-        ],
-    ):
+    def init_metrics(self):
         """
-        Load the default, but they need to be initialized inside the module (during lightnignmodule.__init__).
+        # Load the default, but they need to be initialized inside the module (during lightnignmodule.__init__).
         Ref: https://github.com/Lightning-AI/lightning/issues/4909#issuecomment-736645699
-        cw/ew are separate bc cw are only implement in functions, not torchmetric modules.
         torchmetrics need to be initialized inside moduledict/list if i want the internal states to be placed on the correct device
+        Requires information from the datamodule, so this needs to come after set_args_from_data
         """
-        if metrics is None:
+        if self.metrics is None:
             cwmetrics = nn.ModuleDict(
                 {
-                    "RMSE": RMSEMetric(
-                        columnwise=True, nfeatures=self.datamodule.nfeatures
-                    )
+                    "RMSE": RMSEMetric(columnwise=True, nfeatures=self.nfeatures),
+                    "Accuracy-original": AccuracyMetric(
+                        bin_col_idxs=self.col_idxs_by_type["original"]["binary"],
+                        onehot_cols_idx=self.col_idxs_by_type["original"]["onehot"],
+                        columnwise=True,
+                    ),
+                    "Accuracy-mapped": AccuracyMetric(
+                        bin_col_idxs=self.col_idxs_by_type["mapped"]["binary"],
+                        onehot_cols_idx=self.col_idxs_by_type["mapped"]["onehot"],
+                        columnwise=True,
+                    ),
                 }
             )
             ewmetrics = nn.ModuleDict({"RMSE": RMSEMetric(), "MAAPE": MAAPEMetric()})
             self.metrics = [
                 {"name": k, "fn": v, "reduction": "CW"} for k, v in cwmetrics.items()
             ] + [{"name": k, "fn": v, "reduction": "EW"} for k, v in ewmetrics.items()]
-        else:
-            self.metrics = metrics
 
     def setup(self, stage: str):
         """Might update the columns after initialization of AEDitto but before calling fit on wrapper class, so check right before calling fit here.
@@ -509,6 +497,7 @@ class AEDitto(pl.LightningModule):
         if stage == "fit" or stage == "train":
             self.hidden_and_cell_state = {}
             self.set_args_from_data()
+            self.init_metrics()
             self._setup_logic()
             self.validate_args()
 
@@ -578,11 +567,13 @@ class AEDitto(pl.LightningModule):
         """Lambdas are not pickle-able for checkpointing, so dynamically set."""
         # Add accuracy for number of bins correctly imputed if everything is discretized
         # Safe to assume "mapped" key exists for these feature maps
+        if feature_map != "discretize_continuous":  # remove Accuracy (not needed)
+            # Accuracy needs to be initialized on module init inside a ModuleDict
+            # so instead of adding it here when disc_ctn, remove it when not disc_ctn
+            self.metrics = [
+                metric for metric in self.metrics if "Accuracy" not in metric["name"]
+            ]
         if feature_map == "discretize_continuous":
-            self.metrics.append(
-                {"name": "Accuracy", "fn": categorical_accuracy, "reduction": "CW"}
-            )
-
             self.feature_map_inversion = lambda data_tensor: invert_discretize_tensor(
                 data_tensor,
                 **get_invert_discretize_tensor_args(

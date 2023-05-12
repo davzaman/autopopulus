@@ -13,46 +13,12 @@ from autopopulus.data.constants import PAD_VALUE
 EPSILON = 1e-10
 
 
-def force_np(*tensors: torch.Tensor) -> np.ndarray:
-    """
-    Force to np and force on cpu if computing metrics
-    (after loss so doesn't need to be on GPU for backward).
-    All post-training metrics should do this.
-    """
-    np_data = []
-    for tensor in tensors:
-        if isinstance(tensor, pd.DataFrame):
-            np_data.append(tensor.values)
-        elif isinstance(tensor, torch.Tensor):
-            if tensor.device != torch.device("cpu"):
-                tensor = tensor.cpu()
-            if tensor.dtype == torch.bfloat16:
-                tensor = tensor.to(torch.float16)
-            np_data.append(tensor.numpy())
-        else:
-            np_data.append(tensor)
-    return tuple(np_data)
-
-
-def format_tensor(*tensors: torch.Tensor) -> Iterable[torch.Tensor]:
-    """
-    If you actually passed gradient-tracking Tensors to a Metric, there will be
-    a huge memory leak, because it will prevent garbage collection for the computation
-    graph. This method ensures the tensors are detached.
-    Ref: https://github.com/allenai/allennlp/blob/9f879b0964e035db711e018e8099863128b4a46f/allennlp/training/metrics/metric.py#L45
-
-    Also enforce float.
-    """
-    # Check if it's actually a tensor in case something else was passed.
-    return (x.detach().float() if isinstance(x, torch.Tensor) else x for x in tensors)
-
-
 class MAAPEMetric(Metric):
     """
-    Element-wise MAAPE.
-    This is computationally the same as column-wise.
-        EW: sum(sum(arctan(abs((true - pred) / true))))/(nrows * ncols)
-        CW: mean(mean(arctan(abs((true - pred) / true))))
+    MAAPE.
+    EW: sum(sum(arctan(abs((true - pred) / true))))/(nrows * ncols)
+    CW: mean(mean(arctan(abs((true - pred) / true))))
+    Not the same when there's missingness indicators.
     This might be useless as the feature-map inversion cannot be done on the gpu especially since we need to reorder stuff as pandas df.
     https://torchmetrics.readthedocs.io/en/stable/pages/implement.html
     https://github.com/Lightning-AI/metrics/tree/master/src/torchmetrics/regression.mape.py
@@ -65,13 +31,33 @@ class MAAPEMetric(Metric):
     full_state_update: bool = False
 
     def __init__(
-        self, epsilon: float = EPSILON, scale_to_01: bool = True, **kwargs: Any
+        self,
+        epsilon: float = EPSILON,
+        scale_to_01: bool = True,
+        columnwise: bool = False,
+        nfeatures: Optional[int] = None,
+        **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
+        assert (
+            not columnwise or nfeatures is not None
+        ), "If columnwise, nfeatures cannot be None."
+        self.columnwise = columnwise
+        shape = (nfeatures,) if columnwise else (1,)
         self.epsilon = epsilon
         self.scale_to_01 = scale_to_01
-        self.add_state("sum_errors", default=torch.tensor(0.0), dist_reduce_fx="sum")
-        self.add_state("total", default=torch.tensor(0), dist_reduce_fx="sum")
+        self.add_state(
+            "sum_errors",
+            default=torch.full(shape, torch.tensor(0.0)),
+            dist_reduce_fx="sum",
+        )
+        self.add_state(
+            "total", default=torch.full(shape, torch.tensor(0)), dist_reduce_fx="sum"
+        )
+
+    def sum_fn(self, data: torch.Tensor) -> torch.Tensor:
+        # 0 -> sum across rows for a per-column sum, none -> all dims reduced
+        return torch.sum(data, dim=0) if self.columnwise else torch.sum(data)
 
     def update(
         self,
@@ -85,16 +71,22 @@ class MAAPEMetric(Metric):
         row_maape = torch.arctan(torch.abs((target - preds) / (target + self.epsilon)))
         if missing_indicators is not None:
             row_maape *= missing_indicators
-            count = torch.sum(missing_indicators)
+            count = self.sum_fn(missing_indicators)
         else:
-            count = target.numel()
-        self.sum_errors += torch.sum(row_maape)
+            count = torch.tensor(  # num rows if columnwise
+                target.size()[0] if self.columnwise else target.numel(),
+                device=self.device,
+            )
+
+        self.sum_errors += self.sum_fn(row_maape)
         self.total += count
 
     def compute(self) -> float:
         maape = self.sum_errors / self.total
         if self.scale_to_01:  # range [0, pi/2] scale to [0, 1]
             maape *= 2 / pi
+        if self.columnwise:
+            return torch.mean(maape)
         return maape
 
 
@@ -150,8 +142,7 @@ class RMSEMetric(Metric):
             squared_error *= missing_indicators
             count = self.sum_fn(missing_indicators)
         else:
-            count = torch.tensor(
-                # num rows if columnwise
+            count = torch.tensor(  # num rows if columnwise
                 target.size()[0] if self.columnwise else target.numel(),
                 device=self.device,
             )
@@ -168,7 +159,8 @@ class RMSEMetric(Metric):
 
 class AccuracyMetric(Metric):
     """
-    Element-wise accuracy.
+    Categorical accuracy.
+    CW != EW when there's a mask.
     https://github.com/Lightning-AI/metrics/blob/master/src/torchmetrics/classification/accuracy.py
     https://github.com/allenai/allennlp/blob/main/allennlp/training/metrics/categorical_accuracy.py
     """
@@ -178,13 +170,32 @@ class AccuracyMetric(Metric):
     full_state_update: bool = False
 
     def __init__(
-        self, bin_cols_idx: torch.Tensor, onehot_cols_idx: torch.Tensor, **kwargs: Any
+        self,
+        bin_cols_idx: torch.Tensor,
+        onehot_cols_idx: torch.Tensor,
+        columnwise: bool = False,
+        **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
+        # number of cat cols is the # of bin cols, and the # of onehot_col groups
+        nfeatures = len(bin_cols_idx) + len(onehot_cols_idx)
+        assert (
+            not columnwise or nfeatures is not None
+        ), "If columnwise, nfeatures cannot be None."
+        self.columnwise = columnwise
+        shape = (nfeatures,) if columnwise else (1,)
         self.bin_cols_idx = bin_cols_idx
         self.onehot_cols_idx = onehot_cols_idx
-        self.add_state("num_correct", default=torch.tensor(0), dist_reduce_fx="sum")
-        self.add_state("total", default=torch.tensor(0), dist_reduce_fx="sum")
+        self.add_state(
+            "num_correct", torch.full(shape, torch.tensor(0)), dist_reduce_fx="sum"
+        )
+        self.add_state(
+            "total", default=torch.full(shape, torch.tensor(0)), dist_reduce_fx="sum"
+        )
+
+    def sum_fn(self, data: torch.Tensor) -> torch.Tensor:
+        # 0 -> sum across rows for a per-column sum, none -> all dims reduced
+        return torch.sum(data, dim=0) if self.columnwise else torch.sum(data)
 
     def update(
         self,
@@ -206,52 +217,21 @@ class AccuracyMetric(Metric):
                 missing_indicators, self.bin_cols_idx, self.onehot_cols_idx
             )
             correct *= missing_indicators
-            count = torch.sum(missing_indicators)
+            count = self.sum_fn(missing_indicators)
         else:
-            count = target_cats.numel()
-        self.num_correct += torch.sum(correct)
+            count = torch.tensor(
+                # num rows if columnwise
+                target_cats.size()[0] if self.columnwise else target_cats.numel(),
+                device=self.device,
+            )
+        self.num_correct += self.sum_fn(correct)
         self.total += count
 
     def compute(self) -> float:
-        return self.num_correct / self.total
-
-
-def categorical_accuracy(
-    bin_col_idxs: torch.Tensor, onehot_cols_idx: torch.Tensor
-) -> Callable:
-    def accuracy_fn(
-        predicted: torch.Tensor,
-        target: torch.Tensor,
-        missing_indicators: Optional[torch.Tensor] = None,
-        reduction: str = "mean",
-    ) -> torch.Tensor:
-        """Log accuracy over all categorical variables."""
-        # TODO: accuracy per bin per time point for longitudinal?
-        # Get colname of the bin with the maximum score
-        predicted_cats = get_categories(predicted, bin_col_idxs, onehot_cols_idx)
-        target_cats = get_categories(target, bin_col_idxs, onehot_cols_idx)
-
-        if missing_indicators is not None:
-            missing_indicators = get_categories(
-                missing_indicators, bin_col_idxs, onehot_cols_idx
-            )
-            predicted_cats, target_cats, missing_indicators = force_np(
-                predicted_cats, target_cats, missing_indicators
-            )
-            mask_out_observed = ~missing_indicators
-            predicted_cats = np.ma.masked_array(predicted_cats, mask_out_observed)
-            target_cats = np.ma.masked_array(target_cats, mask_out_observed)
-            accuracy_per_bin = np.ma.mean((predicted_cats == target_cats), axis=0)
-        else:  # no mask
-            accuracy_per_bin = predicted_cats.eq(target_cats).to(float).mean(axis=0)
-
-        if reduction == "none":
-            return accuracy_per_bin
-        if reduction == "sum":
-            return accuracy_per_bin.sum()
-        return accuracy_per_bin.mean()
-
-    return accuracy_fn
+        acc = self.num_correct / self.total
+        if self.columnwise:
+            return torch.mean(acc)
+        return acc
 
 
 def universal_metric(metric: Metric) -> Callable:
@@ -293,6 +273,28 @@ def get_categories(
         )
     # everything will concatenate on rows
     return torch.cat(to_stack, axis=0).T  # flip back so it's N x F
+
+
+@deprecated
+def force_np(*tensors: torch.Tensor) -> np.ndarray:
+    """
+    Force to np and force on cpu if computing metrics
+    (after loss so doesn't need to be on GPU for backward).
+    All post-training metrics should do this.
+    """
+    np_data = []
+    for tensor in tensors:
+        if isinstance(tensor, pd.DataFrame):
+            np_data.append(tensor.values)
+        elif isinstance(tensor, torch.Tensor):
+            if tensor.device != torch.device("cpu"):
+                tensor = tensor.cpu()
+            if tensor.dtype == torch.bfloat16:
+                tensor = tensor.to(torch.float16)
+            np_data.append(tensor.numpy())
+        else:
+            np_data.append(tensor)
+    return tuple(np_data)
 
 
 @deprecated
