@@ -44,7 +44,7 @@ def main():
             bootstrap_loader = DataLoader(
                 bootstrap_subset,
                 batch_size=test_dataloader.batch_size,
-                shuffle=True,
+                shuffle=False,
                 prefetch_factor=test_dataloader.prefetch_factor,
                 num_workers=test_dataloader.num_workers,
                 collate_fn=test_dataloader.collate_fn,
