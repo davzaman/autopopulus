@@ -6,6 +6,13 @@ from autopopulus.data.constants import PAD_VALUE
 from autopopulus.utils.utils import rank_zero_print
 
 
+def detach_tensor(t: torch.Tensor, to_cpu: bool = False):
+    t = t.detach()
+    if to_cpu:
+        t = t.cpu()
+    return t.float()
+
+
 class BatchSwapNoise(nn.Module):
     """Swap Noise Module
     Ref: https://walkwithfastai.com/tab.ae"""

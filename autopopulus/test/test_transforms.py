@@ -21,8 +21,14 @@ from hypothesis.extra.pandas import data_frames
 
 from autopopulus.data.utils import onehot_multicategorical_column
 from autopopulus.data.transforms import (
+    DEFAULT_DEVICE,
     CombineOnehots,
     Discretizer,
+    get_invert_discretize_tensor_args,
+    get_invert_target_encode_tensor_args,
+    invert_discretize_tensor_gpu,
+    invert_target_encoding_tensor_gpu,
+    list_to_tensor,
     invert_target_encoding_tensor,
     UniformProbabilityAcrossNans,
     invert_discretize_tensor,
@@ -110,9 +116,9 @@ class TestTransforms(unittest.TestCase):
             )
             self._test_simple_impute(
                 onehot_df,
-                AEDitto._idxs_to_tensor(hypothesis["onehot"]["ctn_cols_idx"]),
-                AEDitto._idxs_to_tensor(hypothesis["onehot"]["bin_cols_idx"]),
-                AEDitto._idxs_to_tensor(hypothesis["onehot"]["onehot_cols_idx"]),
+                list_to_tensor(hypothesis["onehot"]["ctn_cols_idx"]),
+                list_to_tensor(hypothesis["onehot"]["bin_cols_idx"]),
+                list_to_tensor(hypothesis["onehot"]["onehot_cols_idx"]),
             )
 
         with self.subTest("Uniform Probability Across Nans"):
@@ -596,6 +602,13 @@ class TestTransforms(unittest.TestCase):
         true_columns: List[str],
         true_tensor: torch.Tensor,
     ):
+        undiscretized_tensor = invert_discretize_tensor_gpu(
+            df,
+            **get_invert_discretize_tensor_args(map_dict, true_columns, DEFAULT_DEVICE),
+        )
+        torch.testing.assert_close(
+            undiscretized_tensor, true_tensor, check_dtype=False, equal_nan=True
+        )
         undiscretized_tensor = invert_discretize_tensor(
             df,
             disc_groupby=disc_groupby,
@@ -625,6 +638,19 @@ class TestTransforms(unittest.TestCase):
             colname: series_mapping.map(lambda enc_v: rng.random())
             for colname, series_mapping in enc.mapping.items()
         }
+        unencoded_tensor = invert_target_encoding_tensor_gpu(
+            torch.tensor(enc.transform(df, y).values),
+            **get_invert_target_encode_tensor_args(
+                enc.mapping,
+                enc.ordinal_encoder.mapping,
+                df.columns,
+                orig_cols,
+                DEFAULT_DEVICE,
+            ),
+        )
+        np.testing.assert_allclose(
+            unencoded_tensor, torch.tensor(true_df.values), atol=1
+        )
         unencoded_tensor = invert_target_encoding_tensor(
             torch.tensor(enc.transform(df, y).values),
             {

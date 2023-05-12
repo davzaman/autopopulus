@@ -1009,17 +1009,9 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         elif self.feature_map == "target_encode_categorical":
             target_encoder = data_pipeline.named_steps["target_encode_categorical"]
             # TODO: should there be data and ground_truth?
-            self.inverse_target_encode_map: Dict[
-                # the transform function or col_index: {ordinal#: encoded_float}
-                str,
-                Union[Callable, Dict[int, Dict[int, float]]],
-            ] = {
-                "inverse_transform": target_encoder.ordinal_encoder.inverse_transform,
-                "mapping": {
-                    # we cannot invert the mapping since multiple ordinal values might be mapped to the same encoded float
-                    self.columns["mapped"].get_loc(col): col_mapping.to_dict()
-                    for col, col_mapping in target_encoder.mapping.items()
-                },
+            self.inverse_target_encode_map = {
+                "mapping": target_encoder.mapping,  # Dict[str, Dict[int, float]]
+                "ordinal_mapping": target_encoder.ordinal_encoder.mapping,  # Dict[str, DataFrame]
             }
 
             # This changes the cardinality of the dataset
@@ -1133,7 +1125,7 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
             batch_size=self.batch_size,
             shuffle=False,
             prefetch_factor=8,
-            # persistent_workers=True,
+            persistent_workers=True,
             num_workers=self.num_workers,
             # don't use pin memory: https://discuss.pytorch.org/t/dataloader-method-acquire-of-thread-lock-objects/52943
             pin_memory=False,

@@ -44,7 +44,7 @@ def format_tensor(*tensors: torch.Tensor) -> Iterable[torch.Tensor]:
     Also enforce float.
     """
     # Check if it's actually a tensor in case something else was passed.
-    return (x.detach().long() if isinstance(x, torch.Tensor) else x for x in tensors)
+    return (x.detach().float() if isinstance(x, torch.Tensor) else x for x in tensors)
 
 
 class MAAPEMetric(Metric):
@@ -100,8 +100,8 @@ class MAAPEMetric(Metric):
 
 class RMSEMetric(Metric):
     """
-    Element-wise RMSE.
-    This is computationally different from column-wise (order of sqrt and sum matters).
+    RMSE.
+    Element-wise is computationally different from column-wise (order of sqrt and sum matters).
         EW: sqrt(sum(sum((true - pred)**2)) / (nrows * ncols))
         CW: mean(sqrt(mean((true - pred)**2)))
     This might be useless as the feature-map inversion cannot be done on the gpu especially since we need to reorder stuff as pandas df.
@@ -114,10 +114,27 @@ class RMSEMetric(Metric):
     higher_is_better: bool = False
     full_state_update: bool = False
 
-    def __init__(self, **kwargs: Any) -> None:
+    def __init__(
+        self, columnwise: bool = False, nfeatures: Optional[int] = None, **kwargs: Any
+    ) -> None:
         super().__init__(**kwargs)
-        self.add_state("sum_errors", default=torch.tensor(0.0), dist_reduce_fx="sum")
-        self.add_state("total", default=torch.tensor(0), dist_reduce_fx="sum")
+        assert (
+            not columnwise or nfeatures is not None
+        ), "If columnwise, nfeatures cannot be None."
+        shape = (nfeatures,) if columnwise else (1,)
+        self.columnwise = columnwise
+        self.add_state(
+            "sum_errors",
+            default=torch.full(shape, torch.tensor(0.0)),
+            dist_reduce_fx="sum",
+        )
+        self.add_state(
+            "total", default=torch.full(shape, torch.tensor(0)), dist_reduce_fx="sum"
+        )
+
+    def sum_fn(self, data: torch.Tensor) -> torch.Tensor:
+        # 0 -> sum across rows for a per-column sum, none -> all dims reduced
+        return torch.sum(data, dim=0) if self.columnwise else torch.sum(data)
 
     def update(
         self,
@@ -125,20 +142,28 @@ class RMSEMetric(Metric):
         target: torch.Tensor,
         missing_indicators: Optional[torch.BoolTensor] = None,
     ):
-        preds, target = format_tensor(preds, target)
+        # preds, target = format_tensor(preds, target)
         assert preds.shape == target.shape
 
         squared_error = torch.pow(preds - target, 2)
         if missing_indicators is not None:
             squared_error *= missing_indicators
-            count = torch.sum(missing_indicators)
+            count = self.sum_fn(missing_indicators)
         else:
-            count = torch.tensor(target.numel(), device=self.device)
-        self.sum_errors += torch.sum(squared_error)
+            count = torch.tensor(
+                # num rows if columnwise
+                target.size()[0] if self.columnwise else target.numel(),
+                device=self.device,
+            )
+
+        self.sum_errors += self.sum_fn(squared_error)
         self.total += count
 
     def compute(self) -> float:
-        return torch.sqrt(self.sum_errors / self.total)
+        rmse = torch.sqrt(self.sum_errors / self.total)
+        if self.columnwise:
+            return torch.mean(rmse)
+        return rmse
 
 
 class AccuracyMetric(Metric):
@@ -191,41 +216,6 @@ class AccuracyMetric(Metric):
         return self.num_correct / self.total
 
 
-def CWRMSE(
-    predicted: torch.Tensor,
-    target: torch.Tensor,
-    missing_indicators: Optional[torch.Tensor] = None,
-    reduction: str = "mean",
-    normalize: Optional[str] = None,
-) -> torch.Tensor:
-    """Column-wise reduction. Should work both for torch.Tensor and np.ndarray."""
-    assert predicted.shape == target.shape
-    predicted, target, missing_indicators = force_np(
-        predicted, target, missing_indicators
-    )
-    mask_out_observed = (
-        ~missing_indicators if missing_indicators is not None else missing_indicators
-    )
-    predicted = np.ma.masked_array(predicted, mask_out_observed)
-    target = np.ma.masked_array(target, mask_out_observed)
-
-    if normalize == "mean":
-        denom = np.ma.mean(target, axis=1)
-    elif normalize == "std":
-        denom = np.ma.std(target, axis=1)
-    elif normalize == "range":
-        denom = np.ma.max(target, axis=1) - np.ma.min(target, axis=1)
-    else:
-        denom = 1
-    # RMSE per column: square root of the mean of squared diffs in that column
-    no_reduce = np.ma.mean((predicted - target) ** 2, axis=0) ** 0.5
-    if reduction == "none":
-        return no_reduce / denom
-    if reduction == "sum":
-        return no_reduce.sum() / denom
-    return no_reduce.mean() / denom
-
-
 def categorical_accuracy(
     bin_col_idxs: torch.Tensor, onehot_cols_idx: torch.Tensor
 ) -> Callable:
@@ -264,26 +254,18 @@ def categorical_accuracy(
     return accuracy_fn
 
 
-def EWMAAPE(
-    predicted: torch.Tensor,
-    target: torch.Tensor,
-    missing_indictors: Optional[torch.Tensor] = None,
-) -> float:
+def universal_metric(metric: Metric) -> Callable:
     """Functional version of the torchmetric so I can use it on sklearn models."""
-    maape = MAAPEMetric(scale_to_01=True)
-    maape.update(predicted, target, missing_indictors)
-    return maape.compute()
 
+    def apply_metric(
+        predicted: torch.Tensor,
+        target: torch.Tensor,
+        missing_indictors: Optional[torch.Tensor] = None,
+    ) -> float:
+        metric.update(predicted, target, missing_indictors)
+        return metric.compute()
 
-def EWRMSE(
-    predicted: torch.Tensor,
-    target: torch.Tensor,
-    missing_indicators: Optional[torch.Tensor] = None,
-) -> float:
-    """Functional version of the torchmetric so I can use it on sklearn models."""
-    rmse = RMSEMetric()
-    rmse.update(predicted, target, missing_indicators)
-    return rmse.compute()
+    return apply_metric
 
 
 def get_categories(
@@ -311,3 +293,43 @@ def get_categories(
         )
     # everything will concatenate on rows
     return torch.cat(to_stack, axis=0).T  # flip back so it's N x F
+
+
+@deprecated
+def CWRMSE(
+    predicted: torch.Tensor,
+    target: torch.Tensor,
+    missing_indicators: Optional[torch.Tensor] = None,
+    reduction: str = "mean",
+    normalize: Optional[str] = None,
+) -> torch.Tensor:
+    """
+    DEPRECATED: use RMSEMetric with columnwise set.
+    Keeping this for reference of how to do it with normalization if wanted.
+    Column-wise reduction. Should work both for torch.Tensor and np.ndarray.
+    """
+    assert predicted.shape == target.shape
+    predicted, target, missing_indicators = force_np(
+        predicted, target, missing_indicators
+    )
+    mask_out_observed = (
+        ~missing_indicators if missing_indicators is not None else missing_indicators
+    )
+    predicted = np.ma.masked_array(predicted, mask_out_observed)
+    target = np.ma.masked_array(target, mask_out_observed)
+
+    if normalize == "mean":
+        denom = np.ma.mean(target, axis=1)
+    elif normalize == "std":
+        denom = np.ma.std(target, axis=1)
+    elif normalize == "range":
+        denom = np.ma.max(target, axis=1) - np.ma.min(target, axis=1)
+    else:
+        denom = 1
+    # RMSE per column: square root of the mean of squared diffs in that column
+    no_reduce = np.ma.mean((predicted - target) ** 2, axis=0) ** 0.5
+    if reduction == "none":
+        return no_reduce / denom
+    if reduction == "sum":
+        return no_reduce.sum() / denom
+    return no_reduce.mean() / denom

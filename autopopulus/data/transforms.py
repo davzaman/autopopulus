@@ -2,6 +2,7 @@ from functools import reduce
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import re
+from category_encoders import TargetEncoder
 import numpy as np
 import pandas as pd
 from torch import Tensor, nan_to_num
@@ -11,6 +12,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
 import torch
+from torch.nn.utils.rnn import unpad_sequence, pad_sequence
 
 # from lib.MDLPC.MDLP import MDLP_Discretizer
 
@@ -21,6 +23,8 @@ from autopopulus.data.utils import (
     enforce_numpy,
 )
 from autopopulus.data.constants import PAD_VALUE
+
+DEFAULT_DEVICE = torch.device("cpu")
 
 
 ###############
@@ -43,6 +47,33 @@ def tensor_to_numpy(tensor: Tensor) -> np.ndarray:
         series_len = nparr.shape[0]
         nparr = nparr.reshape(-1, nfeatures)
     return nparr
+
+
+def list_to_tensor(
+    idxs: Union[List[int], List[List[int]]],
+    device: Union[str, torch.device] = DEFAULT_DEVICE,
+    dtype: torch.dtype = torch.long,
+) -> Tensor:
+    """
+    Converts col_idxs_by_type indices into a tensor.
+    If List[List[int]] there may uneven length of group indices,
+        which produces ValueError, so this tensor needs to be padded.
+    dtype must be long for indices, but must be floats if you want to do computations like mean.
+    """
+    try:
+        # Creating tensor from list of arrays is slow
+        if len(idxs) > 1 and isinstance(idxs[0], list):
+            idxs = torch.stack(idxs, axis=0)
+        return torch.tensor(idxs, dtype=dtype, device=device)
+    except (ValueError, TypeError):  # pad when onehot list of group indices
+        return pad_sequence(
+            [
+                torch.tensor(group_idxs, dtype=dtype, device=device)
+                for group_idxs in idxs
+            ],
+            batch_first=True,  # so they function as rows
+            padding_value=PAD_VALUE,
+        )
 
 
 def mean_of_maxbin(max_col: str) -> float:
@@ -372,6 +403,79 @@ class ColTransformPandas(TransformerMixin, BaseEstimator):
 ##############################
 # FEATURE MAPPING INVERSIONS #
 ##############################
+def get_invert_discretize_tensor_args(
+    discretizations: Dict,
+    original_columns: pd.Index,
+    to_device: torch.device = DEFAULT_DEVICE,
+) -> Dict[str, Union[Tensor, List[Tensor]]]:
+    # TODO: do i need the groupby anymore?
+    # self.groupby["mapped"]["discretized_ctn_cols"]["data"],
+    args = {
+        "disc_groupby_idxs": [],  # list of tensor
+        "bin_ranges": [],  # list of tensor
+        # extra 0 is the "starting" column for stitching everythign together at the end
+        "original_idxs": [0],  # tensor
+    }
+    for coln, disc_info in discretizations.items():
+        args["disc_groupby_idxs"].append(
+            list_to_tensor(disc_info["indices"], device=to_device)
+        )
+        args["bin_ranges"].append(
+            list_to_tensor(disc_info["bins"], dtype=torch.float, device=to_device)
+        )
+        args["original_idxs"].append(original_columns.get_loc(coln))
+    args["original_idxs"] = list_to_tensor(args["original_idxs"], device=to_device)
+    return args
+
+
+def invert_discretize_tensor_gpu(
+    encoded_data: Tensor,
+    disc_groupby_idxs: List[Tensor],
+    bin_ranges: List[Tensor],
+    original_idxs: Tensor,
+) -> Tensor:
+    continuous_estimates = [bin_range.mean(dim=1) for bin_range in bin_ranges]
+    # Get the index of the bin with the maximum score for each column group
+    #  offset the indices to 0 so we can directly index into that var's ["bins"]
+    offset_coln_max_idxs = torch.stack(
+        [  # to not offset to 0 add + l[0]
+            torch.index_select(encoded_data, dim=1, index=l).argmax(dim=1)
+            for l in disc_groupby_idxs
+        ],
+        dim=1,
+    )
+    # get the mean of each category for each feature
+    mapped_to_continuous = torch.stack(
+        [
+            mapping.index_select(0, offset_coln_max_idxs[:, i])
+            for i, mapping in enumerate(continuous_estimates)
+        ],
+        axis=1,
+    )
+    # drop indices of discretized columns
+    keep_columns = torch_set_diff(
+        torch.arange(0, encoded_data.shape[1]), torch.cat(disc_groupby_idxs)
+    )
+    # drop discretized_columns and add the continuous estimates back in
+    encoded_data = encoded_data.index_select(1, keep_columns)
+    # put everything back in order and add in mapped columns
+    cols = []
+    for i, idx in enumerate(original_idxs[1:]):
+        # since i starts@ 0  while idx starts@ 1, original_idxs[i] is the previous idx
+        cols.append(encoded_data[:, original_idxs[i] : idx])
+        cols.append(mapped_to_continuous[:, i].unsqueeze(1))  # adds only 1 column
+    # add any remaining encoded data
+    cols.append(encoded_data[:, idx:])  # will add nothing if idx is out of bounds
+    return torch.cat(cols, 1)
+
+
+def torch_set_diff(t1: Tensor, t2: Tensor) -> Tensor:
+    """Ref: https://stackoverflow.com/a/62407582/1888794"""
+    combined = torch.cat((t1, t2))
+    uniques, counts = combined.unique(return_counts=True)
+    difference = uniques[counts == 1]
+    # intersection = uniques[counts > 1]
+    return difference
 
 
 def invert_discretize_tensor(
@@ -436,6 +540,114 @@ def _nanargmin(arr: np.ndarray, axis: int = 0) -> int:
         return np.nanargmin(arr, axis)
     except ValueError:
         return np.nan
+
+
+def get_invert_target_encode_tensor_args(
+    encoder_mapping: Dict,
+    ordinal_encoder_mapping: Dict,
+    mapped_cols: pd.Index,
+    orig_cols: pd.Index,
+    to_device: torch.device = DEFAULT_DEVICE,
+) -> Dict[str, Union[Tensor, List[Tensor]]]:
+    args = {
+        "mean_encoded_values": [],  # List of tensors
+        "col_idxs": [],  # tensor
+        "orig_col_idxs": [],  # tensor
+        "num_classes": [],  # list
+    }
+    for coln, col_mapping in encoder_mapping.items():
+        args["col_idxs"].append(mapped_cols.get_loc(coln))
+        # get first instance of "True" if multicategorical
+        matching_cols = orig_cols.str.startswith(coln)
+        args["orig_col_idxs"].append(matching_cols.argmax())
+        args["num_classes"].append(matching_cols.sum())
+        args["mean_encoded_values"].append(
+            list_to_tensor(col_mapping.values, dtype=torch.float, device=to_device)
+        )
+    args["col_idxs"] = list_to_tensor(args["col_idxs"], device=to_device)
+    args["orig_col_idxs"] = list_to_tensor(args["orig_col_idxs"], device=to_device)
+    # ordinal_values = [
+    #     list_to_tensor(list(mapping.keys()), dtype=torch.float)
+    #     for mapping in mean_to_ordinal_map["mapping"].values()
+    # ]
+    args["original_categorical_values"] = [  # list of tensors
+        list_to_tensor(info["mapping"].index, dtype=torch.float, device=to_device)
+        for info in ordinal_encoder_mapping
+    ]
+    return args
+
+
+def invert_target_encoding_tensor_gpu(
+    encoded_data: Tensor,
+    col_idxs: Tensor,
+    orig_col_idxs: Tensor,
+    num_classes: List[int],
+    mean_encoded_values: List[Tensor],
+    original_categorical_values: List[Tensor],
+) -> Tensor:
+    ordinal_idxs = torch.stack(
+        [
+            # TODO make this nanargmin
+            # get the index of the encoding value that' closest (smallest diff)
+            torch.argmin(
+                # abs difference
+                torch.abs(
+                    # difference between each value in the column and the possible encoded values
+                    # this will broadcast all the possible encoding values over each value in that column
+                    encoded_data[:, col_idx]
+                    - mean_encoded_values[i].unsqueeze(1)
+                ),
+                dim=0,
+            )
+            for i, col_idx in enumerate(col_idxs)
+        ]
+    ).T  # returns 1 row per column but we want to keep column format (so transpose)
+    # replace the continuous values with the categorcal numerical encoded number
+    mapped_to_categorical = []
+    for i, cat_vals in enumerate(original_categorical_values):
+        # get category num encoding using the index in ordinal_idxs
+        col_mapped_to_categorical = cat_vals.index_select(0, ordinal_idxs[:, i])
+        # onehot encode multicategorical columns, preserving where there are nans
+        if num_classes[i] > 2:
+            col_mapped_to_categorical = torch.where(
+                # for the column get the row entry where it's nan, and expand that for all expanded columns (len(cat_vals)) since torch.where is elwise
+                ~col_mapped_to_categorical.isnan().tile((num_classes[i], 1)).T,
+                torch.nn.functional.one_hot(
+                    # fill nan with 0 to not create an extra category, we know where it's originally nan so this is ok
+                    # we need long for one_hot to work
+                    col_mapped_to_categorical.nan_to_num(0).long(),
+                    num_classes=num_classes[i],  # enforce the correct number of cols
+                ),
+                # put nans back into all the cols for the row that was originally nan
+                torch.tensor(torch.nan),
+            )
+        else:  # make bin column be same dimensions as multicat so i can concat them later
+            col_mapped_to_categorical = col_mapped_to_categorical.unsqueeze(1)
+
+        mapped_to_categorical.append(col_mapped_to_categorical)
+    # drop indices of discretized columns
+    keep_columns = torch_set_diff(torch.arange(0, encoded_data.shape[1]), col_idxs)
+    # drop discretized_columns and add the (potentially onehot) categoricals back in
+    encoded_data = encoded_data.index_select(1, keep_columns)
+    # put everything back in order and add in mapped columns
+    cols = []
+    # these act as indexors into encoded data and mapped data respectively.
+    n_ctn_cols = 0
+    n_cat_cols = 0
+    for i, idx in enumerate(orig_col_idxs):
+        # if starts with the categorical itll be [0:0] and nothing will be added
+        """
+        e.g. i've added 1 ctn col and 3 cat ones, but the next idx of a cat col is 6
+            that means that I need to add 6-3=3 ctn cols, starting after the 1 ctn col
+        """
+        cols.append(encoded_data[:, n_ctn_cols : idx - n_cat_cols])
+        cols.append(mapped_to_categorical[i])
+        n_ctn_cols += idx - n_cat_cols
+        n_cat_cols += num_classes[i]
+    cols.append(
+        encoded_data[:, n_ctn_cols:]
+    )  # this will add nothing if there isn't anything left (n_ctn_cols out of bounds)
+    return torch.cat(cols, 1)
 
 
 def invert_target_encoding_tensor(

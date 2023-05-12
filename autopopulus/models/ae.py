@@ -2,18 +2,27 @@ from argparse import ArgumentParser
 from math import ceil
 import sys
 from typing import Callable, List, Dict, Any, Optional, Tuple, Union
+from pandas import Index
 from torchmetrics import Metric
 from numpy import stack
 
 #### Pytorch ####
-from torch import long as torch_long
-from torch import exp, isnan, nan_to_num, randn_like, tensor, Tensor, device
+from torch import (
+    device,
+    exp,
+    isnan,
+    nan_to_num,
+    randn_like,
+    Tensor,
+    float as torch_float,
+)
 import torch.nn as nn
 import torch.optim as optim
 from torch.nn.utils.rnn import pack_padded_sequence, PackedSequence, pad_packed_sequence
 
 ## Lightning ##
 import pytorch_lightning as pl
+from lightning_utilities.core.apply_func import apply_to_collection
 
 from autopopulus.models.utils import (
     CtnCatLoss,
@@ -21,9 +30,13 @@ from autopopulus.models.utils import (
     ReconstructionKLDivergenceLoss,
     ResetSeed,
     binary_column_threshold,
+    detach_tensor,
     onehot_column_threshold,
 )
 from autopopulus.data.transforms import (
+    get_invert_discretize_tensor_args,
+    get_invert_target_encode_tensor_args,
+    list_to_tensor,
     invert_target_encoding_tensor,
     invert_discretize_tensor,
     simple_impute_tensor,
@@ -330,11 +343,14 @@ class AEDitto(pl.LightningModule):
                 loss = self.loss(eval_pred.clone(), eval_true)
 
         #### Evaluations ####
-        detached_data = (
-            data.detach().cpu(),
-            reconstruct_batch.detach().cpu(),
-            ground_truth.detach().cpu(),
-            non_missing_mask.detach().cpu(),
+        # detach so it metric computation doesn't go into the computational graph
+        # cpu since feature space inversion atm can't go on the GPU
+        # float because sigmoid on half precision isn't implemented for CPU
+        detached_data = apply_to_collection(
+            (data, reconstruct_batch, ground_truth, non_missing_mask),
+            Tensor,
+            detach_tensor,
+            to_cpu=False,
         )
         (
             pred,
@@ -469,9 +485,16 @@ class AEDitto(pl.LightningModule):
         torchmetrics need to be initialized inside moduledict/list if i want the internal states to be placed on the correct device
         """
         if metrics is None:
+            cwmetrics = nn.ModuleDict(
+                {
+                    "RMSE": RMSEMetric(
+                        columnwise=True, nfeatures=self.datamodule.nfeatures
+                    )
+                }
+            )
             ewmetrics = nn.ModuleDict({"RMSE": RMSEMetric(), "MAAPE": MAAPEMetric()})
             self.metrics = [
-                {"name": "RMSE", "fn": CWRMSE, "reduction": "CW"},
+                {"name": k, "fn": v, "reduction": "CW"} for k, v in cwmetrics.items()
             ] + [{"name": k, "fn": v, "reduction": "EW"} for k, v in ewmetrics.items()]
         else:
             self.metrics = metrics
@@ -525,30 +548,6 @@ class AEDitto(pl.LightningModule):
         self.build_encoder()
         self.build_decoder()
 
-    @staticmethod
-    def _idxs_to_tensor(
-        idxs: Union[List[int], List[List[int]]],
-        device: Union[str, device] = device("cpu"),
-    ) -> Tensor:
-        """
-        Converts col_idxs_by_type indices into a tensor.
-        If List[List[int]] there may uneven length of group indices,
-        which produces ValueError, so this tensor needs to be padded.
-        """
-        try:
-            if len(idxs) > 1:  # Creating tensor from list of arrays is slow
-                idxs = stack(idxs, axis=0)
-            return tensor(idxs, dtype=torch_long, device=device)
-        except ValueError:  # pad when onehot list of group indices
-            return nn.utils.rnn.pad_sequence(
-                [
-                    tensor(group_idxs, dtype=torch_long, device=device)
-                    for group_idxs in idxs
-                ],
-                batch_first=True,  # so they function as rows
-                padding_value=PAD_VALUE,
-            )
-
     def set_args_from_data(self):
         """
         Set model info that we can only dynamically get from the data after it's been setup() in trainer.fit().
@@ -566,12 +565,12 @@ class AEDitto(pl.LightningModule):
         # We still need this if we're loading the ae from a file and not calling fit
         # enforce Dtype = Long
         self.col_idxs_by_type = {
-            data_version: {
-                feature_type: self._idxs_to_tensor(idxs, self.device)
+            data_feature_space: {
+                feature_type: list_to_tensor(idxs, self.device)
                 for feature_type, idxs in col_idxs.items()
             }
             # original/mapped -> {cat/ctn -> indices}
-            for data_version, col_idxs in self.datamodule.col_idxs_by_type.items()
+            for data_feature_space, col_idxs in self.datamodule.col_idxs_by_type.items()
         }
         self.set_feature_map_inversion(self.datamodule.feature_map)
 
@@ -583,25 +582,24 @@ class AEDitto(pl.LightningModule):
             self.metrics.append(
                 {"name": "Accuracy", "fn": categorical_accuracy, "reduction": "CW"}
             )
+
             self.feature_map_inversion = lambda data_tensor: invert_discretize_tensor(
                 data_tensor,
-                self.groupby["mapped"]["discretized_ctn_cols"]["data"],
-                self.discretizations["data"],
-                self.columns["original"],
+                **get_invert_discretize_tensor_args(
+                    self.discretizations["data"], self.columns["original"], self.device
+                ),
             )
         elif feature_map == "target_encode_categorical":
-            groupby = (
-                self.groupby["mapped"]["combined_onehots"]["data"]
-                if "combined_onehots" in self.groupby["mapped"]
-                else None
-            )
             self.feature_map_inversion = (
                 lambda data_tensor: invert_target_encoding_tensor(
                     data_tensor,
-                    self.inverse_target_encode_map,
-                    self.columns["mapped"],
-                    self.columns["original"],
-                    groupby,
+                    **get_invert_target_encode_tensor_args(
+                        self.inverse_target_encode_map["mapping"],
+                        self.inverse_target_encode_map["ordinal_mapping"],
+                        self.columns["mapped"],
+                        self.columns["original"],
+                        self.device,
+                    ),
                 )
             )
         else:

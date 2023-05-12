@@ -7,21 +7,16 @@ from hypothesis import assume, given, HealthCheck, settings, strategies as st
 from hypothesis.extra.pandas import data_frames
 
 from autopopulus.utils.impute_metrics import (
-    CWRMSE,
-    EWRMSE,
-    EWMAAPE,
     EPSILON,
     AccuracyMetric,
     MAAPEMetric,
     RMSEMetric,
     categorical_accuracy,
+    universal_metric,
 )
-from autopopulus.test.common_mock_data import (
-    seed,
-    hypothesis,
-)
+from autopopulus.test.common_mock_data import hypothesis
 from autopopulus.test.utils import build_onehot_from_hypothesis
-from models.ae import AEDitto
+from autopopulus.data.transforms import list_to_tensor
 
 
 # when subtracting, tensors add in a little margin of error that accumulates, so we want to get close within WITHIN decimal places.
@@ -50,12 +45,12 @@ class TestMetrics(unittest.TestCase):
         tensor_df = torch.tensor(df.values)
         onehot_group = hypothesis["onehot"]["onehot_cols_idx"][0]
         accuracy_fn = categorical_accuracy(
-            AEDitto._idxs_to_tensor(hypothesis["onehot"]["bin_cols_idx"]),
-            AEDitto._idxs_to_tensor(hypothesis["onehot"]["onehot_cols_idx"]),
+            list_to_tensor(hypothesis["onehot"]["bin_cols_idx"]),
+            list_to_tensor(hypothesis["onehot"]["onehot_cols_idx"]),
         )
         accuracy_elwise = AccuracyMetric(
-            AEDitto._idxs_to_tensor(hypothesis["onehot"]["bin_cols_idx"]),
-            AEDitto._idxs_to_tensor(hypothesis["onehot"]["onehot_cols_idx"]),
+            list_to_tensor(hypothesis["onehot"]["bin_cols_idx"]),
+            list_to_tensor(hypothesis["onehot"]["onehot_cols_idx"]),
         )
 
         with self.subTest("No Mask"):
@@ -163,8 +158,16 @@ class TestMetrics(unittest.TestCase):
 
             maape_elwise = MAAPEMetric()
             rmse_elwise = RMSEMetric()
+            rmse_colwise = RMSEMetric(columnwise=True, nfeatures=df.shape[1])
 
-            metrics_list = [CWRMSE, rmse_elwise, maape_elwise, EWRMSE, EWMAAPE]
+            metrics_list = [
+                rmse_colwise,
+                rmse_elwise,
+                maape_elwise,
+                universal_metric(RMSEMetric(columnwise=True, nfeatures=df.shape[1])),
+                universal_metric(RMSEMetric()),
+                universal_metric(MAAPEMetric()),
+            ]
 
             with self.subTest("No Mask"):
                 for metric in metrics_list:
@@ -193,16 +196,10 @@ class TestMetrics(unittest.TestCase):
 
                     self.assertAlmostEqual(
                         ((diff**2 / len(df)) ** 0.5) / df.shape[1],
-                        CWRMSE(error_df, tensor_df).item(),
+                        rmse_colwise(error_df, tensor_df).item(),
                         places=WITHIN,
                     )
                     ew_rmse_true = ((diff**2) / len(df) / df.shape[1]) ** 0.5
-                    self.assertAlmostEqual(
-                        ew_rmse_true, EWRMSE(error_df, tensor_df).item(), places=WITHIN
-                    )
-                    self.assertAlmostEqual(
-                        maape_true, EWMAAPE(error_df, tensor_df).item(), places=WITHIN
-                    )
                     self.assertAlmostEqual(
                         ew_rmse_true,
                         rmse_elwise(error_df, tensor_df).item(),
@@ -252,25 +249,22 @@ class TestMetrics(unittest.TestCase):
                         self.assertAlmostEqual(
                             # -1 from # samples bc we are ignoring 1 element in the same feature
                             ((new_diff**2 / (len(df) - 1)) ** 0.5 / df.shape[1]),
-                            CWRMSE(error_df, tensor_df, missing_indicators).item(),
+                            rmse_colwise(
+                                error_df, tensor_df, missing_indicators
+                            ).item(),
                             places=WITHIN,
                         )
                         # all elements but 1 are observed
                         ew_rmse_true = (
                             (new_diff**2) / ((len(df) * df.shape[1]) - 1)
                         ) ** 0.5
-                        ew_maape_true = np.arctan(
-                            abs(new_diff / (tensor_df[1, ctn_col_idx] + EPSILON))
-                        ).item() / ((len(df) * df.shape[1]) - 1)
-                        self.assertAlmostEqual(
-                            ew_rmse_true,
-                            EWRMSE(error_df, tensor_df, missing_indicators).item(),
-                            places=WITHIN,
-                        )
-                        self.assertAlmostEqual(
-                            ew_maape_true,
-                            EWMAAPE(error_df, tensor_df, missing_indicators).item(),
-                            places=WITHIN,
+                        ew_maape_true = (
+                            np.arctan(
+                                abs(new_diff / (tensor_df[1, ctn_col_idx] + EPSILON))
+                            ).item()
+                            / ((len(df) * df.shape[1]) - 1)
+                            * 2
+                            / pi
                         )
                         self.assertAlmostEqual(
                             ew_rmse_true,
