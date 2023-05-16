@@ -132,17 +132,20 @@ class TestTransforms(unittest.TestCase):
             # nothing gets shifted since no discretize
             self._test_uniform_prob(
                 onehot_df,
-                {"categorical_onehots": onehot_groupby, "binary_vars": {0: "bin"}},
+                {
+                    "categorical_onehots": onehot_groupby,
+                    "binary_vars": {
+                        i: col for i, col in enumerate(hypothesis["bin_cols"])
+                    },
+                },
                 {},
             )
 
         discretized_data = None
         with self.subTest("Discretizer"):
             # if i add continuous columns i need to adjust these
-            nfeatures = 10 + 5 - 2
-            cuts = [[(0, 1), (1, 2)], [(0, 0.5), (0.5, 1), (1, 1.5)]]
-            category_names = [["0 - 1", "1 - 2"], ["0 - 0.5", "0.5 - 1", "1 - 1.5"]]
-
+            cuts = hypothesis["disc_ctn"]["cuts"]
+            category_names = hypothesis["disc_ctn"]["category_names"]
             # Create fake discretized data
             disc_data = create_fake_disc_data(
                 rng, nsamples, cuts, category_names, hypothesis["onehot"]["ctn_cols"]
@@ -198,7 +201,6 @@ class TestTransforms(unittest.TestCase):
                 hypothesis["onehot"]["ctn_cols_idx"],
                 disc_groupby,
                 discretizer_dict,
-                nfeatures,
                 true_df,
             )
 
@@ -213,7 +215,9 @@ class TestTransforms(unittest.TestCase):
                                 hypothesis["onehot"]["onehot_expanded_prefixes"]
                             )
                         },
-                        "binary_vars": {0: "bin"},
+                        "binary_vars": {
+                            i: col for i, col in enumerate(hypothesis["bin_cols"])
+                        },
                     },
                     discretizer_dict,
                 )
@@ -230,27 +234,19 @@ class TestTransforms(unittest.TestCase):
 
         with self.subTest("Invert Target Encoding"):
             with self.subTest("CombineOnehots"):
-                combined_groupby = {3: "mult1", 4: "mult2"}
+                # order: bin + ctn vars in order, then multicat vars in order
+                # bin1[0] ctn1[1] ctn2[1] bin2[3] mult1[4] mult2[5]
+                combined_groupby = {4: "mult1", 5: "mult2"}
                 combined_df = self._test_combine_onehots(
                     onehot_df, y, df, onehot_groupby, combined_groupby
                 )
 
-            categories = [[0, 1], [0, 1, 2, 3], [0, 1, 2]]
-            # mock an encoding for each categorical column
-            ordinal_to_mean_map = {
-                combined_df.columns.get_loc(col): {
-                    category: rng.random() for category in categories[i]
-                }
-                for i, col in enumerate(
-                    hypothesis["onehot"]["bin_cols"] + hypothesis["onehot_prefixes"]
-                )
-            }
             # enforce float for nans bc for some reason df's dype was object
             self._test_invert_target_encode(
                 combined_df.astype(float),
                 y,
                 onehot_df.astype(float),
-                ["bin", "mult1", "mult2"],
+                hypothesis["cat_cols"],
                 onehot_df.columns,
                 combined_groupby,
             )
@@ -306,10 +302,9 @@ class TestTransforms(unittest.TestCase):
         with self.subTest("Discretizer"):
             assume(not df.empty)  # onehot'ing the bins will not work on empty
 
-            # if i add continuous columns i need to adjust these
-            nfeatures = 8
-            cuts = [[(0, 1), (1, 2)], [(0, 0.5), (0.5, 1), (1, 1.5)]]
-            category_names = [["0 - 1", "1 - 2"], ["0 - 0.5", "0.5 - 1", "1 - 1.5"]]
+            # if i add columns i need to adjust these
+            cuts = hypothesis["disc_ctn"]["cuts"]
+            category_names = hypothesis["disc_ctn"]["category_names"]
 
             # Create fake discretized data
             disc_data = create_fake_disc_data(
@@ -364,14 +359,17 @@ class TestTransforms(unittest.TestCase):
                 hypothesis["ctn_cols_idx"],
                 disc_groupby,
                 discretizer_dict,
-                nfeatures,
                 true_df,
             )
 
             with self.subTest("Discretizer + Uniform Probability Across Nans"):
                 self._test_uniform_prob(
                     discretized_data,
-                    {"binary_vars": {0: "bin", 1: "mult1", 2: "mult2"}},
+                    {
+                        "binary_vars": {
+                            i: col for i, col in enumerate(hypothesis["cat_cols"])
+                        }
+                    },
                     discretizer_dict,
                 )
 
@@ -388,14 +386,7 @@ class TestTransforms(unittest.TestCase):
             # do not test combineonehot since no onehot is set
             # ordinal encoding won't work if empty
             assume(not df.empty)
-            categories = [[0, 1], [0, 1, 2, 3], [0, 1, 2]]
             # mock an encoding for each categorical column
-            ordinal_to_mean_map = {
-                df.columns.get_loc(col): {
-                    category: rng.random() for category in categories[i]
-                }
-                for i, col in enumerate(hypothesis["cat_cols"])
-            }
             self._test_invert_target_encode(
                 df,
                 y,
@@ -574,7 +565,6 @@ class TestTransforms(unittest.TestCase):
         ctn_cols_idxs: List[int],
         true_disc_groupby: Dict[int, str],
         true_map_dict: Dict[str, Dict[str, List[int]]],
-        true_nfeatures: int,
         true_df: Optional[pd.DataFrame] = None,
     ) -> pd.DataFrame:
         discretize_transformer = Discretizer(
@@ -585,7 +575,7 @@ class TestTransforms(unittest.TestCase):
         np.testing.assert_equal(discretize_transformer.map_dict, true_map_dict)
         # Test groupby and nfeatures is right after fit
         self.assertEqual(discretize_transformer.discretized_groupby, true_disc_groupby)
-        self.assertEqual(discretize_transformer.nfeatures, true_nfeatures)
+        self.assertEqual(discretize_transformer.nfeatures, true_df.shape[1])
 
         transformed = discretize_transformer.transform(df)
 

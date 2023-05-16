@@ -16,7 +16,7 @@ seed = 0
 # Hypothesis setup
 hypothesis = {
     "columns": [
-        column("bin", elements=st.one_of(st.just(nan), st.integers(0, 1))),
+        column("bin1", elements=st.one_of(st.just(nan), st.integers(0, 1))),
         column(
             "mult1",
             elements=st.one_of(st.just(nan), st.sampled_from([0, 1, 2, 3])),
@@ -24,16 +24,25 @@ hypothesis = {
         column("ctn1", dtype=float),
         column("mult2", elements=st.one_of(st.just(nan), st.sampled_from([0, 1, 2]))),
         column("ctn2", dtype=float),
+        column(
+            "bin2", elements=st.integers(0, 1)
+        ),  # don't put  nan so assumptions can be satisfied
     ],
     "ctn_cols": ["ctn1", "ctn2"],
     "ctn_cols_idx": [2, 4],
-    "cat_cols": ["bin", "mult1", "mult2"],
-    "cat_cols_idx": [0, 1, 3],
+    "cat_cols": ["bin1", "mult1", "mult2", "bin2"],
+    "cat_cols_idx": [0, 1, 3, 5],
+    "bin_cols": ["bin1", "bin2"],
+    "bin_cols_idx": [0, 5],
     "onehot_prefixes": ["mult1", "mult2"],  # 4 and 3 categories respectively
+    "disc_ctn": {
+        "cuts": [[(0, 1), (1, 2)], [(0, 0.5), (0.5, 1), (1, 1.5)]],
+        "category_names": [["0 - 1", "1 - 2"], ["0 - 0.5", "0.5 - 1", "1 - 1.5"]],
+    },
     "onehot": {
         "ctn_cols": ["ctn1", "ctn2"],
         "cat_cols": [
-            "bin",
+            "bin1",
             "mult1_0.0",
             "mult1_1.0",
             "mult1_2.0",
@@ -41,8 +50,9 @@ hypothesis = {
             "mult2_0.0",
             "mult2_1.0",
             "mult2_2.0",
+            "bin2",
         ],
-        "bin_cols": ["bin"],
+        "bin_cols": ["bin1", "bin2"],
         "onehot_cols": [
             "mult1_0.0",
             "mult1_1.0",
@@ -62,8 +72,8 @@ hypothesis = {
             "mult2",
         ],
         "ctn_cols_idx": [5, 9],
-        "cat_cols_idx": [0, 1, 2, 3, 4, 6, 7, 8],
-        "bin_cols_idx": [0],
+        "cat_cols_idx": [0, 1, 2, 3, 4, 6, 7, 8, 10],
+        "bin_cols_idx": [0, 10],
         "onehot_cols_idx": [
             [1, 2, 3, 4],
             [6, 7, 8],

@@ -414,7 +414,7 @@ def get_invert_discretize_tensor_args(
         "disc_groupby_idxs": [],  # list of tensor
         "bin_ranges": [],  # list of tensor
         # extra 0 is the "starting" column for stitching everythign together at the end
-        "original_idxs": [0],  # tensor
+        "original_idxs": [],  # tensor
     }
     for coln, disc_info in discretizations.items():
         args["disc_groupby_idxs"].append(
@@ -445,13 +445,10 @@ def invert_discretize_tensor_gpu(
         dim=1,
     )
     # get the mean of each category for each feature
-    mapped_to_continuous = torch.stack(
-        [
-            mapping.index_select(0, offset_coln_max_idxs[:, i])
-            for i, mapping in enumerate(continuous_estimates)
-        ],
-        axis=1,
-    )
+    mapped_to_continuous = [
+        mapping.index_select(0, offset_coln_max_idxs[:, i])
+        for i, mapping in enumerate(continuous_estimates)
+    ]
     # drop indices of discretized columns
     keep_columns = torch_set_diff(
         torch.arange(0, encoded_data.shape[1]), torch.cat(disc_groupby_idxs)
@@ -460,12 +457,17 @@ def invert_discretize_tensor_gpu(
     encoded_data = encoded_data.index_select(1, keep_columns)
     # put everything back in order and add in mapped columns
     cols = []
-    for i, idx in enumerate(original_idxs[1:]):
+    # these act as indexors into encoded data and mapped data respectively.
+    n_ctn_cols = 0
+    n_cat_cols = 0
+    for i, idx in enumerate(original_idxs):
         # since i starts@ 0  while idx starts@ 1, original_idxs[i] is the previous idx
-        cols.append(encoded_data[:, original_idxs[i] : idx])
-        cols.append(mapped_to_continuous[:, i].unsqueeze(1))  # adds only 1 column
-    # add any remaining encoded data
-    cols.append(encoded_data[:, idx:])  # will add nothing if idx is out of bounds
+        cols.append(encoded_data[:, n_cat_cols : idx - n_ctn_cols])
+        cols.append(mapped_to_continuous[i].unsqueeze(1))  # adds only 1 column
+        n_cat_cols = idx - n_ctn_cols
+        n_ctn_cols += 1
+    # add any remaining encoded data, will add nothing if idx is out of bounds
+    cols.append(encoded_data[:, n_cat_cols:])
     return torch.cat(cols, 1)
 
 
@@ -642,7 +644,7 @@ def invert_target_encoding_tensor_gpu(
         """
         cols.append(encoded_data[:, n_ctn_cols : idx - n_cat_cols])
         cols.append(mapped_to_categorical[i])
-        n_ctn_cols += idx - n_cat_cols
+        n_ctn_cols = idx - n_cat_cols
         n_cat_cols += num_classes[i]
     cols.append(
         encoded_data[:, n_ctn_cols:]
