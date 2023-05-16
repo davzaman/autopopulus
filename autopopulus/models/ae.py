@@ -4,7 +4,7 @@ import sys
 from typing import Callable, List, Dict, Any, Optional, Tuple, Union
 from pandas import Index
 from torchmetrics import Metric
-from numpy import stack
+from numpy import array
 
 #### Pytorch ####
 from torch import (
@@ -332,7 +332,8 @@ class AEDitto(pl.LightningModule):
                 loss = self.loss(eval_pred, eval_true, mu, logvar)
             else:
                 # NOTE: if no mvec and no vae for some reason it says the loss is modifying the output in place, the clone is a quick hack
-                loss = self.loss(eval_pred.clone(), eval_true)
+                # loss = self.loss(eval_pred.clone(), eval_true)
+                loss = self.loss(eval_pred, eval_true)
 
         #### Evaluations ####
         # detach so it metric computation doesn't go into the computational graph
@@ -350,8 +351,8 @@ class AEDitto(pl.LightningModule):
             non_missing_mask,
         ) = self.get_imputed_tensor_from_model_output(
             *detached_data,
-            batch["original"]["data"].detach().cpu().float(),
-            batch["original"]["ground_truth"].detach().cpu().float(),
+            detach_tensor(batch["original"]["data"]),
+            detach_tensor(batch["original"]["ground_truth"]),
             "original",
         )
 
@@ -466,22 +467,46 @@ class AEDitto(pl.LightningModule):
         torchmetrics need to be initialized inside moduledict/list if i want the internal states to be placed on the correct device
         Requires information from the datamodule, so this needs to come after set_args_from_data
         """
-        if self.metrics is None:
-            cwmetrics = nn.ModuleDict(
-                {
-                    "RMSE": RMSEMetric(columnwise=True, nfeatures=self.nfeatures),
-                    "Accuracy-original": AccuracyMetric(
-                        bin_col_idxs=self.col_idxs_by_type["original"]["binary"],
-                        onehot_cols_idx=self.col_idxs_by_type["original"]["onehot"],
-                        columnwise=True,
-                    ),
-                    "Accuracy-mapped": AccuracyMetric(
-                        bin_col_idxs=self.col_idxs_by_type["mapped"]["binary"],
-                        onehot_cols_idx=self.col_idxs_by_type["mapped"]["onehot"],
-                        columnwise=True,
-                    ),
-                }
-            )
+        if self.metrics is None:  # RMSE, MAAPE, Accuracy x {cw, ew}
+            # Add accuracy for number of bins correctly imputed if everything is discretized
+            # we don't care about element-wise categorical Accuracy
+            if self.feature_map == "discretize_continuous":
+                cwmetrics = nn.ModuleDict(
+                    {
+                        "RMSE": RMSEMetric(
+                            columnwise=True,
+                            nfeatures=self.nfeatures[self.data_feature_space],
+                        ),
+                        "MAAPE": MAAPEMetric(
+                            columnwise=True,
+                            nfeatures=self.nfeatures[self.data_feature_space],
+                        ),
+                        # accuracies need to be separate since the feature space/cols are different
+                        "Accuracy-original": AccuracyMetric(
+                            bin_col_idxs=self.col_idxs_by_type["original"]["binary"],
+                            onehot_cols_idx=self.col_idxs_by_type["original"]["onehot"],
+                            columnwise=True,
+                        ),
+                        "Accuracy-mapped": AccuracyMetric(
+                            bin_col_idxs=self.col_idxs_by_type["mapped"]["binary"],
+                            onehot_cols_idx=self.col_idxs_by_type["mapped"]["onehot"],
+                            columnwise=True,
+                        ),
+                    }
+                )
+            else:
+                cwmetrics = nn.ModuleDict(
+                    {
+                        "RMSE": RMSEMetric(
+                            columnwise=True,
+                            nfeatures=self.nfeatures[self.data_feature_space],
+                        ),
+                        "MAAPE": MAAPEMetric(
+                            columnwise=True,
+                            nfeatures=self.nfeatures[self.data_feature_space],
+                        ),
+                    }
+                )
             ewmetrics = nn.ModuleDict({"RMSE": RMSEMetric(), "MAAPE": MAAPEMetric()})
             self.metrics = [
                 {"name": k, "fn": v, "reduction": "CW"} for k, v in cwmetrics.items()
@@ -498,7 +523,7 @@ class AEDitto(pl.LightningModule):
             self.hidden_and_cell_state = {}
             self.set_args_from_data()
             self.init_metrics()
-            self._setup_logic()
+            self._model_creation()
             self.validate_args()
 
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
@@ -507,11 +532,12 @@ class AEDitto(pl.LightningModule):
             "nfeatures": self.nfeatures,
             "groupby": self.groupby,
             "columns": self.columns,
+            "data_feature_space": self.data_feature_space,
             "discretizations": self.discretizations,
             "inverse_target_encode_map": self.inverse_target_encode_map,
             "col_idxs_by_type": self.col_idxs_by_type,
             # cannot pickle lambda fns, save the feature_map name instead
-            "feature_map": self.datamodule.feature_map,
+            "feature_map": self.feature_map,
         }
         checkpoint["hidden_and_cell_state"] = self.hidden_and_cell_state
 
@@ -521,15 +547,15 @@ class AEDitto(pl.LightningModule):
             setattr(self, name, value)
         self.hidden_and_cell_state = checkpoint["hidden_and_cell_state"]
         # grab inversion function again since we can only pickle the name
-        self.set_feature_map_inversion(checkpoint["data_attributes"]["feature_map"])
+        self.set_feature_map_inversion(self.feature_map)
         # don't need to validate args since it should have been validated before serialization.
-        self._setup_logic()
+        self._model_creation()
 
-    def _setup_logic(self) -> None:
+    def _model_creation(self) -> None:
+        """Configure loss and build model."""
         # Requires lossn is set and if col indices set for CEMSE
         # if it's in one of them it should be in all of them
         # we dont need this in shared step bc we can tell from the batch, but in the setup steps we need to know
-        self.data_version = "mapped" if "mapped" in self.groupby else "original"
         self.loss = self.configure_loss()
         self.set_layer_dims()
         # number of layers will always be even because it's symmetric
@@ -549,6 +575,8 @@ class AEDitto(pl.LightningModule):
         self.columns = self.datamodule.columns
         self.discretizations = self.datamodule.discretizations
         self.inverse_target_encode_map = self.datamodule.inverse_target_encode_map
+        self.feature_map = self.datamodule.feature_map
+        self.data_feature_space = "mapped" if "mapped" in self.groupby else "original"
 
         # used for BCE+MSE los, -> cat cols the VAE Loss,etc which require tensor
         # We still need this if we're loading the ae from a file and not calling fit
@@ -561,18 +589,11 @@ class AEDitto(pl.LightningModule):
             # original/mapped -> {cat/ctn -> indices}
             for data_feature_space, col_idxs in self.datamodule.col_idxs_by_type.items()
         }
-        self.set_feature_map_inversion(self.datamodule.feature_map)
+        self.set_feature_map_inversion(self.feature_map)
 
     def set_feature_map_inversion(self, feature_map: str):
         """Lambdas are not pickle-able for checkpointing, so dynamically set."""
-        # Add accuracy for number of bins correctly imputed if everything is discretized
         # Safe to assume "mapped" key exists for these feature maps
-        if feature_map != "discretize_continuous":  # remove Accuracy (not needed)
-            # Accuracy needs to be initialized on module init inside a ModuleDict
-            # so instead of adding it here when disc_ctn, remove it when not disc_ctn
-            self.metrics = [
-                metric for metric in self.metrics if "Accuracy" not in metric["name"]
-            ]
         if feature_map == "discretize_continuous":
             self.feature_map_inversion = lambda data_tensor: invert_discretize_tensor(
                 data_tensor,
@@ -619,14 +640,14 @@ class AEDitto(pl.LightningModule):
             "BCE": nn.BCEWithLogitsLoss(),
             "MSE": nn.MSELoss(),
             "CEMSE": CtnCatLoss(
-                self.col_idxs_by_type[self.data_version]["continuous"],
-                self.col_idxs_by_type[self.data_version]["binary"],
-                self.col_idxs_by_type[self.data_version]["onehot"],
+                self.col_idxs_by_type[self.data_feature_space]["continuous"],
+                self.col_idxs_by_type[self.data_feature_space]["binary"],
+                self.col_idxs_by_type[self.data_feature_space]["onehot"],
             ),
             "CEMAAPE": CtnCatLoss(
-                self.col_idxs_by_type[self.data_version]["continuous"],
-                self.col_idxs_by_type[self.data_version]["binary"],
-                self.col_idxs_by_type[self.data_version]["onehot"],
+                self.col_idxs_by_type[self.data_feature_space]["continuous"],
+                self.col_idxs_by_type[self.data_feature_space]["binary"],
+                self.col_idxs_by_type[self.data_feature_space]["onehot"],
                 loss_ctn=MAAPEMetric(),
             ),
         }
@@ -645,50 +666,54 @@ class AEDitto(pl.LightningModule):
     def set_layer_dims(self):
         # Assumes layer_dims describes full autoencoder (is symmetric list of numbers).
         assert len(self.hidden_layers) > -1, "Passed no hidden layers."
+        assert (
+            array(self.hidden_layers[: len(self.hidden_layers) // 2])
+            == array(self.hidden_layers[len(self.hidden_layers) // 2 + 1 :][::-1])
+        ).all(), "Hidden Layers must be symmetric."
         # if isinstance(hidden_layers[-1], int) or hidden_layers[0].is_integer():
         if isinstance(self.hidden_layers[-1], int):
             self.layer_dims = (
-                [self.nfeatures[self.data_version]]
+                [self.nfeatures[self.data_feature_space]]
                 + [int(dim) for dim in self.hidden_layers]
-                + [self.nfeatures[self.data_version]]
+                + [self.nfeatures[self.data_feature_space]]
             )
         else:  # assuming float, compute relative size of input
             self.layer_dims = (
-                [self.nfeatures[self.data_version]]
+                [self.nfeatures[self.data_feature_space]]
                 # ceil: e.g.: input_dim = 4,  rel_size: 0.3 and 0.2 when rounded down give 0, so we always round up to the nearest integer (to at least 1).
                 + [
-                    ceil(rel_size * self.nfeatures[self.data_version])
+                    ceil(rel_size * self.nfeatures[self.data_feature_space])
                     for rel_size in self.hidden_layers
                 ]
-                + [self.nfeatures[self.data_version]]
+                + [self.nfeatures[self.data_feature_space]]
             )
 
     def validate_args(self):
         #### Assertions ####
         if self.lossn == "CEMSE" or self.lossn == "CEMAAPE":
             assert self.col_idxs_by_type[
-                self.data_version
+                self.data_feature_space
             ], "Failed to get indices of continuous and categorical columns. Likely failed to pass list of columns and list of continuous columns. This is required for CEMSE and CEMAAPE loss."
             assert (
-                self.datamodule.feature_map != "discretize_continuous"
+                self.feature_map != "discretize_continuous"
             ), "Passed a loss of CEMSE or CEMAAPE but indicated you discretized the data. These cannot both happen (since if all the data is discretized you want to use BCE loss instead)."
         # for now do not support vae with categorical features
         # TODO: create VAE prior/likelihood for fully categorical features, or beta-div instead.
         if self.variational:
             assert (
-                self.datamodule.feature_map != "discretize_continuous"
+                self.feature_map != "discretize_continuous"
             ), "Indicated you discretized the data and also wanted to use a variational autoencoder. These cannot be used together."
             # cat_cols are only fine if you're target encoding
             assert len(
                 self.col_idxs_by_type["original"].get("categorical", [])
             ) == 0 or (
-                self.datamodule.feature_map == "target_encode_categorical"
+                self.feature_map == "target_encode_categorical"
             ), "Indicated you wanted to use a variational autoencoder and also have categorical features, but these cannot be used togther."
             assert (
                 self.lossn != "CEMSE" and self.lossn != "CEMAAPE"
             ), "Indicated CEMSE / CEMAAPE loss which refers to mixed data loss, but also indicated you want to use a variational autoencoder which only support continuous features."
 
-        if self.datamodule.feature_map == "discretize_continuous":
+        if self.feature_map == "discretize_continuous":
             assert (
                 self.columns["original"] is not None
             ), "The data is discretized. To invert the discretization and maintain order, we need the original column order."

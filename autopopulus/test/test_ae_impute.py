@@ -54,7 +54,9 @@ EPSILON = 1e-10
 
 def mock_commondatamodule(datamodule: unittest.mock.MagicMock):
     datamodule.return_value.splits = {"data": {"train": Series(splits["train"])}}
-    datamodule.return_value.nfeatures = len(columns["columns"])
+    datamodule.return_value.nfeatures = {"original": len(columns["columns"])}
+    datamodule.return_value.data_feature_space = "original"
+    datamodule.return_value.feature_map = "none"
     return datamodule
 
 
@@ -89,6 +91,8 @@ class TestAEImputer(unittest.TestCase):
 
 class TestAEDitto(unittest.TestCase):
     def mock_set_args_from_data(self):
+        self.data_feature_space = "original"
+        self.feature_map = "none"
         self.nfeatures = {"original": len(columns["columns"])}
         self.col_idxs_by_type = {
             "original": {
@@ -193,6 +197,7 @@ class TestAEDitto(unittest.TestCase):
             ground_truth_original = tensor(X["nomissing"].values)
 
             # we simulate the mapping
+            ae.feature_map = "target_encode_categorical"
             ae.feature_map_inversion = lambda x: reconstruct_batch_original
             # Test these separately, they're noops here
             mock_binary_column_threshold.return_value = reconstruct_batch_original
