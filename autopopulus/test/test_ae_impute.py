@@ -1,5 +1,9 @@
+from argparse import Namespace
+from typing import Dict, Optional, Union
 import unittest
 from unittest.mock import patch
+import numpy as np
+import torch
 
 from torch.autograd import Variable
 import torch.nn as nn
@@ -9,7 +13,7 @@ from torch.nn.modules.loss import BCEWithLogitsLoss, MSELoss
 from torch.testing import assert_allclose
 from pytorch_lightning.loggers.base import DummyLogger
 
-from pandas import Series
+import pandas as pd
 from numpy.testing import assert_array_equal
 
 from autopopulus.models.ap import AEImputer
@@ -23,17 +27,18 @@ from autopopulus.models.utils import (
     ReconstructionKLDivergenceLoss,
 )
 from autopopulus.test.common_mock_data import (
-    splits,
     X,
     y,
     columns,
     col_idxs_by_type,
     groupby,
+    seed,
 )
 from autopopulus.test.utils import get_dataset_loader
 from autopopulus.data import CommonDataModule
 from autopopulus.data.constants import PAD_VALUE
 from autopopulus.data.transforms import list_to_tensor
+from autopopulus.utils.log_utils import get_serialized_model_path
 
 seed = 0
 standard = {
@@ -52,77 +57,143 @@ layer_dims = [6, 3, 2, 3, 6]
 EPSILON = 1e-10
 
 
-def mock_commondatamodule(datamodule: unittest.mock.MagicMock):
-    datamodule.return_value.splits = {"data": {"train": Series(splits["train"])}}
-    datamodule.return_value.nfeatures = {"original": len(columns["columns"])}
-    datamodule.return_value.data_feature_space = "original"
-    datamodule.return_value.feature_map = "none"
-    return datamodule
+def get_data_args(
+    col_idxs_set_empty: Optional[Dict] = None,
+    groupby_set_empty: Optional[Dict] = None,
+) -> Dict[str, Union[str, Dict]]:
+    res = {
+        "data_feature_space": "original",
+        "feature_map": "none",
+        "nfeatures": {"original": len(columns["columns"])},
+        "col_idxs_by_type": {
+            "original": {
+                k: tensor(v, dtype=torch_long)
+                for k, v in col_idxs_by_type["original"].items()
+            }
+        },
+        "groupby": groupby,
+        "columns": {"original": columns["columns"]},
+        "discretizations": None,
+        "inverse_target_encode_map": None,
+    }
+    if col_idxs_set_empty is not None:
+        for key in col_idxs_set_empty:
+            res["col_idxs_by_type"]["original"][key] = []
+
+    if groupby_set_empty is not None:
+        for key in groupby_set_empty:
+            res["groupby"]["original"][key] = {}
+    return res
+
+
+def mock_training_step(self, batch, split):
+    # data on gpu
+    assert batch[self.hparams.data_feature_space]["data"].is_cuda
+    # model on gpu
+    assert next(self.encoder.parameters()).is_cuda
+    assert next(self.decoder.parameters()).is_cuda
+    if self.hparams.variational:
+        assert next(self.fc_mu.parameters()).is_cuda
+        assert next(self.fc_var.parameters()).is_cuda
+    # metric on gpu
+    for high_level_metrics in self.metrics.values():
+        for metric in high_level_metrics.values():
+            assert metric.device == self.device
+    return self.shared_step(batch, "train")[0]
 
 
 class TestAEImputer(unittest.TestCase):
-    @patch("autopopulus.data.CommonDataModule")
     @patch("autopopulus.data.dataset_classes.train_test_split")
-    def test_transform(self, mock_split, MockCommonDataModule):
+    def test_basic(self, mock_split):
         mock_split.return_value = (X["X"].index, X["X"].index)
         datamodule = CommonDataModule(**data_settings, scale=True)
-        # datamodule.columns = {"original": X["X"].columns}
-        datamodule.setup("fit")
-
         aeimp = AEImputer(
-            **standard,
-            replace_nan_with=0,
-            max_epochs=3,
-            num_gpus=0,
-            datamodule=mock_commondatamodule(MockCommonDataModule)(),
+            **standard, replace_nan_with=0, max_epochs=3, num_gpus=0, method="whatever"
         )
         # Turn off logging for testing
         aeimp.trainer.loggers = [DummyLogger()] if aeimp.trainer.loggers else []
         aeimp.fit(datamodule)
         train_dataloader = datamodule.train_dataloader()
-        df = aeimp.transform(train_dataloader)
+        with self.subTest("Transform"):
+            df = aeimp.transform(train_dataloader)
 
-        self.assertEqual(df.isna().sum().sum(), 0)
-        # the dataset is transformed so the values shouldn't be the same but the shape, columns, index should
-        assert_array_equal(df.index, X["X"].index)
-        assert_array_equal(df.columns, X["X"].columns)
-        self.assertEqual(df.shape, X["X"].shape)
+            self.assertEqual(df.isna().sum().sum(), 0)
+            # the dataset is transformed so the values shouldn't be the same but the shape, columns, index should
+            assert_array_equal(df.index, X["X"].index)
+            assert_array_equal(df.columns, X["X"].columns)
+            self.assertEqual(df.shape, X["X"].shape)
+        with self.subTest("Load checkpoint"):
+            other_aeimp = AEImputer.from_checkpoint(
+                Namespace(
+                    **standard,
+                    replace_nan_with=0,
+                    max_epochs=3,
+                    num_gpus=0,
+                    method="whatever",
+                ),
+                get_serialized_model_path(f"AEDitto_STATIC", "pt"),
+            )
+            other_df = other_aeimp.transform(train_dataloader)
+            pd.testing.assert_frame_equal(other_df, df)
+            self.assertEqual(other_aeimp.ae.hparams.keys(), aeimp.ae.hparams.keys())
+            for k in other_aeimp.ae.hparams:
+                item = other_aeimp.ae.hparams[k]
+                if isinstance(item, dict):
+                    if isinstance(list(item.values())[0], pd.Index):
+                        self.assertEqual(item.keys(), aeimp.ae.hparams[k].keys())
+                        for inner_k in item:
+                            pd.testing.assert_index_equal(
+                                item[inner_k], aeimp.ae.hparams[k][inner_k]
+                            )
+                    else:
+                        np.testing.assert_equal(item, aeimp.ae.hparams[k])
+                elif isinstance(item, list):
+                    np.testing.assert_equal(item, aeimp.ae.hparams[k])
+                else:
+                    np.testing.assert_equal(item, aeimp.ae.hparams[k])
+            self.assertDictEqual(
+                other_aeimp.ae.hidden_and_cell_state, aeimp.ae.hidden_and_cell_state
+            )
+            self.assertEqual(
+                str(other_aeimp.ae.state_dict()), str(aeimp.ae.state_dict())
+            )
+            # TODO: remove serialized stuff
+
+    @torch.no_grad()
+    @unittest.skipUnless(torch.cuda.is_available(), "No GPU was detected")
+    @patch("autopopulus.data.dataset_classes.train_test_split")
+    def test_device(self, mock_split):
+        mock_split.return_value = (X["X"].index, X["X"].index)
+        datamodule = CommonDataModule(**data_settings, scale=True)
+
+        aeimp = AEImputer(
+            **standard,
+            replace_nan_with=0,
+            max_epochs=3,
+            num_gpus=1,  # check data, model, and metrics go on the gpu
+        )
+        # Turn off logging for testing
+        aeimp.trainer.loggers = [DummyLogger()] if aeimp.trainer.loggers else []
+        # TODO how do i ensure it's on the correct device with a unittest?
+        # I need to test for the feature map inversions as  well
+        with patch.object(AEDitto, "training_step", mock_training_step):
+            aeimp.fit(datamodule)
+        # just run it to see if anything i missed
+        aeimp.fit(datamodule)
 
 
 class TestAEDitto(unittest.TestCase):
-    def mock_set_args_from_data(self):
-        self.data_feature_space = "original"
-        self.feature_map = "none"
-        self.nfeatures = {"original": len(columns["columns"])}
-        self.col_idxs_by_type = {
-            "original": {
-                k: tensor(v, dtype=torch_long)
-                for k, v in col_idxs_by_type["original"].items()
-            }
-        }
-        if hasattr(self, "col_idxs_set_empty"):
-            for key in self.col_idxs_set_empty:
-                self.col_idxs_by_type["original"][key] = []
-
-        self.groupby = groupby
-        if hasattr(self, "groupby_set_empty"):
-            for key in self.groupby_set_empty:
-                self.groupby["original"][key] = {}
-
     @patch("autopopulus.models.ae.onehot_column_threshold")
     @patch("autopopulus.models.ae.binary_column_threshold")
-    @patch("autopopulus.data.CommonDataModule")
-    @patch.object(AEDitto, "set_args_from_data", mock_set_args_from_data)
     def test_get_imputed_tensor_from_model_output(
         self,
-        MockCommonDataModule,
         mock_binary_column_threshold,
         mock_onehot_column_threshold,
     ):
         ae = AEDitto(
             **standard,
+            **get_data_args(),
             lossn="BCE",
-            datamodule=mock_commondatamodule(MockCommonDataModule)(),
         )
         ae.setup("fit")
         fill_val = tensor(-5000)
@@ -241,17 +312,17 @@ class TestAEDitto(unittest.TestCase):
             l = [[1, 2], [3]]
             assert_allclose(list_to_tensor(l), tensor([[1, 2], [3, PAD_VALUE]]))
 
-    @patch("autopopulus.data.CommonDataModule")
-    @patch.object(AEDitto, "set_args_from_data", mock_set_args_from_data)
-    def test_vae(self, MockCommonDataModule):
+    def test_vae(self):
         ae = AEDitto(
             **standard,
+            **get_data_args(
+                col_idxs_set_empty=["categorical", "binary_vars", "onehot"],
+                groupby_set_empty=["categorical_onehots", "binary"],
+            ),
             variational=True,
             lossn="MSE",
-            datamodule=mock_commondatamodule(MockCommonDataModule)(),
         )
-        ae.col_idxs_set_empty = ["categorical", "binary_vars", "onehot"]
-        ae.groupby_set_empty = ["categorical_onehots", "binary"]
+
         ae.setup("fit")
         self.assertTrue(hasattr(ae, "fc_mu"))
         self.assertTrue(hasattr(ae, "fc_var"))
@@ -280,23 +351,22 @@ class TestAEDitto(unittest.TestCase):
             2 * ((6 * 3) + (3 * 2)) + (3 * 2) + sum(layer_dims[1:]) + 2,
         )
 
-    @patch("autopopulus.data.CommonDataModule")
-    @patch.object(AEDitto, "set_args_from_data", mock_set_args_from_data)
-    def test_basic(self, MockCommonDataModule):
+    def test_basic(self):
         ae = AEDitto(
             **standard,
+            **get_data_args(
+                col_idxs_set_empty=["continuous", "categorical", "binary", "onehot"],
+                groupby_set_empty=["categorical_onehots", "binary_vars"],
+            ),
             lossn="BCE",
-            datamodule=mock_commondatamodule(MockCommonDataModule)(),
         )
-        ae.col_idxs_set_empty = ["continuous", "categorical", "binary", "onehot"]
-        ae.groupby_set_empty = ["categorical_onehots", "binary_vars"]
         ae.setup("fit")
         with self.subTest("Basic"):
             self.assertFalse(hasattr(ae, "fc_mu"))
             self.assertFalse(hasattr(ae, "fc_var"))
 
             self.assertEqual(ae.code_index, 2)
-            self.assertEqual(ae.layer_dims, layer_dims)
+            self.assertEqual(ae.hparams.layer_dims, layer_dims)
 
             encoder = nn.ModuleList(
                 [
@@ -329,7 +399,7 @@ class TestAEDitto(unittest.TestCase):
             new_settings["hidden_layers"] = [0.6, 0.1, 0.05, 0.1, 0.6]
             ae = AEDitto(
                 **new_settings,
-                datamodule=mock_commondatamodule(MockCommonDataModule)(),
+                **get_data_args(),
             )
             ae.setup("fit")
             encoder = nn.ModuleList(
@@ -358,8 +428,8 @@ class TestAEDitto(unittest.TestCase):
         with self.subTest("Loss"):
             ae = AEDitto(
                 **standard,
+                **get_data_args(),
                 lossn="BCE",
-                datamodule=mock_commondatamodule(MockCommonDataModule)(),
             )
             ae.setup("fit")
             self.assertIsInstance(ae.loss, BCEWithLogitsLoss)
@@ -368,8 +438,8 @@ class TestAEDitto(unittest.TestCase):
         with self.subTest("Dropout"):
             ae = AEDitto(
                 **standard,
+                **get_data_args(),
                 dropout=0.5,
-                datamodule=mock_commondatamodule(MockCommonDataModule)(),
             )
             ae.setup("fit")
             encoder = nn.ModuleList(
@@ -396,13 +466,11 @@ class TestAEDitto(unittest.TestCase):
             self.assertEqual(ae.encoder.__repr__(), encoder.__repr__())
             self.assertEqual(ae.decoder.__repr__(), decoder.__repr__())
 
-    @patch("autopopulus.data.CommonDataModule")
-    @patch.object(AEDitto, "set_args_from_data", mock_set_args_from_data)
-    def test_longitudinal(self, MockCommonDataModule):
+    def test_longitudinal(self):
         ae = AEDitto(
             **standard,
+            **get_data_args(),
             longitudinal=True,
-            datamodule=mock_commondatamodule(MockCommonDataModule)(),
         )
         ae.setup("fit")
         encoder = nn.ModuleList(
@@ -431,14 +499,12 @@ class TestAEDitto(unittest.TestCase):
             ae.decode("train", code, tensor([6] * 6))
             self.assertEqual(ae.curr_rnn_depth, 0)
 
-    @patch("autopopulus.data.CommonDataModule")
-    @patch.object(AEDitto, "set_args_from_data", mock_set_args_from_data)
-    def test_dae(self, MockCommonDataModule):
+    def test_dae(self):
         with self.subTest("Dropout Corruption"):
             ae = AEDitto(
                 **standard,
+                **get_data_args(),
                 dropout_corruption=0.5,
-                datamodule=mock_commondatamodule(MockCommonDataModule)(),
             )
             ae.setup("fit")
             encoder = nn.ModuleList(
@@ -464,8 +530,8 @@ class TestAEDitto(unittest.TestCase):
         with self.subTest("Batchswap Corruption"):
             ae = AEDitto(
                 **standard,
+                **get_data_args(),
                 batchswap_corruption=0.5,
-                datamodule=mock_commondatamodule(MockCommonDataModule)(),
             )
             ae.setup("fit")
             encoder = nn.ModuleList(
@@ -490,9 +556,9 @@ class TestAEDitto(unittest.TestCase):
         with self.subTest("Dropout and Batchswap Corruption"):
             ae = AEDitto(
                 **standard,
+                **get_data_args(),
                 dropout_corruption=0.5,
                 batchswap_corruption=0.5,
-                datamodule=mock_commondatamodule(MockCommonDataModule)(),
             )
             ae.setup("fit")
             encoder = nn.ModuleList(

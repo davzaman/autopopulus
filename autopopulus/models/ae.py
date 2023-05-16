@@ -34,16 +34,15 @@ from autopopulus.models.utils import (
 from autopopulus.data.transforms import (
     get_invert_discretize_tensor_args,
     get_invert_target_encode_tensor_args,
-    list_to_tensor,
     invert_target_encoding_tensor,
     invert_discretize_tensor,
+    list_to_tensor,
     simple_impute_tensor,
 )
 from autopopulus.utils.impute_metrics import AccuracyMetric, MAAPEMetric, RMSEMetric
 from autopopulus.utils.cli_arg_utils import YAMLStringListToList, StringOrInt, str2bool
 from autopopulus.utils.utils import rank_zero_print
 from autopopulus.utils.log_utils import IMPUTE_METRIC_TAG_FORMAT
-from autopopulus.data import CommonDataModule
 from autopopulus.data.types import DataTypeTimeDim
 
 HiddenAndCellState = Tuple[Tensor, Tensor]
@@ -51,6 +50,8 @@ MuLogVar = Tuple[Tensor, Tensor]
 
 LOSS_CHOICES = ["BCE", "MSE", "CEMSE", "CEMAAPE"]
 OPTIM_CHOICES = ["Adam", "SGD"]
+
+COL_IDXS_BY_TYPE_FORMAT = "idx_{data_feature_space}_{feature_type}"
 
 
 class AEDitto(pl.LightningModule):
@@ -91,9 +92,19 @@ class AEDitto(pl.LightningModule):
 
     def __init__(
         self,
+        seed: int,
+        # Data hps # TODO: type hint data hps better
+        nfeatures: Dict[str, int],
+        groupby: Dict,
+        columns: Dict[str, Dict[str, Index]],
+        discretizations: Dict,
+        inverse_target_encode_map: Dict[str, Dict],
+        feature_map: str,
+        data_feature_space: str,  # original/mapped
+        col_idxs_by_type: Dict[str, Dict[str, List]],  # orig/map-> {cat/ctn -> idxs}
+        # model hps
         hidden_layers: List[Union[int, float]],
         learning_rate: float,
-        seed: int,
         l2_penalty: float = 0,
         lossn: str = "CEMAAPE",
         optimn: str = "Adam",
@@ -114,32 +125,19 @@ class AEDitto(pl.LightningModule):
         dropout: Optional[float] = None,
         dropout_corruption: Optional[float] = None,
         batchswap_corruption: Optional[float] = None,
-        datamodule: Optional[CommonDataModule] = None,
     ):
         super().__init__()
-        self.datamodule = datamodule
-        self.lossn = lossn
-        self.optimn = optimn
-        self.seed = seed
-        self.lr = learning_rate
-        self.l2_penalty = l2_penalty
-        self.dropout = dropout
-        self.activation = activation
-        self.metrics = metrics
-        # Other options
-        self.replace_nan_with = replace_nan_with
-        self.mvec = mvec
-        self.variational = variational
-        self.longitudinal = longitudinal
-        self.data_type_time_dim = data_type_time_dim
-        self.dropout_corruption = dropout_corruption
-        self.batchswap_corruption = batchswap_corruption
+        # keep col_idxs_by_type for validation of args even though we set up buffers
+        self.save_hyperparameters(ignore=["metrics"])  # Required for serialization
 
-        self.hidden_layers = hidden_layers
-        self.n_layers = len(hidden_layers) + 1  # fencing problem +1
-
-        # Required for serialization
-        self.save_hyperparameters(ignore=["datamodule"])
+        # everythign assigned here should be modified in on_load/save_checkpoint
+        self.hidden_and_cell_state = {}
+        self.set_feature_map_inversion(self.hparams.feature_map)
+        # everythign below here should create attributes that will go into the state dict
+        self.validate_args()
+        self.init_metrics(metrics)
+        self.set_col_idxs_by_type_as_buffers(col_idxs_by_type)
+        self._model_creation()
 
     #######################
     #    Forward Logic    #
@@ -156,7 +154,7 @@ class AEDitto(pl.LightningModule):
         If the last batch in training is < batch_size, the dims of H,C will be incorrect for validation.
         Also H,C from train should not contribute to H,C for validation, etc.
         """
-        if self.variational:
+        if self.hparams.variational:
             # If RNN pass through (h, c) and get the new one back
             code, (mu, logvar) = self.encode(split, X, seq_len)
             return self.decode(split, code, seq_len), (mu, logvar)
@@ -178,7 +176,7 @@ class AEDitto(pl.LightningModule):
         for layer in self.encoder:
             X = self.apply_layer(split, layer, X, orig_seq_lens)
 
-        if self.variational:
+        if self.hparams.variational:
             mu, logvar = self.fc_mu(X), self.fc_var(X)
             return self.reparameterize(mu, logvar), (mu, logvar)
 
@@ -268,14 +266,13 @@ class AEDitto(pl.LightningModule):
 
     def shared_step(self, batch, split: str) -> Tuple[float, Dict[str, float]]:
         ### Unpack ###
-        data_feature_space = "mapped" if "mapped" in batch else "original"
         data, ground_truth = (
-            batch[data_feature_space]["data"],
-            batch[data_feature_space]["ground_truth"],
+            batch[self.hparams.data_feature_space]["data"],
+            batch[self.hparams.data_feature_space]["ground_truth"],
         )
         seq_len = (
-            batch[data_feature_space]["seq_len"]
-            if "seq_len" in batch[data_feature_space]
+            batch[self.hparams.data_feature_space]["seq_len"]
+            if "seq_len" in batch[self.hparams.data_feature_space]
             else None
         )
         # set this before filling in data with replacement (if doing so)
@@ -283,23 +280,28 @@ class AEDitto(pl.LightningModule):
 
         ### Warm Start ###
         # replace nan in ground truth too if its missing any
-        if self.replace_nan_with is not None:
-            if self.replace_nan_with == "simple":  # simple impute warm start
+        if self.hparams.replace_nan_with is not None:
+            if self.hparams.replace_nan_with == "simple":  # simple impute warm start
                 # TODO[LOW]: this fails if the whole column is accidentally nan as part of the amputation process
                 fn = simple_impute_tensor
                 kwargs = {
                     "non_missing_mask": non_missing_mask,
-                    "ctn_col_idxs": self.col_idxs_by_type[data_feature_space][
-                        "continuous"
-                    ],
-                    "bin_col_idxs": self.col_idxs_by_type[data_feature_space]["binary"],
-                    "onehot_group_idxs": self.col_idxs_by_type[data_feature_space][
-                        "onehot"
-                    ],
+                    "ctn_col_idxs": self.get_col_idxs_by_type(
+                        data_feature_space=self.hparams.data_feature_space,
+                        feature_type="continuous",
+                    ),
+                    "bin_col_idxs": self.get_col_idxs_by_type(
+                        data_feature_space=self.hparams.data_feature_space,
+                        feature_type="binary",
+                    ),
+                    "onehot_group_idxs": self.get_col_idxs_by_type(
+                        data_feature_space=self.hparams.data_feature_space,
+                        feature_type="onehot",
+                    ),
                 }
             else:  # Replace nans with a single value provided
                 fn = nan_to_num
-                kwargs = {"nan": self.replace_nan_with}
+                kwargs = {"nan": self.hparams.replace_nan_with}
 
             # apply
             data = fn(data, **kwargs)
@@ -309,7 +311,7 @@ class AEDitto(pl.LightningModule):
         ### Model ###
         # pass through the sequence length (if they're none, nothing happens)
         reconstruct_batch = self(split, data, seq_len)
-        if self.variational:  # unpack when vae
+        if self.hparams.variational:  # unpack when vae
             reconstruct_batch, (mu, logvar) = reconstruct_batch
         else:
             reconstruct_batch = reconstruct_batch
@@ -321,14 +323,14 @@ class AEDitto(pl.LightningModule):
             data * mask: normalize by # all features (missing and observed).
             data[mask]: normalize by only # observed features. (Want)
             """
-            if self.mvec:  # and self.training
+            if self.hparams.mvec:  # and self.training
                 eval_pred = reconstruct_batch[non_missing_mask]
                 eval_true = ground_truth[non_missing_mask]
             else:
                 eval_pred = reconstruct_batch
                 eval_true = ground_truth
 
-            if self.variational:
+            if self.hparams.variational:
                 loss = self.loss(eval_pred, eval_true, mu, logvar)
             else:
                 # NOTE: if no mvec and no vae for some reason it says the loss is modifying the output in place, the clone is a quick hack
@@ -418,78 +420,97 @@ class AEDitto(pl.LightningModule):
     ):
         """Log all metrics whether cat/ctn."""
         # NOTE: if you add too many metrics it will mess up the progress bar
-        for metric in self.metrics:
-            context = {
-                "split": split,
-                "feature_space": data_feature_space,
-                "reduction": metric["reduction"],
-            }
+        for reduction, moduledict in self.metrics.items():
+            for name, metric in moduledict.items():
+                context = {
+                    "split": split,
+                    "feature_space": data_feature_space,
+                    "reduction": reduction,
+                }
 
-            log_settings = {
-                "on_step": False,
-                "on_epoch": True,
-                "prog_bar": False,
-                "logger": True,
-                "rank_zero_only": True,
-            }
+                log_settings = {
+                    "on_step": False,
+                    "on_epoch": True,
+                    "prog_bar": False,
+                    "logger": True,
+                    "rank_zero_only": True,
+                }
 
-            if (
-                "Accuracy" in metric["name"]
-                and data_feature_space not in metric["name"]
-            ):  # skip iter (e.g., we're in mapped space but metric is Accuracy-original)
-                continue
+                if (
+                    "Accuracy" in name and data_feature_space not in name
+                ):  # skip iter (e.g., we're in mapped space but metric is Accuracy-original)
+                    continue
 
-            self.log(
-                IMPUTE_METRIC_TAG_FORMAT.format(
-                    name=metric["name"], filter_subgroup="all", **context
-                ),
-                metric["fn"](pred, true),
-                **log_settings,
-            )
-            # Compute metrics for missing only data
-            missing_only_mask = ~(non_missing_mask.bool())
-            if missing_only_mask.any():
                 self.log(
                     IMPUTE_METRIC_TAG_FORMAT.format(
-                        name=metric["name"], filter_subgroup="missingonly", **context
+                        name=name, filter_subgroup="all", **context
                     ),
-                    metric["fn"](pred, true, missing_only_mask),
+                    metric(pred, true),
                     **log_settings,
                 )
+                # Compute metrics for missing only data
+                missing_only_mask = ~(non_missing_mask.bool())
+                if missing_only_mask.any():
+                    self.log(
+                        IMPUTE_METRIC_TAG_FORMAT.format(
+                            name=name,
+                            filter_subgroup="missingonly",
+                            **context,
+                        ),
+                        metric(pred, true, missing_only_mask),
+                        **log_settings,
+                    )
 
     #######################
     #   Initialization    #
     #######################
-    def init_metrics(self):
+    def init_metrics(self, metrics):
         """
         # Load the default, but they need to be initialized inside the module (during lightnignmodule.__init__).
         Ref: https://github.com/Lightning-AI/lightning/issues/4909#issuecomment-736645699
-        torchmetrics need to be initialized inside moduledict/list if i want the internal states to be placed on the correct device
-        Requires information from the datamodule, so this needs to come after set_args_from_data
+        https://torchmetrics.readthedocs.io/en/stable/pages/overview.html#metrics-and-devices
+        https://lightning.ai/forums/t/lightningmodule-init-vs-setup-method/147
+        torchmetrics and models themselves need to be initialized inside __init__ and inside moduledict/list if i want the internal states to be placed on the correct device
         """
-        if self.metrics is None:  # RMSE, MAAPE, Accuracy x {cw, ew}
+        if metrics is None:  # RMSE, MAAPE, Accuracy x {cw, ew}
             # Add accuracy for number of bins correctly imputed if everything is discretized
             # we don't care about element-wise categorical Accuracy
-            if self.feature_map == "discretize_continuous":
+            if self.hparams.feature_map == "discretize_continuous":
                 cwmetrics = nn.ModuleDict(
                     {
                         "RMSE": RMSEMetric(
                             columnwise=True,
-                            nfeatures=self.nfeatures[self.data_feature_space],
+                            nfeatures=self.hparams.nfeatures[
+                                self.hparams.data_feature_space
+                            ],
                         ),
                         "MAAPE": MAAPEMetric(
                             columnwise=True,
-                            nfeatures=self.nfeatures[self.data_feature_space],
+                            nfeatures=self.hparams.nfeatures[
+                                self.hparams.data_feature_space
+                            ],
                         ),
                         # accuracies need to be separate since the feature space/cols are different
                         "Accuracy-original": AccuracyMetric(
-                            bin_col_idxs=self.col_idxs_by_type["original"]["binary"],
-                            onehot_cols_idx=self.col_idxs_by_type["original"]["onehot"],
+                            self.get_col_idxs_by_type(
+                                data_feature_space="original",
+                                feature_type="binary",
+                            ),
+                            self.get_col_idxs_by_type(
+                                data_feature_space="original",
+                                feature_type="onehot",
+                            ),
                             columnwise=True,
                         ),
                         "Accuracy-mapped": AccuracyMetric(
-                            bin_col_idxs=self.col_idxs_by_type["mapped"]["binary"],
-                            onehot_cols_idx=self.col_idxs_by_type["mapped"]["onehot"],
+                            self.get_col_idxs_by_type(
+                                data_feature_space="mapped",
+                                feature_type="binary",
+                            ),
+                            self.get_col_idxs_by_type(
+                                data_feature_space="mapped",
+                                feature_type="onehot",
+                            ),
                             columnwise=True,
                         ),
                     }
@@ -499,57 +520,79 @@ class AEDitto(pl.LightningModule):
                     {
                         "RMSE": RMSEMetric(
                             columnwise=True,
-                            nfeatures=self.nfeatures[self.data_feature_space],
+                            nfeatures=self.hparams.nfeatures[
+                                self.hparams.data_feature_space
+                            ],
                         ),
                         "MAAPE": MAAPEMetric(
                             columnwise=True,
-                            nfeatures=self.nfeatures[self.data_feature_space],
+                            nfeatures=self.hparams.nfeatures[
+                                self.hparams.data_feature_space
+                            ],
                         ),
                     }
                 )
             ewmetrics = nn.ModuleDict({"RMSE": RMSEMetric(), "MAAPE": MAAPEMetric()})
-            self.metrics = [
-                {"name": k, "fn": v, "reduction": "CW"} for k, v in cwmetrics.items()
-            ] + [{"name": k, "fn": v, "reduction": "EW"} for k, v in ewmetrics.items()]
+            # again, i can't even have ANY normal dicts here, it all has to be nn.moduledict/list, even wrappers
+            # reduction -> moduledict(name -> fn)
+            self.metrics = nn.ModuleDict({"CW": cwmetrics, "EW": ewmetrics})
+        else:  # WARNING: if the metrics aren't initialized inside __init__ they may not be put on the correct device
+            self.metrics = metrics
+
+    def set_col_idxs_by_type_as_buffers(
+        self, col_idxs_by_type: Dict[str, Dict[str, List]]
+    ):
+        # https://lightning.ai/docs/pytorch/stable/advanced/speed.html#transferring-tensors-to-device
+        # https://discuss.pytorch.org/t/what-is-the-difference-between-register-buffer-and-register-parameter-of-nn-module/32723/8
+        # Register_buffer will save to state_dict, construct tensor directly on device
+        # but they're not trainable params
+        for data_feature_space, col_idxs in col_idxs_by_type.items():
+            for feature_type, idxs in col_idxs.items():
+                self.register_buffer(
+                    COL_IDXS_BY_TYPE_FORMAT.format(
+                        data_feature_space=data_feature_space, feature_type=feature_type
+                    ),
+                    list_to_tensor(idxs),
+                )
+                # original/mapped -> {cat/ctn -> indices}
+
+    def get_col_idxs_by_type(
+        self,
+        data_feature_space: str,
+        feature_type: str,
+        default_action: Optional[Callable] = None,
+    ) -> Tensor:
+        if default_action is not None:
+            return getattr(
+                self,
+                COL_IDXS_BY_TYPE_FORMAT.format(
+                    data_feature_space=data_feature_space, feature_type=feature_type
+                ),
+                default_action,
+            )
+        return getattr(
+            self,
+            COL_IDXS_BY_TYPE_FORMAT.format(
+                data_feature_space=data_feature_space, feature_type=feature_type
+            ),
+        )
 
     def setup(self, stage: str):
-        """Might update the columns after initialization of AEDitto but before calling fit on wrapper class, so check right before calling fit here.
-        This needs to happen on setup, so pl calls it before configure optimizers.
-        Setup is useful for dynamically building models.
+        """
+        Anything init/built here might not be put on the correct device.
         Logic is here since datamodule.setup() will be called in trainer.fit() before self.setup().
         https://pytorch-lightning.readthedocs.io/en/stable/common/lightning_module.html#setup
         """
-        if stage == "fit" or stage == "train":
-            self.hidden_and_cell_state = {}
-            self.set_args_from_data()
-            self.init_metrics()
-            self._model_creation()
-            self.validate_args()
+        return
 
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
         super().on_save_checkpoint(checkpoint)
-        checkpoint["data_attributes"] = {
-            "nfeatures": self.nfeatures,
-            "groupby": self.groupby,
-            "columns": self.columns,
-            "data_feature_space": self.data_feature_space,
-            "discretizations": self.discretizations,
-            "inverse_target_encode_map": self.inverse_target_encode_map,
-            "col_idxs_by_type": self.col_idxs_by_type,
-            # cannot pickle lambda fns, save the feature_map name instead
-            "feature_map": self.feature_map,
-        }
         checkpoint["hidden_and_cell_state"] = self.hidden_and_cell_state
 
     def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
-        # super().on_load_checkpoint(checkpoint)
-        for name, value in checkpoint["data_attributes"].items():
-            setattr(self, name, value)
         self.hidden_and_cell_state = checkpoint["hidden_and_cell_state"]
         # grab inversion function again since we can only pickle the name
-        self.set_feature_map_inversion(self.feature_map)
-        # don't need to validate args since it should have been validated before serialization.
-        self._model_creation()
+        self.set_feature_map_inversion(self.hparams.feature_map)
 
     def _model_creation(self) -> None:
         """Configure loss and build model."""
@@ -559,37 +602,9 @@ class AEDitto(pl.LightningModule):
         self.loss = self.configure_loss()
         self.set_layer_dims()
         # number of layers will always be even because it's symmetric
-        self.code_index = len(self.layer_dims) // 2
+        self.code_index = len(self.hparams.layer_dims) // 2
         self.build_encoder()
         self.build_decoder()
-
-    def set_args_from_data(self):
-        """
-        Set model info that we can only dynamically get from the data after it's been setup() in trainer.fit().
-        Any attribute set here should be serialized in `on_save_checkpoint`.
-        NOTE: If there's onehot in col_idxs_by_type, it will be PADDED .
-        Anything that uses it will need to account for that.
-        """
-        self.nfeatures = self.datamodule.nfeatures
-        self.groupby = self.datamodule.groupby
-        self.columns = self.datamodule.columns
-        self.discretizations = self.datamodule.discretizations
-        self.inverse_target_encode_map = self.datamodule.inverse_target_encode_map
-        self.feature_map = self.datamodule.feature_map
-        self.data_feature_space = "mapped" if "mapped" in self.groupby else "original"
-
-        # used for BCE+MSE los, -> cat cols the VAE Loss,etc which require tensor
-        # We still need this if we're loading the ae from a file and not calling fit
-        # enforce Dtype = Long
-        self.col_idxs_by_type = {
-            data_feature_space: {
-                feature_type: list_to_tensor(idxs, self.device)
-                for feature_type, idxs in col_idxs.items()
-            }
-            # original/mapped -> {cat/ctn -> indices}
-            for data_feature_space, col_idxs in self.datamodule.col_idxs_by_type.items()
-        }
-        self.set_feature_map_inversion(self.feature_map)
 
     def set_feature_map_inversion(self, feature_map: str):
         """Lambdas are not pickle-able for checkpointing, so dynamically set."""
@@ -598,7 +613,9 @@ class AEDitto(pl.LightningModule):
             self.feature_map_inversion = lambda data_tensor: invert_discretize_tensor(
                 data_tensor,
                 **get_invert_discretize_tensor_args(
-                    self.discretizations["data"], self.columns["original"], self.device
+                    self.hparams.discretizations["data"],
+                    self.hparams.columns["original"],
+                    self.device,
                 ),
             )
         elif feature_map == "target_encode_categorical":
@@ -606,10 +623,10 @@ class AEDitto(pl.LightningModule):
                 lambda data_tensor: invert_target_encoding_tensor(
                     data_tensor,
                     **get_invert_target_encode_tensor_args(
-                        self.inverse_target_encode_map["mapping"],
-                        self.inverse_target_encode_map["ordinal_mapping"],
-                        self.columns["mapped"],
-                        self.columns["original"],
+                        self.hparams.inverse_target_encode_map["mapping"],
+                        self.hparams.inverse_target_encode_map["ordinal_mapping"],
+                        self.hparams.columns["mapped"],
+                        self.hparams.columns["original"],
                         self.device,
                     ),
                 )
@@ -621,15 +638,17 @@ class AEDitto(pl.LightningModule):
         """Pick optimizer. PL Function called after model.setup()"""
         optim_choices = {
             "Adam": optim.Adam(
-                self.parameters(), lr=self.lr, weight_decay=self.l2_penalty
+                self.parameters(),
+                lr=self.hparams.learning_rate,
+                weight_decay=self.hparams.l2_penalty,
             ),
             "SGD": optim.SGD(
                 self.parameters(),
-                lr=self.lr,
-                weight_decay=self.l2_penalty,
+                lr=self.hparams.learning_rate,
+                weight_decay=self.hparams.l2_penalty,
             ),
         }
-        return optim_choices[self.optimn]
+        return optim_choices[self.hparams.optimn]
 
     def configure_loss(self):
         """
@@ -640,91 +659,116 @@ class AEDitto(pl.LightningModule):
             "BCE": nn.BCEWithLogitsLoss(),
             "MSE": nn.MSELoss(),
             "CEMSE": CtnCatLoss(
-                self.col_idxs_by_type[self.data_feature_space]["continuous"],
-                self.col_idxs_by_type[self.data_feature_space]["binary"],
-                self.col_idxs_by_type[self.data_feature_space]["onehot"],
+                self.get_col_idxs_by_type(
+                    data_feature_space=self.hparams.data_feature_space,
+                    feature_type="continuous",
+                ),
+                self.get_col_idxs_by_type(
+                    data_feature_space=self.hparams.data_feature_space,
+                    feature_type="binary",
+                ),
+                self.get_col_idxs_by_type(
+                    data_feature_space=self.hparams.data_feature_space,
+                    feature_type="onehot",
+                ),
             ),
             "CEMAAPE": CtnCatLoss(
-                self.col_idxs_by_type[self.data_feature_space]["continuous"],
-                self.col_idxs_by_type[self.data_feature_space]["binary"],
-                self.col_idxs_by_type[self.data_feature_space]["onehot"],
+                self.get_col_idxs_by_type(
+                    data_feature_space=self.hparams.data_feature_space,
+                    feature_type="continuous",
+                ),
+                self.get_col_idxs_by_type(
+                    data_feature_space=self.hparams.data_feature_space,
+                    feature_type="binary",
+                ),
+                self.get_col_idxs_by_type(
+                    data_feature_space=self.hparams.data_feature_space,
+                    feature_type="onehot",
+                ),
                 loss_ctn=MAAPEMetric(),
             ),
         }
         assert (
-            self.lossn in loss_choices
+            self.hparams.lossn in loss_choices
         ), f"Passed invalid loss name. Please choose among: {list(loss_choices.keys())}"
 
-        loss = loss_choices[self.lossn]
+        loss = loss_choices[self.hparams.lossn]
         # Add KL Divergence for VAE Loss
-        if self.variational:
+        if self.hparams.variational:
             # Not supporting this for now...I don't think it makes sense?
-            # cat_cols_idx = self.cat_cols_idx if self.lossn == "CEMSE" else None
+            # cat_cols_idx = self.cat_cols_idx if self.hparams.lossn == "CEMSE" else None
             loss = ReconstructionKLDivergenceLoss(loss, None)
         return loss
 
     def set_layer_dims(self):
         # Assumes layer_dims describes full autoencoder (is symmetric list of numbers).
-        assert len(self.hidden_layers) > -1, "Passed no hidden layers."
+        assert len(self.hparams.hidden_layers) > -1, "Passed no hidden layers."
         assert (
-            array(self.hidden_layers[: len(self.hidden_layers) // 2])
-            == array(self.hidden_layers[len(self.hidden_layers) // 2 + 1 :][::-1])
+            array(self.hparams.hidden_layers[: len(self.hparams.hidden_layers) // 2])
+            == array(
+                self.hparams.hidden_layers[len(self.hparams.hidden_layers) // 2 + 1 :][
+                    ::-1
+                ]
+            )
         ).all(), "Hidden Layers must be symmetric."
         # if isinstance(hidden_layers[-1], int) or hidden_layers[0].is_integer():
-        if isinstance(self.hidden_layers[-1], int):
-            self.layer_dims = (
-                [self.nfeatures[self.data_feature_space]]
-                + [int(dim) for dim in self.hidden_layers]
-                + [self.nfeatures[self.data_feature_space]]
+        if isinstance(self.hparams.hidden_layers[-1], int):
+            self.hparams.layer_dims = (
+                [self.hparams.nfeatures[self.hparams.data_feature_space]]
+                + [int(dim) for dim in self.hparams.hidden_layers]
+                + [self.hparams.nfeatures[self.hparams.data_feature_space]]
             )
         else:  # assuming float, compute relative size of input
-            self.layer_dims = (
-                [self.nfeatures[self.data_feature_space]]
+            self.hparams.layer_dims = (
+                [self.hparams.nfeatures[self.hparams.data_feature_space]]
                 # ceil: e.g.: input_dim = 4,  rel_size: 0.3 and 0.2 when rounded down give 0, so we always round up to the nearest integer (to at least 1).
                 + [
-                    ceil(rel_size * self.nfeatures[self.data_feature_space])
-                    for rel_size in self.hidden_layers
+                    ceil(
+                        rel_size
+                        * self.hparams.nfeatures[self.hparams.data_feature_space]
+                    )
+                    for rel_size in self.hparams.hidden_layers
                 ]
-                + [self.nfeatures[self.data_feature_space]]
+                + [self.hparams.nfeatures[self.hparams.data_feature_space]]
             )
 
     def validate_args(self):
         #### Assertions ####
-        if self.lossn == "CEMSE" or self.lossn == "CEMAAPE":
-            assert self.col_idxs_by_type[
-                self.data_feature_space
+        if self.hparams.lossn == "CEMSE" or self.hparams.lossn == "CEMAAPE":
+            assert self.hparams.col_idxs_by_type[
+                self.hparams.data_feature_space
             ], "Failed to get indices of continuous and categorical columns. Likely failed to pass list of columns and list of continuous columns. This is required for CEMSE and CEMAAPE loss."
             assert (
-                self.feature_map != "discretize_continuous"
+                self.hparams.feature_map != "discretize_continuous"
             ), "Passed a loss of CEMSE or CEMAAPE but indicated you discretized the data. These cannot both happen (since if all the data is discretized you want to use BCE loss instead)."
         # for now do not support vae with categorical features
         # TODO: create VAE prior/likelihood for fully categorical features, or beta-div instead.
-        if self.variational:
+        if self.hparams.variational:
             assert (
-                self.feature_map != "discretize_continuous"
+                self.hparams.feature_map != "discretize_continuous"
             ), "Indicated you discretized the data and also wanted to use a variational autoencoder. These cannot be used together."
             # cat_cols are only fine if you're target encoding
             assert len(
-                self.col_idxs_by_type["original"].get("categorical", [])
+                self.hparams.col_idxs_by_type["original"].get("categorical", [])
             ) == 0 or (
-                self.feature_map == "target_encode_categorical"
+                self.hparams.feature_map == "target_encode_categorical"
             ), "Indicated you wanted to use a variational autoencoder and also have categorical features, but these cannot be used togther."
             assert (
-                self.lossn != "CEMSE" and self.lossn != "CEMAAPE"
+                self.hparams.lossn != "CEMSE" and self.hparams.lossn != "CEMAAPE"
             ), "Indicated CEMSE / CEMAAPE loss which refers to mixed data loss, but also indicated you want to use a variational autoencoder which only support continuous features."
 
-        if self.feature_map == "discretize_continuous":
+        if self.hparams.feature_map == "discretize_continuous":
             assert (
-                self.columns["original"] is not None
+                self.hparams.columns["original"] is not None
             ), "The data is discretized. To invert the discretization and maintain order, we need the original column order."
 
         assert hasattr(
-            nn, self.activation
+            nn, self.hparams.activation
         ), "Failed to choose a valid activation function. Please choose one of the activation functions from torch.nn module."
 
-        if type(self.replace_nan_with) is str:
+        if type(self.hparams.replace_nan_with) is str:
             assert (
-                self.replace_nan_with == "simple"
+                self.hparams.replace_nan_with == "simple"
             ), "Gave invalid choice to replace nan."
 
     #######################
@@ -737,37 +781,41 @@ class AEDitto(pl.LightningModule):
         encoder_layers = []
 
         # should come before dropout
-        if self.batchswap_corruption:
-            encoder_layers.append(BatchSwapNoise(self.batchswap_corruption))
-        if self.dropout_corruption:
+        if self.hparams.batchswap_corruption:
+            encoder_layers.append(BatchSwapNoise(self.hparams.batchswap_corruption))
+        if self.hparams.dropout_corruption:
             # Dropout as binomial corruption
             encoder_layers += [
-                ResetSeed(self.seed),
-                nn.Dropout(self.dropout_corruption),
+                ResetSeed(self.hparams.seed),
+                nn.Dropout(self.hparams.dropout_corruption),
             ]
 
         stop_at = self.code_index
-        if self.variational:  # for fc_mu and fc_var, stop before code
+        if self.hparams.variational:  # for fc_mu and fc_var, stop before code
             stop_at -= 1
 
         for i in range(stop_at):
             encoder_layers.append(
-                self.select_layer_type(self.layer_dims[i], self.layer_dims[i + 1])
+                self.select_layer_type(
+                    self.hparams.layer_dims[i], self.hparams.layer_dims[i + 1]
+                )
             )
             encoder_layers.append(self.select_activation())
-            if self.dropout:
+            if self.hparams.dropout:
                 encoder_layers += [
-                    ResetSeed(self.seed),  # ensures reprodudicibility
-                    nn.Dropout(self.dropout),
+                    ResetSeed(self.hparams.seed),  # ensures reprodudicibility
+                    nn.Dropout(self.hparams.dropout),
                 ]
         # self.encoder = nn.Sequential(*encoder_layers)
         self.encoder = nn.ModuleList(encoder_layers)
-        if self.variational:
+        if self.hparams.variational:
             self.fc_mu = nn.Linear(
-                self.layer_dims[self.code_index - 1], self.layer_dims[self.code_index]
+                self.hparams.layer_dims[self.code_index - 1],
+                self.hparams.layer_dims[self.code_index],
             )
             self.fc_var = nn.Linear(
-                self.layer_dims[self.code_index - 1], self.layer_dims[self.code_index]
+                self.hparams.layer_dims[self.code_index - 1],
+                self.hparams.layer_dims[self.code_index],
             )
 
     def build_decoder(self):
@@ -776,33 +824,37 @@ class AEDitto(pl.LightningModule):
         """
         decoder_layers = []
         # -2: exclude the last layer (-1), and also account i,i+1 (-1)
-        for i in range(self.code_index, len(self.layer_dims) - 2):
+        for i in range(self.code_index, len(self.hparams.layer_dims) - 2):
             decoder_layers.append(
-                self.select_layer_type(self.layer_dims[i], self.layer_dims[i + 1])
+                self.select_layer_type(
+                    self.hparams.layer_dims[i], self.hparams.layer_dims[i + 1]
+                )
             )
             decoder_layers.append(self.select_activation())
-            if self.dropout:
+            if self.hparams.dropout:
                 decoder_layers += [
-                    ResetSeed(self.seed),  # ensures reprodudicibility
-                    nn.Dropout(self.dropout),
+                    ResetSeed(self.hparams.seed),  # ensures reprodudicibility
+                    nn.Dropout(self.hparams.dropout),
                 ]
-        decoder_layers.append(nn.Linear(self.layer_dims[-2], self.layer_dims[-1]))
+        decoder_layers.append(
+            nn.Linear(self.hparams.layer_dims[-2], self.hparams.layer_dims[-1])
+        )
 
         # will will NOT sigmoid/softmax here since our loss expects logits
         self.decoder = nn.ModuleList(decoder_layers)
 
     def select_layer_type(self, dim1: int, dim2: int) -> nn.Module:
         """LSTM/RNN if longitudinal, else Linear."""
-        if self.longitudinal:
+        if self.hparams.longitudinal:
             return nn.LSTM(dim1, dim2, batch_first=True)
         return nn.Linear(dim1, dim2)
 
     def select_activation(self) -> nn.Module:
-        kwargs = {"inplace": True} if self.activation == "ReLU" else {}
-        return getattr(nn, self.activation)(**kwargs)
-        if self.activation == "ReLU":
+        kwargs = {"inplace": True} if self.hparams.activation == "ReLU" else {}
+        return getattr(nn, self.hparams.activation)(**kwargs)
+        if self.hparams.activation == "ReLU":
             return nn.ReLU(inplace=True)
-        elif self.activation == "sigmoid":
+        elif self.hparams.activation == "sigmoid":
             return nn.Sigmoid()
         else:  # TanH
             return nn.Tanh()
@@ -856,10 +908,21 @@ class AEDitto(pl.LightningModule):
 
         # Sigmoid/softmax and threshold but in original space
         pred = binary_column_threshold(
-            pred, self.col_idxs_by_type[data_feature_space].get("binary", []), 0.5
+            pred,
+            self.get_col_idxs_by_type(
+                data_feature_space=data_feature_space,
+                feature_type="binary",
+                default_action=lambda: [],  # empty list if dne
+            ),
+            0.5,
         )  # do nothing if no "binary" cols (empty list [])
         pred = onehot_column_threshold(
-            pred, self.col_idxs_by_type[data_feature_space].get("onehot", [])
+            pred,
+            self.get_col_idxs_by_type(
+                data_feature_space=data_feature_space,
+                feature_type="onehot",
+                default_action=lambda: [],  # empty list if dne
+            ),
         )  # do nothing if no "binary" cols (empty list [])
 
         # Keep original where it's not missing

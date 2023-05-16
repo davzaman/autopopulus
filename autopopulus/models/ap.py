@@ -19,6 +19,7 @@ from pytorch_lightning.profiler import Profiler
 from pytorch_lightning.strategies.strategy import Strategy
 from pytorch_lightning.loggers.base import LightningLoggerBase
 
+
 warnings.filterwarnings(action="ignore", category=LightningDeprecationWarning)
 
 # Local
@@ -72,14 +73,9 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         self.data_type_time_dim = data_type_time_dim
         # This is a convenience
         self.longitudinal = self.data_type_time_dim.is_longitudinal()
+        self.ae_args = args
+        self.ae_kwargs = kwargs
 
-        # Create AE and trainer
-        self.ae = AEDitto(
-            *args,
-            **kwargs,
-            longitudinal=self.longitudinal,
-            data_type_time_dim=self.data_type_time_dim,
-        )
         self.trainer = self.create_trainer(
             logger,
             self.patience,
@@ -163,9 +159,25 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
 
     def fit(self, data: CommonDataModule):
         """Trains the autoencoder for imputation."""
-        self._fit(data)
+        data.setup("fit")
+        self._create_model(data)
+        self.trainer.fit(self.ae, datamodule=data)
+        self.trainer.save_checkpoint(
+            get_serialized_model_path(
+                f"AEDitto_{self.data_type_time_dim.name}", "pt", self.trial_num
+            ),
+        )
         self._save_test_data(data)
         return self
+
+    def _create_model(self, data: CommonDataModule):
+        self.ae_kwargs.update(self.get_args_from_data(data))
+        self.ae = AEDitto(
+            *self.ae_args,
+            longitudinal=self.longitudinal,
+            data_type_time_dim=self.data_type_time_dim,
+            **self.ae_kwargs,
+        )
 
     @rank_zero_only
     def _save_test_data(self, data: CommonDataModule):
@@ -181,23 +193,12 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
                 pickle_module=cloudpickle,
             )
 
-    def _fit(self, data: CommonDataModule):
-        """Trains the autoencoder for imputation."""
-        # set the data so the plmodule has a reference to it to use it after it's been setup to build the model dynamically in ae.setup()
-        # can't instantiate the model here bc we need *args and **kwargs from init
-        self.ae.datamodule = data
-        self.trainer.fit(self.ae, datamodule=data)
-        self.trainer.save_checkpoint(
-            get_serialized_model_path(
-                f"AEDitto_{self.data_type_time_dim.name}", "pt", self.trial_num
-            ),
-        )
-
     def transform(self, dataloader: DataLoader) -> pd.DataFrame:
         """
         Applies trained autoencoder to given data X.
         Calls predict on pl model and then recovers columns and indices.
         """
+        assert hasattr(self, "ae"), "You need to call fit first!"
         preds_list = self.inference_trainer.predict(self.ae, dataloader)
         # stack the list of preds from dataloader
         preds = torch.vstack(preds_list).cpu().numpy()
@@ -227,6 +228,28 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
             preds_df.columns = columns
             return preds_df
         return pd.DataFrame(preds, columns=columns, index=ids)
+
+    def get_args_from_data(self, data: CommonDataModule):
+        """
+        Set model info that we can only dynamically get from the data after it's been setup(). Normally this happens in trainer.fit()
+        However, I need to build the model in __init__ so I need this info upfront.
+        Any attribute set here should be serialized in `on_save_checkpoint`.
+        NOTE: If there's onehot in col_idxs_by_type, it will be PADDED .
+        Anything that uses it will need to account for that.
+        """
+        return {
+            "nfeatures": data.nfeatures,
+            "groupby": data.groupby,
+            "columns": data.columns,
+            "discretizations": data.discretizations,
+            "inverse_target_encode_map": data.inverse_target_encode_map,
+            "feature_map": data.feature_map,
+            # TODO: is there a difference between this and the batch has mapped in shared_step?
+            "data_feature_space": "mapped" if "mapped" in data.groupby else "original",
+            # used for BCE+MSE los, -> cat cols the VAE Loss,etc which require tensor
+            # We still need this if we're loading the ae from a file and not calling fit
+            "col_idxs_by_type": data.col_idxs_by_type,
+        }
 
     @classmethod
     def from_checkpoint(
