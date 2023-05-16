@@ -268,7 +268,7 @@ class TestMetrics(unittest.TestCase):
                                         )
                                         / nsamples
                                     )
-                                )
+                                ).item()
                                 / nfeatures  # average over al cols
                                 * scale,  # scale
                                 maape_colwise(
@@ -323,72 +323,104 @@ class TestMetrics(unittest.TestCase):
         accuracy_colwise = AccuracyMetric(
             list_to_tensor(hypothesis["cat_cols_idx"]), [], True
         )
+        torch_metrics = [accuracy_elwise, accuracy_colwise]
 
         with self.subTest("No Mask"):
             with self.subTest("All Equal"):
-                self.assertAlmostEqual(
-                    1, accuracy_elwise(tensor_df, tensor_df).item(), places=WITHIN
-                )
-                self.assertAlmostEqual(
-                    1, accuracy_colwise(tensor_df, tensor_df).item(), places=WITHIN
-                )
+                for metric in torch_metrics:
+                    self.assertAlmostEqual(
+                        1, metric(tensor_df, tensor_df).item(), places=WITHIN
+                    )
+                    self.batched_input_equals(metric, tensor_df, tensor_df)
+                    metric.reset()
 
             N = len(df)
             F = len(hypothesis["cat_cols_idx"])
-            with self.subTest("Not Equal"):
+            with self.subTest("Not Equal 1 Error in 1 Column"):
                 # Create an error in one of the places
                 error_df = df.copy()
                 # flip a binary col
                 error_df.iloc[0, bin_col_idx] = 1 - df.iloc[0, bin_col_idx]
                 error_df = torch.tensor(error_df.values)
                 # these are all the same actually
-                self.assertAlmostEqual(  # 1 error for 1 feature out of F
-                    (((N - 1) / N) + F - 1) / F,
-                    accuracy_colwise(error_df, tensor_df).item(),
-                    places=WITHIN,
-                )
-                self.assertAlmostEqual(  # 1 error out of all the cells
-                    (N * F - 1) / (N * F),
-                    accuracy_elwise(error_df, tensor_df).item(),
-                    places=WITHIN,
-                )
+                with self.subTest("Colwise Accuracy"):
+                    self.assertAlmostEqual(  # 1 error for 1 feature out of F
+                        (((N - 1) / N) + F - 1) / F,
+                        accuracy_colwise(error_df, tensor_df).item(),
+                        places=WITHIN,
+                    )
+                    self.batched_input_equals(accuracy_colwise, error_df, tensor_df)
+                with self.subTest("Elwise Accuracy"):
+                    self.assertAlmostEqual(  # 1 error out of all the cells
+                        (N * F - 1) / (N * F),
+                        accuracy_elwise(error_df, tensor_df).item(),
+                        places=WITHIN,
+                    )
+                    self.batched_input_equals(accuracy_elwise, error_df, tensor_df)
+                for metric in torch_metrics:
+                    metric.reset()
 
         with self.subTest("Mask"):
             missing_indicators = torch.ones_like(tensor_df).to(bool)
             missing_indicators[0, bin_col_idx] = False
             with self.subTest("Not Equal inside Mask"):
-                self.assertAlmostEqual(
-                    1,
-                    accuracy_colwise(error_df, tensor_df, missing_indicators).item(),
-                    places=WITHIN,
-                )
-                self.assertAlmostEqual(
-                    1,
-                    accuracy_elwise(error_df, tensor_df, missing_indicators).item(),
-                    places=WITHIN,
-                )
+                for metric in torch_metrics:
+                    self.assertAlmostEqual(
+                        1,
+                        metric(error_df, tensor_df, missing_indicators).item(),
+                        places=WITHIN,
+                    )
+                    self.batched_input_equals(
+                        metric, error_df, tensor_df, missing_indicators
+                    )
+                    metric.reset()
 
             with self.subTest("Not Equal outside mask"):
-                # Create an error in one of the places
+                """
+                . = value we don't care about becaues they're the same
+                [[..., y1(obs), ..., y3, ...],
+                [..., y2,      ..., y4, ...],
+                [..., .,       ..., .,  ...]]
+                Column stats: (covering different test cases)
+                    # ignored vals: 1 0 0(...)
+                    # missing vals with error: 1 2 0(...)
+                """
+                err_locs = [
+                    [0, hypothesis["bin_cols_idx"][0]],  # same col (obs/ignored)
+                    [1, hypothesis["bin_cols_idx"][0]],  # same col (missing)
+                    [0, hypothesis["bin_cols_idx"][1]],  # different col (missing)
+                    [1, hypothesis["bin_cols_idx"][1]],  # different col (missing)
+                ]
                 error_df = df.copy()
-                # flip a binary col
-                error_df.iloc[0, bin_col_idx] = 1 - df.iloc[0, bin_col_idx]
-                error_df.iloc[1, bin_col_idx] = 1 - df.iloc[1, bin_col_idx]
+                for err_loc in err_locs:
+                    # flip a binary col
+                    error_df.iloc[err_loc[0], err_loc[1]] = (
+                        1 - error_df.iloc[err_loc[0], err_loc[1]]
+                    )
                 error_df = torch.tensor(error_df.values)
                 self.assertAlmostEqual(
-                    # 2 error, but ignoring 1 position
-                    (((N - 1 - 1) / (N - 1)) + F - 1) / F,
+                    # nsamples in col with obs is N-1, and then 1 error
+                    # nsamples is the other col is all N, but 2 errors
+                    # (thats 2 cols) For the remaining cols acc is 1 (F - 2)
+                    (((N - 1 - 1) / (N - 1)) + ((N - 2) / N) + (F - 2)) / F,
                     accuracy_colwise(error_df, tensor_df, missing_indicators).item(),
                     places=WITHIN,
                 )
+                self.batched_input_equals(
+                    accuracy_colwise, error_df, tensor_df, missing_indicators
+                )
                 self.assertAlmostEqual(
-                    ((N * F - 1) - 1)
-                    / (
-                        N * F - 1
-                    ),  # error in 1 non-masked cells when theres 1 cell less
+                    # 1 wrong and ignored in first col, 2 wrong in second, and the remaining F-2 cols have all right
+                    ((N - 2) + (N - 2) + N * (F - 2))
+                    / (N * F - 1),  # 1 ignored so 1 cell less
                     accuracy_elwise(error_df, tensor_df, missing_indicators).item(),
                     places=WITHIN,
                 )
+                self.batched_input_equals(
+                    accuracy_elwise, error_df, tensor_df, missing_indicators
+                )
+                for metric in torch_metrics:
+                    metric.reset()
 
     @settings(
         suppress_health_check=[HealthCheck(3), HealthCheck.filter_too_much],
@@ -416,19 +448,18 @@ class TestMetrics(unittest.TestCase):
             list_to_tensor(hypothesis["onehot"]["bin_cols_idx"]),
             list_to_tensor(hypothesis["onehot"]["onehot_cols_idx"]),
         )
+        torch_metrics = [accuracy_elwise, accuracy_colwise]
 
         with self.subTest("No Mask"):
             with self.subTest("All Equal"):
-                self.assertAlmostEqual(
-                    1,
-                    accuracy_colwise(tensor_df, tensor_df).item(),
-                    places=WITHIN,
-                )
-                self.assertAlmostEqual(
-                    1,
-                    accuracy_elwise(tensor_df, tensor_df).item(),
-                    places=WITHIN,
-                )
+                for metric in torch_metrics:
+                    self.assertAlmostEqual(
+                        1,
+                        metric(tensor_df, tensor_df).item(),
+                        places=WITHIN,
+                    )
+                    self.batched_input_equals(metric, tensor_df, tensor_df)
+                    metric.reset()
 
             N = len(df)  # num samples
             F = len(hypothesis["cat_cols_idx"])  # num features
@@ -450,26 +481,30 @@ class TestMetrics(unittest.TestCase):
                     accuracy_colwise(error_df, tensor_df).item(),
                     places=WITHIN,
                 )
+                self.batched_input_equals(accuracy_colwise, error_df, tensor_df)
                 self.assertAlmostEqual(  # one error out of all the cells
                     (N * F - 1) / (N * F),
                     accuracy_elwise(error_df, tensor_df).item(),
                     places=WITHIN,
                 )
+                self.batched_input_equals(accuracy_elwise, error_df, tensor_df)
+                for metric in torch_metrics:
+                    metric.reset()
 
         with self.subTest("Mask"):
             missing_indicators = torch.ones_like(tensor_df).to(bool)
             missing_indicators[0, onehot_group] = False
             with self.subTest("Not Equal inside Mask"):
-                self.assertAlmostEqual(
-                    1,
-                    accuracy_colwise(error_df, tensor_df, missing_indicators).item(),
-                    places=WITHIN,
-                )
-                self.assertAlmostEqual(
-                    1,
-                    accuracy_elwise(error_df, tensor_df, missing_indicators).item(),
-                    places=WITHIN,
-                )
+                for metric in torch_metrics:
+                    self.assertAlmostEqual(
+                        1,
+                        metric(error_df, tensor_df, missing_indicators).item(),
+                        places=WITHIN,
+                    )
+                    self.batched_input_equals(
+                        metric, error_df, tensor_df, missing_indicators
+                    )
+                    metric.reset()
 
             with self.subTest("Not Equal outside mask"):
                 error_df = df.copy()
@@ -492,6 +527,9 @@ class TestMetrics(unittest.TestCase):
                     accuracy_colwise(error_df, tensor_df, missing_indicators).item(),
                     places=WITHIN,
                 )
+                self.batched_input_equals(
+                    accuracy_colwise, error_df, tensor_df, missing_indicators
+                )
                 self.assertAlmostEqual(
                     ((N * F - 1) - 1)
                     / (
@@ -500,6 +538,11 @@ class TestMetrics(unittest.TestCase):
                     accuracy_elwise(error_df, tensor_df, missing_indicators).item(),
                     places=WITHIN,
                 )
+                self.batched_input_equals(
+                    accuracy_elwise, error_df, tensor_df, missing_indicators
+                )
+                for metric in torch_metrics:
+                    metric.reset()
 
 
 if __name__ == "__main__":
