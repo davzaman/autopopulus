@@ -58,6 +58,7 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         runtest: bool = False,
         fast_dev_run: int = None,
         model_monitoring: bool = False,
+        early_stopping: bool = True,
         profiler: Optional[Union[str, Profiler]] = None,
         num_gpus: int = 1,
         num_nodes: int = 1,
@@ -65,37 +66,32 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         *args,  # For inner AEDitto
         **kwargs,
     ):
-        self.profiler = profiler
+        self.max_epochs = max_epochs
+        self.patience = patience
+        self.logger = logger
+        self.tune_callback = tune_callback
+        self.strategy = strategy
         self.trial_num = trial_num
+        self.runtest = runtest
         self.fast_dev_run = fast_dev_run
         self.model_monitoring = model_monitoring
+        self.early_stopping = early_stopping
+        self.profiler = profiler
         self.num_gpus = num_gpus
         self.num_nodes = num_nodes
-        self.runtest = runtest
-        self.patience = patience
-        self.max_epochs = max_epochs
         self.data_type_time_dim = data_type_time_dim
-        # This is a convenience
-        self.longitudinal = self.data_type_time_dim.is_longitudinal()
         self.ae_args = args
         self.ae_kwargs = kwargs
+        # This is a convenience
+        self.longitudinal = self.data_type_time_dim.is_longitudinal()
 
-        self.trainer = self.create_trainer(
-            logger,
-            self.patience,
-            self.max_epochs,
-            self.num_nodes,
-            self.num_gpus,
-            fast_dev_run=self.fast_dev_run,
-            model_monitoring=self.model_monitoring,
-            tune_callback=tune_callback,
-            strategy=strategy,
-            profiler=self.profiler,
-        )
+        # train trainer needs to know the data feature space so its created on fit
+        # inference trainer doesn't need this so we can create on ini
         self.inference_trainer = self.create_trainer(
             logger,
             self.patience,
             self.max_epochs,
+            None,  # don't care about early stopping during eval
             self.num_nodes,
             # Ensure run on 1 GPU if we want to use GPUs for correctness
             # Also bc synchronizing outputs on inference/predict is not supported for ddp
@@ -103,6 +99,7 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
             num_gpus=1 if self.num_gpus else 0,
             fast_dev_run=self.fast_dev_run,
             model_monitoring=self.model_monitoring,
+            early_stopping=self.early_stopping,
             tune_callback=None,  # No tuning since we're testing
             strategy=strategy,
             profiler=self.profiler,
@@ -113,35 +110,34 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         logger: Logger,
         patience: int,
         max_epochs: int,
+        loss_feature_space: str,
         num_nodes: Optional[int] = None,
         num_gpus: Optional[int] = None,
         fast_dev_run: Optional[bool] = None,
         model_monitoring: bool = False,
+        early_stopping: bool = True,
         tune_callback: Optional[Callback] = None,
         strategy: Strategy = "auto",
         profiler: Optional[Union[str, Profiler]] = None,
     ) -> pl.Trainer:
-        callbacks = [
-            # ModelSummary(max_depth=3),
-            EarlyStopping(
-                check_on_train_epoch_end=False,
-                monitor=IMPUTE_METRIC_TAG_FORMAT.format(
-                    name="loss",
-                    feature_space="original",
-                    filter_subgroup="all",
-                    reduction="NA",
-                    split="val",
-                ),
-                patience=patience,
-            ),
-        ]
+        callbacks = []  # ModelSummary(max_depth=3),
+        if early_stopping:
+            callbacks.append(
+                EarlyStopping(
+                    check_on_train_epoch_end=False,
+                    monitor=IMPUTE_METRIC_TAG_FORMAT.format(
+                        name="loss",
+                        feature_space=loss_feature_space,
+                        filter_subgroup="all",
+                        reduction="NA",
+                        split="val",
+                    ),
+                    patience=patience,
+                )
+            )
 
         if model_monitoring:
-            callbacks += [
-                # BatchGradientVerificationCallback(),
-                # ModuleDataMonitor(submodules=True),
-                VisualizeModelCallback(),
-            ]
+            callbacks.append(VisualizeModelCallback())
 
         # https://github.com/PyTorchLightning/pytorch-lightning/discussions/6761#discussioncomment-1152286
         if strategy == "auto":
@@ -175,6 +171,20 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         """Trains the autoencoder for imputation."""
         data.setup("fit")
         self._create_model(data)
+        self.trainer = self.create_trainer(
+            self.logger,
+            self.patience,
+            self.max_epochs,
+            self.ae.hparams.data_feature_space,
+            self.num_nodes,
+            self.num_gpus,
+            fast_dev_run=self.fast_dev_run,
+            model_monitoring=self.model_monitoring,
+            early_stopping=self.early_stopping,
+            tune_callback=self.tune_callback,
+            strategy=self.strategy,
+            profiler=self.profiler,
+        )
         self.trainer.fit(self.ae, datamodule=data)
         self.trainer.save_checkpoint(
             get_serialized_model_path(

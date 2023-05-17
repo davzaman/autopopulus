@@ -19,7 +19,7 @@ import torch.optim as optim
 from torch.nn.utils.rnn import pack_padded_sequence, PackedSequence, pad_packed_sequence
 
 ## Lightning ##
-import pytorch_lightning as pl
+from pytorch_lightning import LightningModule
 from lightning_utilities.core.apply_func import apply_to_collection
 
 from autopopulus.models.utils import (
@@ -54,7 +54,7 @@ OPTIM_CHOICES = ["Adam", "SGD"]
 COL_IDXS_BY_TYPE_FORMAT = "idx_{data_feature_space}_{feature_type}"
 
 
-class AEDitto(pl.LightningModule):
+class AEDitto(LightningModule):
     """
                   67?7I?.777+.779
         6777:.,77.?IIIIIIIIIIII?7
@@ -392,7 +392,7 @@ class AEDitto(pl.LightningModule):
         self.log(
             IMPUTE_METRIC_TAG_FORMAT.format(
                 name="loss",
-                feature_space="original",
+                feature_space=self.hparams.data_feature_space,
                 filter_subgroup="all",
                 reduction="NA",
                 split=split,
@@ -421,50 +421,49 @@ class AEDitto(pl.LightningModule):
         split: str,
         data_feature_space: str,
     ):
-        """Log all metrics whether cat/ctn."""
+        """
+        Log all metrics.
+        Order of keys:
+        split -> filter_subgroup -> reduction -> (? feature space) -> name -> fn
+        https://torchmetrics.readthedocs.io/en/latest/pages/lightning.html#logging-torchmetrics
         # NOTE: if you add too many metrics it will mess up the progress bar
-        for reduction, moduledict in self.metrics.items():
-            # EW is reduction -> metric
-            # CW is reduction -> feature space -> metric
-            if data_feature_space in moduledict:
-                moduledict = moduledict[data_feature_space]
-            for name, metric in moduledict.items():
-                context = {
-                    "split": split,
-                    "feature_space": data_feature_space,
-                    "reduction": reduction,
-                }
+        """
+        for filter_subgroup, split_moduledict in self.metrics[
+            f"{split}_metrics"
+        ].items():
+            for reduction, moduledict in split_moduledict.items():
+                # EW is reduction -> metric
+                # CW is reduction -> feature space -> metric
+                if data_feature_space in moduledict:
+                    moduledict = moduledict[data_feature_space]
+                for name, metric in moduledict.items():
+                    context = {  # listed in order of metric dict keys for reference
+                        "split": split,
+                        "filter_subgroup": filter_subgroup,
+                        "feature_space": data_feature_space,
+                        "reduction": reduction,
+                    }
 
-                log_settings = {
-                    "on_step": False,
-                    "on_epoch": True,
-                    "prog_bar": False,
-                    "logger": True,
-                    "rank_zero_only": True,
-                }
+                    log_settings = {
+                        "on_step": False,
+                        "on_epoch": True,
+                        "prog_bar": False,
+                        "logger": True,
+                        "rank_zero_only": True,
+                    }
+                    # I need to compute the metric in a separate line from logging
+                    # Ref: https://torchmetrics.readthedocs.io/en/latest/pages/lightning.html#common-pitfalls
+                    if (
+                        filter_subgroup == "missingonly"
+                        and (missing_only_mask := ~(non_missing_mask.bool())).any()
+                    ):  # Compute metrics for missing only data
+                        metric_val = metric(pred, true, missing_only_mask)
+                    else:
+                        metric_val = metric(pred, true)
 
-                if (
-                    "Accuracy" in name and data_feature_space not in name
-                ):  # skip iter (e.g., we're in mapped space but metric is Accuracy-original)
-                    continue
-
-                self.log(
-                    IMPUTE_METRIC_TAG_FORMAT.format(
-                        name=name, filter_subgroup="all", **context
-                    ),
-                    metric(pred, true),
-                    **log_settings,
-                )
-                # Compute metrics for missing only data
-                missing_only_mask = ~(non_missing_mask.bool())
-                if missing_only_mask.any():
                     self.log(
-                        IMPUTE_METRIC_TAG_FORMAT.format(
-                            name=name,
-                            filter_subgroup="missingonly",
-                            **context,
-                        ),
-                        metric(pred, true, missing_only_mask),
+                        IMPUTE_METRIC_TAG_FORMAT.format(name=name, **context),
+                        metric_val,
                         **log_settings,
                     )
 
@@ -473,64 +472,81 @@ class AEDitto(pl.LightningModule):
     #######################
     def init_metrics(self, metrics):
         """
-        # Load the default, but they need to be initialized inside the module (during lightnignmodule.__init__).
-        Ref: https://github.com/Lightning-AI/lightning/issues/4909#issuecomment-736645699
         https://torchmetrics.readthedocs.io/en/stable/pages/overview.html#metrics-and-devices
         https://lightning.ai/forums/t/lightningmodule-init-vs-setup-method/147
-        torchmetrics and models themselves need to be initialized inside __init__ and inside moduledict/list if i want the internal states to be placed on the correct device
+        * torchmetrics and models themselves need to be initialized inside __init__ and inside moduledict/list if i want the internal states to be placed on the correct device
+        * with plightning, metric.reset() is called at the end of an epoch for me
+        * I need a separate metric per dataset split (https://torchmetrics.readthedocs.io/en/latest/pages/lightning.html#logging-torchmetrics)
         """
-        if metrics is None:  # RMSE, MAAPE, Accuracy x {cw, ew}
-            cwmetric_names = [("RMSE", RMSEMetric), ("MAAPE", MAAPEMetric)]
-            # we need separate metrics for each feature map for cw metrics
-            # since they depend on the number of features (which differs bc mapping)
-            feature_spaces = (
-                ["original", "mapped"]
-                if self.hparams.data_feature_space == "mapped"
-                else ["original"]
+        if metrics is None:
+            # separate metrics
+            # split -> filter subgroup -> reduction -> (?feature space) -> name -> fn
+            self.metrics = nn.ModuleDict(
+                {
+                    split: nn.ModuleDict(
+                        {
+                            filter_subgroup: self.get_reduction_metrics()
+                            for filter_subgroup in ["all", "missingonly"]
+                        }
+                    )
+                    for split in ["train_metrics", "val_metrics", "test_metrics"]
+                }
             )
 
-            cwmetrics = nn.ModuleDict(
-                {
-                    feature_space: nn.ModuleDict(
+        else:  # WARNING: if the metrics aren't initialized inside __init__ they may not be put on the correct device
+            self.metrics = metrics
+
+    def get_reduction_metrics(self) -> nn.ModuleDict:
+        """RMSE, MAAPE, (?Accuracy) x (?{original, mapped}) x {cw, ew}"""
+        cwmetric_names = [("RMSE", RMSEMetric), ("MAAPE", MAAPEMetric)]
+        # we need separate metrics for each feature map for cw metrics
+        # since they depend on the number of features (which differs bc mapping)
+        feature_spaces = (
+            ["original", "mapped"]
+            if self.hparams.data_feature_space == "mapped"
+            else ["original"]
+        )
+
+        cwmetrics = nn.ModuleDict(
+            {
+                feature_space: nn.ModuleDict(
+                    {
+                        name: metric(
+                            columnwise=True,
+                            nfeatures=self.hparams.nfeatures[feature_space],
+                        )
+                        for name, metric in cwmetric_names
+                    }
+                )
+                for feature_space in feature_spaces
+            }
+        )
+        # Add accuracy for number of bins correctly imputed if everything is discretized
+        # we don't care about element-wise categorical Accuracy
+        if self.hparams.feature_map == "discretize_continuous":
+            for feature_space in feature_spaces:
+                cwmetrics[feature_space].update(
+                    nn.ModuleDict(
                         {
-                            name: metric(
+                            "Accuracy": AccuracyMetric(
+                                self.get_col_idxs_by_type(
+                                    data_feature_space=feature_space,
+                                    feature_type="binary",
+                                ),
+                                self.get_col_idxs_by_type(
+                                    data_feature_space=feature_space,
+                                    feature_type="onehot",
+                                ),
                                 columnwise=True,
-                                nfeatures=self.hparams.nfeatures[feature_space],
                             ),
                         }
                     )
-                    for feature_space in feature_spaces
-                    for name, metric in cwmetric_names
-                }
-            )
-            # Add accuracy for number of bins correctly imputed if everything is discretized
-            # we don't care about element-wise categorical Accuracy
-            if self.hparams.feature_map == "discretize_continuous":
-                for feature_space in feature_spaces:
-                    cwmetrics[feature_space].update(
-                        nn.ModuleDict(
-                            {
-                                "Accuracy": AccuracyMetric(
-                                    self.get_col_idxs_by_type(
-                                        data_feature_space=feature_space,
-                                        feature_type="binary",
-                                    ),
-                                    self.get_col_idxs_by_type(
-                                        data_feature_space=feature_space,
-                                        feature_type="onehot",
-                                    ),
-                                    columnwise=True,
-                                ),
-                            }
-                        )
-                    )
-            ewmetrics = nn.ModuleDict({"RMSE": RMSEMetric(), "MAAPE": MAAPEMetric()})
-            # again, i can't even have ANY normal dicts here, it all has to be nn.moduledict/list, even wrappers
-            # EW: reduction -> moduledict(name -> fn)
-            # CW: reduction -> moduledict(feature_space -> moduledict(name -> fun))
-            self.metrics = nn.ModuleDict({"CW": cwmetrics, "EW": ewmetrics})
-        else:  # WARNING: if the metrics aren't initialized inside __init__ they may not be put on the correct device
-            self.metrics = metrics
+                )
+        ewmetrics = nn.ModuleDict({"RMSE": RMSEMetric(), "MAAPE": MAAPEMetric()})
+        # again, i can't even have ANY normal dicts here, it all has to be nn.moduledict/list, even wrappers
+        # EW: reduction -> moduledict(name -> fn)
+        # CW: reduction -> moduledict(feature_space -> moduledict(name -> fun))
+        return nn.ModuleDict({"CW": cwmetrics, "EW": ewmetrics})
 
     def set_col_idxs_by_type_as_buffers(
         self, col_idxs_by_type: Dict[str, Dict[str, List]]
@@ -890,7 +906,7 @@ class AEDitto(pl.LightningModule):
         2. sigmoid/softmax categorical columns only + threshold
         3. keep original values where it's not missing.
         """
-        # don't modify the original one passed in
+        # don't modify the original one passed in when inverting/etc
         pred = reconstruct_batch.clone()
         # get unmapped versions of everything
         if original_data is not None and original_ground_truth is not None:

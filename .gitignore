@@ -15,6 +15,7 @@ full/
 serialized_models/
 profiling-results/
 STATIC/
+model_viz/
 # serialized models
 *.pt
 # tflow

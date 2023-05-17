@@ -2,7 +2,7 @@ import unittest
 from argparse import Namespace
 from shutil import rmtree
 from typing import Dict, Optional, Union
-from unittest.mock import patch
+from unittest.mock import ANY, call, patch
 
 import numpy as np
 from numpy.random import default_rng
@@ -49,21 +49,17 @@ from autopopulus.test.common_mock_data import (
     y,
 )
 from autopopulus.test.utils import build_onehot_from_hypothesis, get_dataset_loader
-from autopopulus.utils.log_utils import get_serialized_model_path
+from autopopulus.utils.log_utils import (
+    IMPUTE_METRIC_TAG_FORMAT,
+    get_serialized_model_path,
+)
 from autopopulus.data.dataset_classes import SimpleDatasetLoader
 
 seed = 0
-standard = {
+basic_imputer_args = {
     "hidden_layers": [3, 2, 3],
     "learning_rate": 0.1,
     "seed": seed,
-}
-data_settings = {
-    "dataset_loader": get_dataset_loader(X["X"], y),
-    "seed": seed,
-    "val_test_size": 0.5,
-    "test_size": 0.5,
-    "batch_size": 2,
 }
 layer_dims = [6, 3, 2, 3, 6]
 EPSILON = 1e-10
@@ -102,115 +98,205 @@ def mock_training_step(self, batch, split):
         assert next(self.fc_mu.parameters()).is_cuda
         assert next(self.fc_var.parameters()).is_cuda
     # metric on gpu
-    for high_level_metrics in self.metrics.values():
-        if "original" in high_level_metrics:
-            high_level_metrics = high_level_metrics["original"]
-        elif "mapped" in high_level_metrics:
-            high_level_metrics = high_level_metrics["mapped"]
-        for metric in high_level_metrics.values():
-            assert metric.device == self.device
+    for split_level_metrics in self.metrics["train_metrics"].values():
+        for high_level_metrics in split_level_metrics.values():
+            if "original" in high_level_metrics:
+                high_level_metrics = high_level_metrics["original"]
+            elif "mapped" in high_level_metrics:
+                high_level_metrics = high_level_metrics["mapped"]
+            for metric in high_level_metrics.values():
+                assert metric.device == self.device
     return self.shared_step(batch, "train")[0]
 
 
 class TestAEImputer(unittest.TestCase):
-    @patch("autopopulus.data.dataset_classes.train_test_split")
-    def test_basic(self, mock_split):
-        mock_split.return_value = (X["X"].index, X["X"].index)
-        datamodule = CommonDataModule(**data_settings, scale=True)
-        aeimp = AEImputer(
-            **standard,
+    def setUp(self) -> None:
+        nsamples = len(X["X"])
+        rng = default_rng(seed)
+        y = pd.Series(rng.integers(0, 2, nsamples))  # random binary outcome
+        self.data_settings = {
+            "dataset_loader": get_dataset_loader(X["X"], y),
+            "seed": seed,
+            "val_test_size": 0.5,
+            "test_size": 0.5,
+            "batch_size": 2,
+        }
+        self.datamodule = CommonDataModule(**self.data_settings, scale=True)
+        self.aeimp = AEImputer(
+            **basic_imputer_args,
             replace_nan_with=0,
             max_epochs=3,
             num_gpus=0,
-            model_monitoring=True,
+            early_stopping=False,  # our logging is mocked so we won't have metrics
         )
-        # Turn off logging for testing
-        aeimp.trainer.loggers = [DummyLogger()] if aeimp.trainer.loggers else []
-        aeimp.fit(datamodule)
-        train_dataloader = datamodule.train_dataloader()
-        with self.subTest("Transform"):
-            df = aeimp.transform(train_dataloader)
+
+    @patch("autopopulus.data.dataset_classes.train_test_split")
+    def test_logging(self, mock_split):
+        mock_split.return_value = (X["X"].index, X["X"].index)
+        with self.subTest("No Feature Map"):
+            with patch("autopopulus.models.ae.LightningModule.log") as mock_log:
+                self.aeimp.fit(self.datamodule)  # rerun to be inside mock/patch
+                # this implicitly tests AEDitto:init_metrics()
+                for split in ["train", "val"]:
+                    mock_log.assert_any_call(
+                        IMPUTE_METRIC_TAG_FORMAT.format(
+                            name="loss",
+                            feature_space="original",  # no feature map
+                            filter_subgroup="all",
+                            reduction="NA",
+                            split=split,
+                        ),
+                        ANY,
+                        on_step=ANY,
+                        on_epoch=ANY,
+                        prog_bar=ANY,
+                        logger=ANY,
+                        rank_zero_only=ANY,
+                    )
+                for split in ["train", "val"]:
+                    for filter_subgroup in ["all", "missingonly"]:
+                        for reduction in ["CW", "EW"]:
+                            for metric in ["RMSE", "MAAPE"]:
+                                mock_log.assert_any_call(
+                                    IMPUTE_METRIC_TAG_FORMAT.format(
+                                        name=metric,
+                                        feature_space="original",
+                                        filter_subgroup=filter_subgroup,
+                                        reduction=reduction,
+                                        split=split,
+                                    ),
+                                    ANY,
+                                    on_step=ANY,
+                                    on_epoch=ANY,
+                                    prog_bar=ANY,
+                                    logger=ANY,
+                                    rank_zero_only=ANY,
+                                    # *[ANY for i in range(6)],
+                                )
+        with self.subTest("With Feature Map"):
+            with patch("autopopulus.models.ae.LightningModule.log") as mock_log:
+                datamodule = CommonDataModule(
+                    **self.data_settings,
+                    feature_map="discretize_continuous",
+                    uniform_prob=True,
+                    scale=True,
+                )
+                self.aeimp.ae_kwargs["lossn"] = "BCE"
+                self.aeimp.fit(datamodule)
+                # this implicitly tests AEDitto:init_metrics()
+                for split in ["train", "val"]:
+                    mock_log.assert_any_call(
+                        IMPUTE_METRIC_TAG_FORMAT.format(
+                            name="loss",
+                            feature_space="mapped",  # loss data isn't inverted
+                            filter_subgroup="all",
+                            reduction="NA",
+                            split=split,
+                        ),
+                        ANY,
+                        on_step=ANY,
+                        on_epoch=ANY,
+                        prog_bar=ANY,
+                        logger=ANY,
+                        rank_zero_only=ANY,
+                    )
+                for split in ["train", "val"]:
+                    for filter_subgroup in ["all", "missingonly"]:
+                        for reduction in ["CW", "EW"]:
+                            feature_spaces = ["original"]
+                            metrics = ["RMSE", "MAAPE"]
+                            if reduction == "CW":
+                                feature_spaces.append("mapped")
+                                metrics.append("Accuracy")
+                            for feature_space in feature_spaces:
+                                # disc -> accuracy
+                                for metric in metrics:
+                                    mock_log.assert_any_call(
+                                        IMPUTE_METRIC_TAG_FORMAT.format(
+                                            name=metric,
+                                            feature_space=feature_space,
+                                            filter_subgroup=filter_subgroup,
+                                            reduction=reduction,
+                                            split=split,
+                                        ),
+                                        ANY,
+                                        on_step=ANY,
+                                        on_epoch=ANY,
+                                        prog_bar=ANY,
+                                        logger=ANY,
+                                        rank_zero_only=ANY,
+                                        # *[ANY for i in range(6)],
+                                    )
+
+    @patch("autopopulus.data.dataset_classes.train_test_split")
+    def test_basic(self, mock_split):
+        mock_split.return_value = (X["X"].index, X["X"].index)
+        self.aeimp.fit(self.datamodule)
+        train_dataloader = self.datamodule.train_dataloader()
+        with self.subTest("Transform Function"):
+            df = self.aeimp.transform(train_dataloader)
 
             self.assertEqual(df.isna().sum().sum(), 0)
             # the dataset is transformed so the values shouldn't be the same but the shape, columns, index should
             assert_array_equal(df.index, X["X"].index)
             assert_array_equal(df.columns, X["X"].columns)
             self.assertEqual(df.shape, X["X"].shape)
+
         with self.subTest("Load checkpoint"):
             other_aeimp = AEImputer.from_checkpoint(
                 Namespace(
-                    **standard,
+                    **basic_imputer_args,
                     replace_nan_with=0,
                     max_epochs=3,
                     num_gpus=0,
+                    early_checkpointing=False,
                     method="whatever",
                 ),
                 get_serialized_model_path(f"AEDitto_STATIC", "pt"),
             )
-            aeimp.trainer.loggers = [DummyLogger()] if aeimp.trainer.loggers else []
             other_df = other_aeimp.transform(train_dataloader)
             pd.testing.assert_frame_equal(other_df, df)
-            self.assertEqual(other_aeimp.ae.hparams.keys(), aeimp.ae.hparams.keys())
+            self.assertEqual(
+                other_aeimp.ae.hparams.keys(), self.aeimp.ae.hparams.keys()
+            )
             for k in other_aeimp.ae.hparams:
                 item = other_aeimp.ae.hparams[k]
                 if isinstance(item, dict):
                     if isinstance(list(item.values())[0], pd.Index):
-                        self.assertEqual(item.keys(), aeimp.ae.hparams[k].keys())
+                        self.assertEqual(item.keys(), self.aeimp.ae.hparams[k].keys())
                         for inner_k in item:
                             pd.testing.assert_index_equal(
-                                item[inner_k], aeimp.ae.hparams[k][inner_k]
+                                item[inner_k], self.aeimp.ae.hparams[k][inner_k]
                             )
                     else:
-                        np.testing.assert_equal(item, aeimp.ae.hparams[k])
+                        np.testing.assert_equal(item, self.aeimp.ae.hparams[k])
                 elif isinstance(item, list):
-                    np.testing.assert_equal(item, aeimp.ae.hparams[k])
+                    np.testing.assert_equal(item, self.aeimp.ae.hparams[k])
                 else:
-                    np.testing.assert_equal(item, aeimp.ae.hparams[k])
+                    np.testing.assert_equal(item, self.aeimp.ae.hparams[k])
             self.assertDictEqual(
-                other_aeimp.ae.hidden_and_cell_state, aeimp.ae.hidden_and_cell_state
+                other_aeimp.ae.hidden_and_cell_state,
+                self.aeimp.ae.hidden_and_cell_state,
             )
             self.assertEqual(
-                str(other_aeimp.ae.state_dict()), str(aeimp.ae.state_dict())
+                str(other_aeimp.ae.state_dict()), str(self.aeimp.ae.state_dict())
             )
+        rmtree("whatever")
 
     @torch.no_grad()
     @patch("autopopulus.data.dataset_classes.train_test_split")
-    @settings(
-        suppress_health_check=[HealthCheck(3), HealthCheck.filter_too_much],
-        deadline=None,
-    )
-    @given(data_frames(columns=hypothesis["columns"]))
-    def test_data_transforms(self, mock_split, df):
+    def test_data_transforms(self, mock_split):
         """Can't set scale because I can't guarantee how the values will come back."""
-        assume(
-            np.array_equal(
-                df.nunique()[hypothesis["onehot_prefixes"]].values, np.array([4, 3])
-            )
-        )
-        onehot_df = build_onehot_from_hypothesis(df, hypothesis["onehot_prefixes"])
-
+        onehot_df = X["X"]
         mock_split.return_value = (onehot_df.index, onehot_df.index)
 
-        nsamples = len(df)
-        rng = default_rng(seed)
-        y = pd.Series(rng.integers(0, 2, nsamples))  # random binary outcome
-        settings = data_settings.copy()
-        settings["dataset_loader"] = SimpleDatasetLoader(
-            onehot_df,
-            y,
-            hypothesis["onehot"]["ctn_cols"],
-            hypothesis["onehot"]["cat_cols"],
-            hypothesis["onehot_prefixes"],
-        )
-
-        datamodule = CommonDataModule(**data_settings)
+        datamodule = CommonDataModule(**self.data_settings)
         aeimp = AEImputer(
-            **standard,
+            **basic_imputer_args,
             replace_nan_with=0,
             max_epochs=3,
             num_gpus=0,
         )
-        aeimp.trainer.loggers = [DummyLogger()] if aeimp.trainer.loggers else []
         aeimp.fit(datamodule)
         train_dataloader = datamodule.train_dataloader()
         res = aeimp.transform(train_dataloader)
@@ -219,7 +305,7 @@ class TestAEImputer(unittest.TestCase):
         )
         with self.subTest("discretize_continuous"):
             datamodule = CommonDataModule(
-                **data_settings,
+                **self.data_settings,
                 feature_map="discretize_continuous",
                 uniform_prob=True,
             )
@@ -233,7 +319,7 @@ class TestAEImputer(unittest.TestCase):
 
         with self.subTest("target_encode_categorical"):
             datamodule = CommonDataModule(
-                **data_settings,
+                **self.data_settings,
                 feature_map="target_encode_categorical",
             )
             aeimp.fit(datamodule)
@@ -245,25 +331,21 @@ class TestAEImputer(unittest.TestCase):
 
     @torch.no_grad()
     @unittest.skipUnless(torch.cuda.is_available(), "No GPU was detected")
-    @patch("autopopulus.data.dataset_classes.train_test_split")
     @patch.object(AEDitto, "training_step", mock_training_step)
+    @patch("autopopulus.data.dataset_classes.train_test_split")
     def test_device(self, mock_split):
         mock_split.return_value = (X["X"].index, X["X"].index)
-        datamodule = CommonDataModule(**data_settings, scale=True)
-
         aeimp = AEImputer(
-            **standard,
+            **basic_imputer_args,
             replace_nan_with=0,
             max_epochs=3,
-            num_gpus=1,  # check data, model, and metrics go on the gpu
+            num_gpus=1,  # ensure num_gpus is > 0 to check for cuda
+            early_stopping=False,  # our logging is mocked so we won't have metrics
         )
-        # Turn off logging for testing
-        aeimp.trainer.loggers = [DummyLogger()] if aeimp.trainer.loggers else []
-        aeimp.fit(datamodule)
-
+        aeimp.fit(self.datamodule)
         with self.subTest("discretize_continuous"):
             datamodule = CommonDataModule(
-                **data_settings,
+                **self.data_settings,
                 feature_map="discretize_continuous",
                 uniform_prob=True,
                 scale=True,
@@ -272,7 +354,7 @@ class TestAEImputer(unittest.TestCase):
             aeimp.fit(datamodule)
         with self.subTest("target_encode_categorical"):
             datamodule = CommonDataModule(
-                **data_settings,
+                **self.data_settings,
                 feature_map="target_encode_categorical",
                 scale=True,
             )
@@ -280,14 +362,13 @@ class TestAEImputer(unittest.TestCase):
 
             with self.subTest("VAE"):  # has additional layers, need ctn featuers
                 aeimp = AEImputer(
-                    **standard,
+                    **basic_imputer_args,
                     variational=True,
                     replace_nan_with=0,
                     max_epochs=3,
                     num_gpus=1,  # check data, model, and metrics go on the gpu
                 )
                 # Turn off logging for testing
-                aeimp.trainer.loggers = [DummyLogger()] if aeimp.trainer.loggers else []
                 aeimp.ae_kwargs["lossn"] = "MSE"
                 aeimp.fit(datamodule)
 
@@ -301,7 +382,7 @@ class TestAEDitto(unittest.TestCase):
         mock_onehot_column_threshold,
     ):
         ae = AEDitto(
-            **standard,
+            **basic_imputer_args,
             **get_data_args(),
             lossn="BCE",
         )
@@ -424,7 +505,7 @@ class TestAEDitto(unittest.TestCase):
 
     def test_vae(self):
         ae = AEDitto(
-            **standard,
+            **basic_imputer_args,
             **get_data_args(
                 col_idxs_set_empty=["categorical", "binary_vars", "onehot"],
             ),
@@ -462,7 +543,7 @@ class TestAEDitto(unittest.TestCase):
 
     def test_basic(self):
         ae = AEDitto(
-            **standard,
+            **basic_imputer_args,
             **get_data_args(
                 col_idxs_set_empty=["continuous", "categorical", "binary", "onehot"],
             ),
@@ -503,7 +584,7 @@ class TestAEDitto(unittest.TestCase):
 
         # Fractional hidden layer
         with self.subTest("Fractional hidden layer"):
-            new_settings = standard.copy()
+            new_settings = basic_imputer_args.copy()
             new_settings["hidden_layers"] = [0.6, 0.1, 0.05, 0.1, 0.6]
             ae = AEDitto(
                 **new_settings,
@@ -535,7 +616,7 @@ class TestAEDitto(unittest.TestCase):
         # Loss Test
         with self.subTest("Loss"):
             ae = AEDitto(
-                **standard,
+                **basic_imputer_args,
                 **get_data_args(),
                 lossn="BCE",
             )
@@ -545,7 +626,7 @@ class TestAEDitto(unittest.TestCase):
         # Dropout
         with self.subTest("Dropout"):
             ae = AEDitto(
-                **standard,
+                **basic_imputer_args,
                 **get_data_args(),
                 dropout=0.5,
             )
@@ -576,7 +657,7 @@ class TestAEDitto(unittest.TestCase):
 
     def test_longitudinal(self):
         ae = AEDitto(
-            **standard,
+            **basic_imputer_args,
             **get_data_args(),
             longitudinal=True,
         )
@@ -610,7 +691,7 @@ class TestAEDitto(unittest.TestCase):
     def test_dae(self):
         with self.subTest("Dropout Corruption"):
             ae = AEDitto(
-                **standard,
+                **basic_imputer_args,
                 **get_data_args(),
                 dropout_corruption=0.5,
             )
@@ -637,7 +718,7 @@ class TestAEDitto(unittest.TestCase):
 
         with self.subTest("Batchswap Corruption"):
             ae = AEDitto(
-                **standard,
+                **basic_imputer_args,
                 **get_data_args(),
                 batchswap_corruption=0.5,
             )
@@ -663,7 +744,7 @@ class TestAEDitto(unittest.TestCase):
 
         with self.subTest("Dropout and Batchswap Corruption"):
             ae = AEDitto(
-                **standard,
+                **basic_imputer_args,
                 **get_data_args(),
                 dropout_corruption=0.5,
                 batchswap_corruption=0.5,
