@@ -6,11 +6,13 @@ from autopopulus.data.constants import PAD_VALUE
 from autopopulus.utils.utils import rank_zero_print
 
 
-def detach_tensor(t: torch.Tensor, to_cpu: bool = False):
+def detach_tensor(
+    t: torch.Tensor, dtype: torch.dtype = torch.float, to_cpu: bool = False
+) -> torch.Tensor:
     t = t.detach()
     if to_cpu:
         t = t.cpu()
-    return t.float()
+    return t
 
 
 class BatchSwapNoise(nn.Module):
