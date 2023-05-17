@@ -2,7 +2,7 @@ from argparse import ArgumentParser
 from math import ceil
 import sys
 from typing import Callable, List, Dict, Any, Optional, Tuple, Union
-from pandas import Index
+from pandas import DataFrame, Index
 from torchmetrics import Metric
 from numpy import array
 
@@ -34,8 +34,8 @@ from autopopulus.models.utils import (
 from autopopulus.data.transforms import (
     get_invert_discretize_tensor_args,
     get_invert_target_encode_tensor_args,
-    invert_target_encoding_tensor,
-    invert_discretize_tensor,
+    invert_discretize_tensor_gpu,
+    invert_target_encoding_tensor_gpu,
     list_to_tensor,
     simple_impute_tensor,
 )
@@ -95,10 +95,12 @@ class AEDitto(pl.LightningModule):
         seed: int,
         # Data hps # TODO: type hint data hps better
         nfeatures: Dict[str, int],
-        groupby: Dict,
+        # groupby: Dict,  # todo i dont think i need this
         columns: Dict[str, Dict[str, Index]],
         discretizations: Dict,
-        inverse_target_encode_map: Dict[str, Dict],
+        inverse_target_encode_map: Dict[
+            str, Dict[str, DataFrame]
+        ],  # map/ordinal map -> bincol -> index=category names, vals=numerical encodings
         feature_map: str,
         data_feature_space: str,  # original/mapped
         col_idxs_by_type: Dict[str, Dict[str, List]],  # orig/map-> {cat/ctn -> idxs}
@@ -135,8 +137,9 @@ class AEDitto(pl.LightningModule):
         self.set_feature_map_inversion(self.hparams.feature_map)
         # everythign below here should create attributes that will go into the state dict
         self.validate_args()
-        self.init_metrics(metrics)
+        # this needs to come before init metrics
         self.set_col_idxs_by_type_as_buffers(col_idxs_by_type)
+        self.init_metrics(metrics)
         self._model_creation()
 
     #######################
@@ -421,6 +424,10 @@ class AEDitto(pl.LightningModule):
         """Log all metrics whether cat/ctn."""
         # NOTE: if you add too many metrics it will mess up the progress bar
         for reduction, moduledict in self.metrics.items():
+            # EW is reduction -> metric
+            # CW is reduction -> feature space -> metric
+            if data_feature_space in moduledict:
+                moduledict = moduledict[data_feature_space]
             for name, metric in moduledict.items():
                 context = {
                     "split": split,
@@ -473,68 +480,54 @@ class AEDitto(pl.LightningModule):
         torchmetrics and models themselves need to be initialized inside __init__ and inside moduledict/list if i want the internal states to be placed on the correct device
         """
         if metrics is None:  # RMSE, MAAPE, Accuracy x {cw, ew}
+            cwmetric_names = [("RMSE", RMSEMetric), ("MAAPE", MAAPEMetric)]
+            # we need separate metrics for each feature map for cw metrics
+            # since they depend on the number of features (which differs bc mapping)
+            feature_spaces = (
+                ["original", "mapped"]
+                if self.hparams.data_feature_space == "mapped"
+                else ["original"]
+            )
+
+            cwmetrics = nn.ModuleDict(
+                {
+                    feature_space: nn.ModuleDict(
+                        {
+                            name: metric(
+                                columnwise=True,
+                                nfeatures=self.hparams.nfeatures[feature_space],
+                            ),
+                        }
+                    )
+                    for feature_space in feature_spaces
+                    for name, metric in cwmetric_names
+                }
+            )
             # Add accuracy for number of bins correctly imputed if everything is discretized
             # we don't care about element-wise categorical Accuracy
             if self.hparams.feature_map == "discretize_continuous":
-                cwmetrics = nn.ModuleDict(
-                    {
-                        "RMSE": RMSEMetric(
-                            columnwise=True,
-                            nfeatures=self.hparams.nfeatures[
-                                self.hparams.data_feature_space
-                            ],
-                        ),
-                        "MAAPE": MAAPEMetric(
-                            columnwise=True,
-                            nfeatures=self.hparams.nfeatures[
-                                self.hparams.data_feature_space
-                            ],
-                        ),
-                        # accuracies need to be separate since the feature space/cols are different
-                        "Accuracy-original": AccuracyMetric(
-                            self.get_col_idxs_by_type(
-                                data_feature_space="original",
-                                feature_type="binary",
-                            ),
-                            self.get_col_idxs_by_type(
-                                data_feature_space="original",
-                                feature_type="onehot",
-                            ),
-                            columnwise=True,
-                        ),
-                        "Accuracy-mapped": AccuracyMetric(
-                            self.get_col_idxs_by_type(
-                                data_feature_space="mapped",
-                                feature_type="binary",
-                            ),
-                            self.get_col_idxs_by_type(
-                                data_feature_space="mapped",
-                                feature_type="onehot",
-                            ),
-                            columnwise=True,
-                        ),
-                    }
-                )
-            else:
-                cwmetrics = nn.ModuleDict(
-                    {
-                        "RMSE": RMSEMetric(
-                            columnwise=True,
-                            nfeatures=self.hparams.nfeatures[
-                                self.hparams.data_feature_space
-                            ],
-                        ),
-                        "MAAPE": MAAPEMetric(
-                            columnwise=True,
-                            nfeatures=self.hparams.nfeatures[
-                                self.hparams.data_feature_space
-                            ],
-                        ),
-                    }
-                )
+                for feature_space in feature_spaces:
+                    cwmetrics[feature_space].update(
+                        nn.ModuleDict(
+                            {
+                                "Accuracy": AccuracyMetric(
+                                    self.get_col_idxs_by_type(
+                                        data_feature_space=feature_space,
+                                        feature_type="binary",
+                                    ),
+                                    self.get_col_idxs_by_type(
+                                        data_feature_space=feature_space,
+                                        feature_type="onehot",
+                                    ),
+                                    columnwise=True,
+                                ),
+                            }
+                        )
+                    )
             ewmetrics = nn.ModuleDict({"RMSE": RMSEMetric(), "MAAPE": MAAPEMetric()})
             # again, i can't even have ANY normal dicts here, it all has to be nn.moduledict/list, even wrappers
-            # reduction -> moduledict(name -> fn)
+            # EW: reduction -> moduledict(name -> fn)
+            # CW: reduction -> moduledict(feature_space -> moduledict(name -> fun))
             self.metrics = nn.ModuleDict({"CW": cwmetrics, "EW": ewmetrics})
         else:  # WARNING: if the metrics aren't initialized inside __init__ they may not be put on the correct device
             self.metrics = metrics
@@ -610,17 +603,19 @@ class AEDitto(pl.LightningModule):
         """Lambdas are not pickle-able for checkpointing, so dynamically set."""
         # Safe to assume "mapped" key exists for these feature maps
         if feature_map == "discretize_continuous":
-            self.feature_map_inversion = lambda data_tensor: invert_discretize_tensor(
-                data_tensor,
-                **get_invert_discretize_tensor_args(
-                    self.hparams.discretizations["data"],
-                    self.hparams.columns["original"],
-                    self.device,
-                ),
+            self.feature_map_inversion = (
+                lambda data_tensor: invert_discretize_tensor_gpu(
+                    data_tensor,
+                    **get_invert_discretize_tensor_args(
+                        self.hparams.discretizations["data"],
+                        self.hparams.columns["original"],
+                        self.device,
+                    ),
+                )
             )
         elif feature_map == "target_encode_categorical":
             self.feature_map_inversion = (
-                lambda data_tensor: invert_target_encoding_tensor(
+                lambda data_tensor: invert_target_encoding_tensor_gpu(
                     data_tensor,
                     **get_invert_target_encode_tensor_args(
                         self.hparams.inverse_target_encode_map["mapping"],
