@@ -17,7 +17,11 @@
 ## Testing
 The tests use `hypothesis`, which can be finicky.
 If it cannot satisfy asssumptions, just try running that individual test again.
-Maybe even try running another test and then run that test.
+Maybe even try running another test and then run that test, sometimes it refreshes the cache and you end up with different inputs that might crash your test.
+
+We also use `coverage` for test coverage.
+Run it: `coverage run -m unittest discover`
+Get report: `coverage report` or `coverage html`. Add `-i` to ignore errors.
 
 ## Dev Structure
 These are files I can use to run experiments/etc without them being tracked as part of the projecct.
@@ -78,6 +82,9 @@ mamba env update -n $env_name -f $env_file
 
 You might see `AttributeError: module 'typing' has no attribute '_ClassVar'`, in which case [`pip uninstall dataclasses`](https://github.com/ray-project/tune-sklearn/issues/181#issuecomment-782598003).
 
+
+## Technology
+We use pytorch-lightning. Important tips and tricks [here](https://lightning.ai/docs/pytorch/stable/advanced/speed.html).
 # Experiments
 If you want to add new imputers:
   - add the name to the `guild.yml` options for method under the `imputer` operation.
