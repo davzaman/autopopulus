@@ -29,9 +29,7 @@ from autopopulus.data.transforms import (
     invert_discretize_tensor_gpu,
     invert_target_encoding_tensor_gpu,
     list_to_tensor,
-    invert_target_encoding_tensor,
     UniformProbabilityAcrossNans,
-    invert_discretize_tensor,
     simple_impute_tensor,
 )
 from autopopulus.test.common_mock_data import hypothesis, seed
@@ -40,7 +38,6 @@ from autopopulus.test.utils import (
     create_fake_disc_data,
     mock_disc_data,
 )
-from autopopulus.models.ae import AEDitto
 
 
 def unpack_tuples(nested_tuples):
@@ -188,9 +185,14 @@ class TestTransforms(unittest.TestCase):
             ).fit(disc_data, None)
             # grabs the range strings and replaces with the mean
             # find each number, split into list, convert ot float, average
-            bin_means = enc.transform(disc_data).applymap(
-                lambda s: sum([float(v) for v in re.findall(f"((?:\d*\.)?\d+)", s)]) / 2
-            )
+            bin_mean_lookup = {
+                col: {i: np.mean(cut) for i, cut in enumerate(cuts)}
+                for col, cuts in zip(
+                    hypothesis["ctn_cols"], hypothesis["disc_ctn"]["cuts"]
+                )
+            }
+
+            bin_means = enc.transform(disc_data).replace(bin_mean_lookup)
             # plop into df
             mocked_df = onehot_df.copy()
             mocked_df[hypothesis["onehot"]["ctn_cols"]] = bin_means
@@ -346,9 +348,14 @@ class TestTransforms(unittest.TestCase):
             ).fit(disc_data, None)
             # grabs the range strings and replaces with the mean
             # find each number, split into list, convert ot float, average
-            bin_means = enc.transform(disc_data).applymap(
-                lambda s: sum([float(v) for v in re.findall(f"((?:\d*\.)?\d+)", s)]) / 2
-            )
+            bin_mean_lookup = {
+                col: {i: np.mean(cut) for i, cut in enumerate(cuts)}
+                for col, cuts in zip(
+                    hypothesis["ctn_cols"], hypothesis["disc_ctn"]["cuts"]
+                )
+            }
+
+            bin_means = enc.transform(disc_data).replace(bin_mean_lookup)
             # plop into df
             mocked_df = df.copy()
             mocked_df[hypothesis["ctn_cols"]] = bin_means
@@ -599,15 +606,6 @@ class TestTransforms(unittest.TestCase):
         torch.testing.assert_close(
             undiscretized_tensor, true_tensor, check_dtype=False, equal_nan=True
         )
-        undiscretized_tensor = invert_discretize_tensor(
-            df,
-            disc_groupby=disc_groupby,
-            discretizations=map_dict,
-            orig_columns=true_columns,
-        )
-        torch.testing.assert_close(
-            undiscretized_tensor, true_tensor, check_dtype=False, equal_nan=True
-        )
 
     def _test_invert_target_encode(
         self,
@@ -640,23 +638,6 @@ class TestTransforms(unittest.TestCase):
         )
         np.testing.assert_allclose(
             unencoded_tensor, torch.tensor(true_df.values), atol=1
-        )
-        unencoded_tensor = invert_target_encoding_tensor(
-            torch.tensor(enc.transform(df, y).values),
-            {
-                "inverse_transform": enc.ordinal_encoder.inverse_transform,
-                "mapping": {
-                    df.columns.get_loc(col): col_mapping.to_dict()
-                    for col, col_mapping in enc.mapping.items()
-                },
-            },
-            df.columns,
-            orig_cols,
-            combined_onehots_groupby,
-        )
-        # rounding error with float point in torch?
-        np.testing.assert_allclose(
-            unencoded_tensor, torch.tensor(true_df.values).float(), atol=1
         )
 
 
