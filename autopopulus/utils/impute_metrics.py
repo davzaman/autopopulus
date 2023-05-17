@@ -12,6 +12,14 @@ from autopopulus.data.constants import PAD_VALUE
 
 EPSILON = 1e-10
 
+"""
+NOTE: for all metrics, I have checked with my test suite that
+setting `full_state_update` to False and True both gives the same result,
+therefore I am setting them all to False for optimization.
+https://torchmetrics.readthedocs.io/en/latest/pages/implement.html#internal-implementation-details
+If the metrics change they might have to be checked again.
+"""
+
 
 class MAAPEMetric(Metric):
     """
