@@ -1010,7 +1010,10 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
             target_encoder = data_pipeline.named_steps["target_encode_categorical"]
             # TODO: should there be data and ground_truth?
             self.inverse_target_encode_map = {
-                "mapping": target_encoder.mapping,  # Dict[str, DataFrame]
+                "mapping": {  # get rid of "handle missing"/"handle unknown" categories, it will make the number of categories misalign when inverting
+                    k: v.drop([-1, -2], axis=0)
+                    for k, v in target_encoder.mapping.items()
+                },  # Dict[str, DataFrame]
                 "ordinal_mapping": target_encoder.ordinal_encoder.mapping,  # List[Dict[str, Union[str, DataFrame, dtype]]]
             }
 
@@ -1089,17 +1092,22 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
             split_data = {k: v[split] for k, v in self.splits.items()}
         else:  # apply transform beforehand on the entire split
             split_data = {}
-            for data_feature_space in self.transforms.keys():  # ["original", "mapped"]
+            data_feature_spaces = ["original"]
+            if self.feature_map is not None:
+                data_feature_spaces.append("mapped")
+            for data_feature_space in data_feature_spaces:  # ["original", "mapped"]
                 split_data[data_feature_space] = {}
                 for (
                     data_role,
                     split_dfs,
                 ) in self.splits.items():  # ["data", "ground_truth"]
-                    if data_role != "label":
-                        # apply transform to particular split
-                        split_data[data_feature_space][data_role] = self.transforms[
-                            data_feature_space
-                        ][data_role](split_dfs[split])
+                    if data_role != "label":  # apply transform to particular split
+                        if self.transforms is not None:
+                            split_data[data_feature_space][data_role] = self.transforms[
+                                data_feature_space
+                            ][data_role](split_dfs[split])
+                        else:
+                            split_data[data_feature_space][data_role] = split_dfs[split]
 
         return self._create_dataloader(split_data, apply_transform_adhoc)
 
