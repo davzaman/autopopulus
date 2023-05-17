@@ -29,7 +29,7 @@ from autopopulus.test.utils import (
     get_dataset_loader,
     mock_disc_data,
 )
-from data.utils import onehot_multicategorical_column
+from autopopulus.data.utils import onehot_multicategorical_column
 
 standard = {
     # "dataset_loader": get_dataset_loader(X["X"], y),

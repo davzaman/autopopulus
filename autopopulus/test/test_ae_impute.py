@@ -1,23 +1,37 @@
-from argparse import Namespace
-from typing import Dict, Optional, Union
 import unittest
+from argparse import Namespace
+from shutil import rmtree
+from typing import Dict, Optional, Union
 from unittest.mock import patch
-import numpy as np
-import torch
 
-from torch.autograd import Variable
+import numpy as np
+from numpy.random import default_rng
+from numpy.testing import assert_array_equal
+import pandas as pd
+
+
+from hypothesis import HealthCheck, assume, given, settings
+from hypothesis import strategies as st
+from hypothesis.extra.pandas import data_frames
+
+
+from pytorch_lightning.loggers.logger import DummyLogger
+
+import torch
 import torch.nn as nn
-from torch import Generator, nan_to_num, rand, randn, tensor, isnan, long as torch_long
+from torch import Generator, isnan
+from torch import long as torch_long
+from torch import nan_to_num, rand, randn, tensor
+from torch.autograd import Variable
 from torch.nn.modules.dropout import Dropout
 from torch.nn.modules.loss import BCEWithLogitsLoss, MSELoss
 from torch.testing import assert_allclose
-from pytorch_lightning.loggers.base import DummyLogger
 
-import pandas as pd
-from numpy.testing import assert_array_equal
-
-from autopopulus.models.ap import AEImputer
+from autopopulus.data import CommonDataModule
+from autopopulus.data.constants import PAD_VALUE
+from autopopulus.data.transforms import list_to_tensor
 from autopopulus.models.ae import AEDitto
+from autopopulus.models.ap import AEImputer
 from autopopulus.models.dnn import ResetSeed
 from autopopulus.models.utils import (
     BatchSwapNoise,
@@ -28,17 +42,15 @@ from autopopulus.models.utils import (
 )
 from autopopulus.test.common_mock_data import (
     X,
-    y,
-    columns,
     col_idxs_by_type,
-    groupby,
+    columns,
+    hypothesis,
     seed,
+    y,
 )
-from autopopulus.test.utils import get_dataset_loader
-from autopopulus.data import CommonDataModule
-from autopopulus.data.constants import PAD_VALUE
-from autopopulus.data.transforms import list_to_tensor
+from autopopulus.test.utils import build_onehot_from_hypothesis, get_dataset_loader
 from autopopulus.utils.log_utils import get_serialized_model_path
+from autopopulus.data.dataset_classes import SimpleDatasetLoader
 
 seed = 0
 standard = {
@@ -59,7 +71,6 @@ EPSILON = 1e-10
 
 def get_data_args(
     col_idxs_set_empty: Optional[Dict] = None,
-    groupby_set_empty: Optional[Dict] = None,
 ) -> Dict[str, Union[str, Dict]]:
     res = {
         "data_feature_space": "original",
@@ -71,7 +82,6 @@ def get_data_args(
                 for k, v in col_idxs_by_type["original"].items()
             }
         },
-        "groupby": groupby,
         "columns": {"original": columns["columns"]},
         "discretizations": None,
         "inverse_target_encode_map": None,
@@ -79,10 +89,6 @@ def get_data_args(
     if col_idxs_set_empty is not None:
         for key in col_idxs_set_empty:
             res["col_idxs_by_type"]["original"][key] = []
-
-    if groupby_set_empty is not None:
-        for key in groupby_set_empty:
-            res["groupby"]["original"][key] = {}
     return res
 
 
@@ -97,6 +103,10 @@ def mock_training_step(self, batch, split):
         assert next(self.fc_var.parameters()).is_cuda
     # metric on gpu
     for high_level_metrics in self.metrics.values():
+        if "original" in high_level_metrics:
+            high_level_metrics = high_level_metrics["original"]
+        elif "mapped" in high_level_metrics:
+            high_level_metrics = high_level_metrics["mapped"]
         for metric in high_level_metrics.values():
             assert metric.device == self.device
     return self.shared_step(batch, "train")[0]
@@ -108,7 +118,11 @@ class TestAEImputer(unittest.TestCase):
         mock_split.return_value = (X["X"].index, X["X"].index)
         datamodule = CommonDataModule(**data_settings, scale=True)
         aeimp = AEImputer(
-            **standard, replace_nan_with=0, max_epochs=3, num_gpus=0, method="whatever"
+            **standard,
+            replace_nan_with=0,
+            max_epochs=3,
+            num_gpus=0,
+            model_monitoring=True,
         )
         # Turn off logging for testing
         aeimp.trainer.loggers = [DummyLogger()] if aeimp.trainer.loggers else []
@@ -133,6 +147,7 @@ class TestAEImputer(unittest.TestCase):
                 ),
                 get_serialized_model_path(f"AEDitto_STATIC", "pt"),
             )
+            aeimp.trainer.loggers = [DummyLogger()] if aeimp.trainer.loggers else []
             other_df = other_aeimp.transform(train_dataloader)
             pd.testing.assert_frame_equal(other_df, df)
             self.assertEqual(other_aeimp.ae.hparams.keys(), aeimp.ae.hparams.keys())
@@ -157,11 +172,81 @@ class TestAEImputer(unittest.TestCase):
             self.assertEqual(
                 str(other_aeimp.ae.state_dict()), str(aeimp.ae.state_dict())
             )
-            # TODO: remove serialized stuff
+
+    @torch.no_grad()
+    @patch("autopopulus.data.dataset_classes.train_test_split")
+    @settings(
+        suppress_health_check=[HealthCheck(3), HealthCheck.filter_too_much],
+        deadline=None,
+    )
+    @given(data_frames(columns=hypothesis["columns"]))
+    def test_data_transforms(self, mock_split, df):
+        """Can't set scale because I can't guarantee how the values will come back."""
+        assume(
+            np.array_equal(
+                df.nunique()[hypothesis["onehot_prefixes"]].values, np.array([4, 3])
+            )
+        )
+        onehot_df = build_onehot_from_hypothesis(df, hypothesis["onehot_prefixes"])
+
+        mock_split.return_value = (onehot_df.index, onehot_df.index)
+
+        nsamples = len(df)
+        rng = default_rng(seed)
+        y = pd.Series(rng.integers(0, 2, nsamples))  # random binary outcome
+        settings = data_settings.copy()
+        settings["dataset_loader"] = SimpleDatasetLoader(
+            onehot_df,
+            y,
+            hypothesis["onehot"]["ctn_cols"],
+            hypothesis["onehot"]["cat_cols"],
+            hypothesis["onehot_prefixes"],
+        )
+
+        datamodule = CommonDataModule(**data_settings)
+        aeimp = AEImputer(
+            **standard,
+            replace_nan_with=0,
+            max_epochs=3,
+            num_gpus=0,
+        )
+        aeimp.trainer.loggers = [DummyLogger()] if aeimp.trainer.loggers else []
+        aeimp.fit(datamodule)
+        train_dataloader = datamodule.train_dataloader()
+        res = aeimp.transform(train_dataloader)
+        pd.testing.assert_frame_equal(  # ignore nans in comparison
+            res.where(~onehot_df.isna(), onehot_df), onehot_df, check_dtype=False
+        )
+        with self.subTest("discretize_continuous"):
+            datamodule = CommonDataModule(
+                **data_settings,
+                feature_map="discretize_continuous",
+                uniform_prob=True,
+            )
+            aeimp.ae_kwargs["lossn"] = "BCE"
+            aeimp.fit(datamodule)
+            train_dataloader = datamodule.train_dataloader()
+            res = aeimp.transform(train_dataloader)
+            pd.testing.assert_frame_equal(  # ignore nans in comparison
+                res.where(~onehot_df.isna(), onehot_df), onehot_df, check_dtype=False
+            )
+
+        with self.subTest("target_encode_categorical"):
+            datamodule = CommonDataModule(
+                **data_settings,
+                feature_map="target_encode_categorical",
+            )
+            aeimp.fit(datamodule)
+            train_dataloader = datamodule.train_dataloader()
+            res = aeimp.transform(train_dataloader)
+            pd.testing.assert_frame_equal(  # ignore nans in comparison
+                res.where(~onehot_df.isna(), onehot_df), onehot_df, check_dtype=False
+            )
 
     @torch.no_grad()
     @unittest.skipUnless(torch.cuda.is_available(), "No GPU was detected")
     @patch("autopopulus.data.dataset_classes.train_test_split")
+    @patch.object(AEDitto, "training_step", mock_training_step)
     def test_device(self, mock_split):
         mock_split.return_value = (X["X"].index, X["X"].index)
         datamodule = CommonDataModule(**data_settings, scale=True)
@@ -174,12 +259,37 @@ class TestAEImputer(unittest.TestCase):
         )
         # Turn off logging for testing
         aeimp.trainer.loggers = [DummyLogger()] if aeimp.trainer.loggers else []
-        # TODO how do i ensure it's on the correct device with a unittest?
-        # I need to test for the feature map inversions as  well
-        with patch.object(AEDitto, "training_step", mock_training_step):
-            aeimp.fit(datamodule)
-        # just run it to see if anything i missed
         aeimp.fit(datamodule)
+
+        with self.subTest("discretize_continuous"):
+            datamodule = CommonDataModule(
+                **data_settings,
+                feature_map="discretize_continuous",
+                uniform_prob=True,
+                scale=True,
+            )
+            aeimp.ae_kwargs["lossn"] = "BCE"
+            aeimp.fit(datamodule)
+        with self.subTest("target_encode_categorical"):
+            datamodule = CommonDataModule(
+                **data_settings,
+                feature_map="target_encode_categorical",
+                scale=True,
+            )
+            aeimp.fit(datamodule)
+
+            with self.subTest("VAE"):  # has additional layers, need ctn featuers
+                aeimp = AEImputer(
+                    **standard,
+                    variational=True,
+                    replace_nan_with=0,
+                    max_epochs=3,
+                    num_gpus=1,  # check data, model, and metrics go on the gpu
+                )
+                # Turn off logging for testing
+                aeimp.trainer.loggers = [DummyLogger()] if aeimp.trainer.loggers else []
+                aeimp.ae_kwargs["lossn"] = "MSE"
+                aeimp.fit(datamodule)
 
 
 class TestAEDitto(unittest.TestCase):
@@ -317,7 +427,6 @@ class TestAEDitto(unittest.TestCase):
             **standard,
             **get_data_args(
                 col_idxs_set_empty=["categorical", "binary_vars", "onehot"],
-                groupby_set_empty=["categorical_onehots", "binary"],
             ),
             variational=True,
             lossn="MSE",
@@ -356,7 +465,6 @@ class TestAEDitto(unittest.TestCase):
             **standard,
             **get_data_args(
                 col_idxs_set_empty=["continuous", "categorical", "binary", "onehot"],
-                groupby_set_empty=["categorical_onehots", "binary_vars"],
             ),
             lossn="BCE",
         )

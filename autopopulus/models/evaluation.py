@@ -3,7 +3,7 @@ from pickle import dump
 from numpy import percentile
 from scipy.stats import sem, t, shapiro
 
-from pytorch_lightning.core.lightning import LightningModule
+from pytorch_lightning.core import LightningModule
 from pytorch_lightning.trainer.trainer import Trainer
 from pytorch_lightning.callbacks import Callback
 from torch import Tensor, cat, sort

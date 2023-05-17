@@ -4,7 +4,7 @@ from typing import Optional, Union, Dict
 import numpy as np
 import pandas as pd
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
-from pytorch_lightning.loggers.base import LightningLoggerBase
+from pytorch_lightning.loggers import Logger
 
 #### Pytorch ####
 import torch
@@ -53,7 +53,7 @@ class DNNClassifier(ClassifierMixin, BaseEstimator):
         lr: float = 1e-3,
         l2_penalty: float = 1e-4,
         dropout: float = 0.5,
-        logger: Optional[LightningLoggerBase] = None,
+        logger: Optional[Logger] = None,
     ):
         self.input_dim = input_dim
         self.max_epochs = max_epochs
@@ -197,7 +197,8 @@ class DNNLightning(pl.LightningModule):
 
     def shared_logging_step_end(self, outputs: Dict[str, float], step_type: str):
         """Log metrics + loss at end of step.
-        Compatible with dp mode: https://pytorch-lightning.readthedocs.io/en/latest/metrics.html#classification-metrics."""
+        Compatible with dp mode: https://pytorch-lightning.readthedocs.io/en/latest/metrics.html#classification-metrics.
+        """
         # Log loss
         self.info(
             f"DNN/{step_type}-loss",

@@ -15,10 +15,11 @@ from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.utilities.rank_zero import rank_zero_only
 from pytorch_lightning.utilities.rank_zero import LightningDeprecationWarning
 from pytorch_lightning.callbacks import Callback
-from pytorch_lightning.profiler import Profiler
+from pytorch_lightning.profilers import Profiler
 from pytorch_lightning.strategies.strategy import Strategy
-from pytorch_lightning.loggers.base import LightningLoggerBase
+from pytorch_lightning.loggers import Logger
 
+# from pl_bolts.callbacks import ModuleDataMonitor, BatchGradientVerificationCallback
 
 warnings.filterwarnings(action="ignore", category=LightningDeprecationWarning)
 
@@ -29,6 +30,7 @@ from autopopulus.utils.log_utils import (
     AutoencoderLogger,
     get_serialized_model_path,
 )
+from autopopulus.models.callbacks import VisualizeModelCallback
 from autopopulus.data import CommonDataModule
 from autopopulus.data.types import DataTypeTimeDim
 from autopopulus.data.constants import PATIENT_ID, TIME_LEVEL
@@ -49,12 +51,13 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         self,
         max_epochs: int = 100,
         patience: int = 7,
-        logger: Optional[LightningLoggerBase] = None,
+        logger: Optional[Logger] = None,
         tune_callback: Optional[Callback] = None,
-        strategy: Optional[Strategy] = None,
+        strategy: Strategy = "auto",
         trial_num: Optional[int] = None,
         runtest: bool = False,
         fast_dev_run: int = None,
+        model_monitoring: bool = False,
         profiler: Optional[Union[str, Profiler]] = None,
         num_gpus: int = 1,
         num_nodes: int = 1,
@@ -65,6 +68,7 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         self.profiler = profiler
         self.trial_num = trial_num
         self.fast_dev_run = fast_dev_run
+        self.model_monitoring = model_monitoring
         self.num_gpus = num_gpus
         self.num_nodes = num_nodes
         self.runtest = runtest
@@ -82,9 +86,10 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
             self.max_epochs,
             self.num_nodes,
             self.num_gpus,
-            self.fast_dev_run,
-            tune_callback,
-            strategy,
+            fast_dev_run=self.fast_dev_run,
+            model_monitoring=self.model_monitoring,
+            tune_callback=tune_callback,
+            strategy=strategy,
             profiler=self.profiler,
         )
         self.inference_trainer = self.create_trainer(
@@ -97,21 +102,23 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
             # Ref: https://github.com/PyTorchLightning/pytorch-lightning/discussions/12906
             num_gpus=1 if self.num_gpus else 0,
             fast_dev_run=self.fast_dev_run,
+            model_monitoring=self.model_monitoring,
             tune_callback=None,  # No tuning since we're testing
-            strategy=None,
+            strategy=strategy,
             profiler=self.profiler,
         )
 
     @staticmethod
     def create_trainer(
-        logger: LightningLoggerBase,
+        logger: Logger,
         patience: int,
         max_epochs: int,
         num_nodes: Optional[int] = None,
         num_gpus: Optional[int] = None,
         fast_dev_run: Optional[bool] = None,
+        model_monitoring: bool = False,
         tune_callback: Optional[Callback] = None,
-        strategy: Optional[Strategy] = None,
+        strategy: Strategy = "auto",
         profiler: Optional[Union[str, Profiler]] = None,
     ) -> pl.Trainer:
         callbacks = [
@@ -129,8 +136,15 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
             ),
         ]
 
+        if model_monitoring:
+            callbacks += [
+                # BatchGradientVerificationCallback(),
+                # ModuleDataMonitor(submodules=True),
+                VisualizeModelCallback(),
+            ]
+
         # https://github.com/PyTorchLightning/pytorch-lightning/discussions/6761#discussioncomment-1152286
-        if strategy is None:
+        if strategy == "auto":
             # Use DDP if there's more than 1 GPU, otherwise, it's not necessary.
             strategy = "ddp_find_unused_parameters_false" if num_gpus > 1 else None
             accelerator = "gpu" if num_gpus else "cpu"
@@ -239,14 +253,12 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         """
         return {
             "nfeatures": data.nfeatures,
-            "groupby": data.groupby,
+            # "groupby": data.groupby,  # TODO: remove, AEDitto doesn't use this anymore (but still necessary for preproc)
             "columns": data.columns,
             "discretizations": data.discretizations,
             "inverse_target_encode_map": data.inverse_target_encode_map,
             "feature_map": data.feature_map,
-            # TODO: is there a difference between this and the batch has mapped in shared_step?
             "data_feature_space": "mapped" if "mapped" in data.groupby else "original",
-            # used for BCE+MSE los, -> cat cols the VAE Loss,etc which require tensor
             # We still need this if we're loading the ae from a file and not calling fit
             "col_idxs_by_type": data.col_idxs_by_type,
         }
@@ -338,5 +350,11 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
             type=int,
             default=0,
             help="Debugging: limits number of batches for train/val/test on deep learning model.",
+        )
+        p.add_argument(
+            "--model-monitoring",
+            type=bool,
+            default=False,
+            help="Adds callbacks to the trainer to monitor the gradient and data passed to the model amongst other checks.",
         )
         return p
