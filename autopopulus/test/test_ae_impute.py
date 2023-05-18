@@ -1,7 +1,7 @@
 import unittest
 from argparse import Namespace
 from shutil import rmtree
-from typing import Dict, Optional, Union
+from typing import Dict, List, Optional, Tuple, Union
 from unittest.mock import ANY, call, patch
 
 import numpy as np
@@ -30,7 +30,7 @@ from torch.testing import assert_allclose
 from autopopulus.data import CommonDataModule
 from autopopulus.data.constants import PAD_VALUE
 from autopopulus.data.transforms import list_to_tensor
-from autopopulus.models.ae import AEDitto
+from autopopulus.models.ae import COL_IDXS_BY_TYPE_FORMAT, AEDitto
 from autopopulus.models.ap import AEImputer
 from autopopulus.models.dnn import ResetSeed
 from autopopulus.models.utils import (
@@ -47,8 +47,13 @@ from autopopulus.test.common_mock_data import (
     hypothesis,
     seed,
     y,
+    discretization,
 )
-from autopopulus.test.utils import build_onehot_from_hypothesis, get_dataset_loader
+from autopopulus.test.utils import (
+    build_onehot_from_hypothesis,
+    get_dataset_loader,
+    mock_disc_data,
+)
 from autopopulus.utils.log_utils import (
     IMPUTE_METRIC_TAG_FORMAT,
     get_serialized_model_path,
@@ -322,6 +327,7 @@ class TestAEImputer(unittest.TestCase):
                 **self.data_settings,
                 feature_map="target_encode_categorical",
             )
+            aeimp.ae_kwargs["lossn"] = "MSE"
             aeimp.fit(datamodule)
             train_dataloader = datamodule.train_dataloader()
             res = aeimp.transform(train_dataloader)
@@ -358,6 +364,7 @@ class TestAEImputer(unittest.TestCase):
                 feature_map="target_encode_categorical",
                 scale=True,
             )
+            aeimp.ae_kwargs["lossn"] = "MSE"
             aeimp.fit(datamodule)
 
             with self.subTest("VAE"):  # has additional layers, need ctn featuers
@@ -369,8 +376,166 @@ class TestAEImputer(unittest.TestCase):
                     num_gpus=1,  # check data, model, and metrics go on the gpu
                 )
                 # Turn off logging for testing
-                aeimp.ae_kwargs["lossn"] = "MSE"
                 aeimp.fit(datamodule)
+
+    @patch(
+        "autopopulus.data.mdl_discretization.MDLDiscretizer.get_discretized_MDL_data"
+    )
+    @patch("autopopulus.data.mdl_discretization.MDLDiscretizer.bin_ranges_as_tuples")
+    @patch("autopopulus.data.dataset_classes.train_test_split")
+    def test_ae_init(self, mock_split, mock_disc_cuts, mock_MDL):
+        """
+        Let AEDitto take care of testing for model creation testing.
+        Here we're concerned with making sure what AEditto receives from AEImputer/the data is correct.
+        Looking at: feature_map_inversion, col_idxs_by_type, and metrics.
+        """
+        mock_split.return_value = (X["X"].index, X["X"].index)
+        self.aeimp.fit(self.datamodule)
+        self.assertIsNone(self.aeimp.ae.feature_map_inversion)
+        self._test_set_col_idxs_by_type(
+            self.aeimp.ae,
+            [
+                ("original", "binary"),
+                ("original", "onehot"),
+                ("original", "continuous"),
+            ],
+        )
+        metrics = self.aeimp.ae.metrics
+        self.assertEqual(
+            list(metrics.keys()), ["train_metrics", "val_metrics", "test_metrics"]
+        )
+        for split_moduledict in metrics.values():
+            self.assertEqual(list(split_moduledict.keys()), ["all", "missingonly"])
+            for subgroup_moduledict in split_moduledict.values():
+                self.assertEqual(list(subgroup_moduledict.keys()), ["CW", "EW"])
+                for reduction, reduction_moduledict in subgroup_moduledict.items():
+                    if reduction == "CW":
+                        self.assertEqual(
+                            list(reduction_moduledict.keys()), ["original"]
+                        )
+                        for leaf_metrics in reduction_moduledict.values():
+                            self.assertEqual(
+                                list(leaf_metrics.keys()), ["RMSE", "MAAPE"]
+                            )
+                    else:
+                        self.assertEqual(
+                            list(reduction_moduledict.keys()), ["RMSE", "MAAPE"]
+                        )
+
+        with self.subTest("discretize_continuous"):
+            mock_disc_cuts.return_value = discretization["cuts"]
+            mock_disc_data(mock_MDL, X["disc"], y)
+            datamodule = CommonDataModule(
+                **self.data_settings,
+                feature_map="discretize_continuous",
+            )
+            self.aeimp.ae_kwargs["lossn"] = "BCE"
+            self.aeimp.fit(datamodule)
+            self.assertIsNotNone(self.aeimp.ae.feature_map_inversion)
+            # f^-1(f(x)) = x, we should get the original data back
+            train_dataloader = next(iter(datamodule.train_dataloader()))
+            assert_allclose(  # cat cols should match values and order
+                self.aeimp.ae.feature_map_inversion(train_dataloader["mapped"]["data"])[
+                    :, col_idxs_by_type["original"]["categorical"]
+                ],
+                train_dataloader["original"]["data"][
+                    :, col_idxs_by_type["original"]["categorical"]
+                ],
+                equal_nan=True,
+            )
+            self._test_set_col_idxs_by_type(
+                self.aeimp.ae,
+                [
+                    (data_feature_space, feature_type)
+                    for data_feature_space in ["original", "mapped"]
+                    for feature_type in ["binary", "onehot", "continuous"]
+                ],
+            )
+            metrics = self.aeimp.ae.metrics
+            self.assertEqual(
+                list(metrics.keys()), ["train_metrics", "val_metrics", "test_metrics"]
+            )
+            for split_moduledict in metrics.values():
+                self.assertEqual(list(split_moduledict.keys()), ["all", "missingonly"])
+                for subgroup_moduledict in split_moduledict.values():
+                    self.assertEqual(list(subgroup_moduledict.keys()), ["CW", "EW"])
+                    for reduction, reduction_moduledict in subgroup_moduledict.items():
+                        if reduction == "CW":
+                            self.assertEqual(
+                                list(reduction_moduledict.keys()),
+                                ["original", "mapped"],
+                            )
+                            for leaf_metrics in reduction_moduledict.values():
+                                self.assertEqual(
+                                    list(leaf_metrics.keys()),
+                                    ["RMSE", "MAAPE", "Accuracy"],
+                                )
+                        else:
+                            self.assertEqual(
+                                list(reduction_moduledict.keys()), ["RMSE", "MAAPE"]
+                            )
+        with self.subTest("target_encode_categorical"):
+            datamodule = CommonDataModule(
+                **self.data_settings,
+                feature_map="target_encode_categorical",
+            )
+            self.aeimp.ae_kwargs["lossn"] = "MSE"
+            self.aeimp.fit(datamodule)
+            self.assertIsNotNone(self.aeimp.ae.feature_map_inversion)
+            train_dataloader = next(iter(datamodule.train_dataloader()))
+            # we can't compare the mapped columns bc the inversion is inexact
+            assert_allclose(  # ctn cols should be equal and in order
+                self.aeimp.ae.feature_map_inversion(train_dataloader["mapped"]["data"])[
+                    :, col_idxs_by_type["original"]["continuous"]
+                ],
+                train_dataloader["original"]["data"][
+                    :, col_idxs_by_type["original"]["continuous"]
+                ],
+                equal_nan=True,
+            )
+            self._test_set_col_idxs_by_type(
+                self.aeimp.ae,
+                [
+                    (data_feature_space, feature_type)
+                    for data_feature_space in ["original", "mapped"]
+                    for feature_type in ["binary", "onehot", "continuous"]
+                ],
+            )
+            metrics = self.aeimp.ae.metrics
+            self.assertEqual(
+                list(metrics.keys()), ["train_metrics", "val_metrics", "test_metrics"]
+            )
+            for split_moduledict in metrics.values():
+                self.assertEqual(list(split_moduledict.keys()), ["all", "missingonly"])
+                for subgroup_moduledict in split_moduledict.values():
+                    self.assertEqual(list(subgroup_moduledict.keys()), ["CW", "EW"])
+                    for reduction, reduction_moduledict in subgroup_moduledict.items():
+                        if reduction == "CW":
+                            self.assertEqual(
+                                list(reduction_moduledict.keys()),
+                                ["original", "mapped"],
+                            )
+                            for leaf_metrics in reduction_moduledict.values():
+                                self.assertEqual(  # no accuracy bc target_encode
+                                    list(leaf_metrics.keys()), ["RMSE", "MAAPE"]
+                                )
+                        else:
+                            self.assertEqual(
+                                list(reduction_moduledict.keys()), ["RMSE", "MAAPE"]
+                            )
+
+    def _test_set_col_idxs_by_type(
+        self, model: AEDitto, feature_space_and_type_pairs: List[Tuple[str, str]]
+    ):
+        for data_feature_space, feature_type in feature_space_and_type_pairs:
+            self.assertTrue(
+                hasattr(
+                    model,
+                    COL_IDXS_BY_TYPE_FORMAT.format(
+                        data_feature_space=data_feature_space, feature_type=feature_type
+                    ),
+                )
+            )
 
 
 class TestAEDitto(unittest.TestCase):
