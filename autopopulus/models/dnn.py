@@ -14,7 +14,7 @@ import pytorch_lightning as pl
 
 from sklearn.base import BaseEstimator, ClassifierMixin
 
-from autopopulus.models.utils import ResetSeed
+from autopopulus.models.torch_model_utils import ResetSeed
 
 ## Debugging/Running dnn.py separately ##
 """

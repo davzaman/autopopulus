@@ -109,6 +109,10 @@ for dataset in datasets:
                 "method": cli_str(imputer_groups[method]),
                 "dataset": cli_str(dataset),
             }
+            # bootstrap evaluate the baseline models no matter what
+            # manually pick the AE models to bootstrap eval later
+            if method in imputer_groups["baseline"]:
+                command_args["bootstrap_eval_imputer"] = cli_str(True)
             # Added to the end if the conditions are met otherwise nothing happens
             if method == "ae":
                 command_args = {

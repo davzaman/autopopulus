@@ -160,7 +160,7 @@ def binary_column_threshold(
     """
     Apply sigmoid and threshold to the given columns.
     NOTE: modifies tensor in place as well.
-    The wrapper function is tested.
+    These are tested through their nn.module wrappers.
     """
     longitudinal = len(X.shape) == 3
     if bin_col_idxs.numel() > 0:
@@ -182,6 +182,7 @@ def onehot_column_threshold(
     Apply log-softmax, get numerical encoded bin, and explode back to onehot.
     NOTE: modifies tensor in place as well.
     The wrapper function is tested.
+    These are tested through their nn.module wrappers.
     """
     longitudinal = len(X.shape) == 3
     for onehot_group in onehot_cols_idx:

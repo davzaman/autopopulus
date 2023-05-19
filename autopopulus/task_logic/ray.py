@@ -18,10 +18,6 @@ from ray.tune.integration.pytorch_lightning import (
     TuneReportCallback as raytune_TuneReportCallback,
 )
 
-from ray_lightning import RayStrategy
-from ray_lightning.tune import TuneReportCallback as raylightning_TuneReportCallback
-from ray_lightning.tune import get_tune_resources
-
 # Local
 from autopopulus.utils.log_utils import (
     IMPUTE_METRIC_TAG_FORMAT,
@@ -154,31 +150,9 @@ def run_tune(
         strategy = None  # no custom strategy, use pl defaults
 
         resources_per_trial = {"cpu": ncpu_per_gpu, "gpu": args.n_gpus_per_trial}
-    else:  # Tune requires 1 extra CPU per trial to use for the Trainable driver.
-        # ray_lightning won't call setup automatically in pl.Trainer (idk why)
-        # manually call it ourselves once, fixes the problem
-        data.setup("fit")
-        # trainer needs to see num_gpus 0 or else it will complain
-        # the GPUs WILL be used though.
-        # You can expect to see `GPU available: False`
-        # Followed by: (RayExecutor pid=3938) GPU available: True (cuda), used: True (Please ignore the previous info [GPU used: False]).
-        args.num_gpus = 0  # https://github.com/ray-project/ray_lightning/issues/64
-
-        # Set callback and strat
-        callback = raylightning_TuneReportCallback
-        strategy = RayStrategy(
-            num_workers=args.n_gpus_per_trial,  # Actual number of GPUs determined by num_workers
-            num_cpus_per_worker=ncpu_per_gpu,
-            use_gpu=True,
-        )
-
-        # Get resources per trial
-        resources_per_trial = get_tune_resources(
-            num_workers=args.n_gpus_per_trial,
-            num_cpus_per_worker=ncpu_per_gpu,
-            use_gpu=True,
-        )
-
+    else:
+        # TODO: upgrade to ray 2.4.0
+        print("Not implemented yet")
     metrics = [
         IMPUTE_METRIC_TAG_FORMAT.format(
             name="loss",

@@ -22,7 +22,7 @@ from torch.nn.utils.rnn import pack_padded_sequence, PackedSequence, pad_packed_
 from pytorch_lightning import LightningModule
 from lightning_utilities.core.apply_func import apply_to_collection
 
-from autopopulus.models.utils import (
+from autopopulus.models.torch_model_utils import (
     CtnCatLoss,
     BatchSwapNoise,
     ReconstructionKLDivergenceLoss,

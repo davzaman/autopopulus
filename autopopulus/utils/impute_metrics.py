@@ -1,6 +1,7 @@
 from re import I
 from deprecated import deprecated
-from typing import Any, Callable, Iterable, List, Optional
+from typing import Any, Callable, Iterable, List, Optional, Tuple, Union
+from lightning_utilities import apply_to_collection
 import numpy as np
 import pandas as pd
 import torch
@@ -8,6 +9,7 @@ from torchmetrics import Metric
 from math import pi
 
 from autopopulus.data.constants import PAD_VALUE
+from autopopulus.data.utils import enforce_numpy, enforce_tensor
 
 
 EPSILON = 1e-10
@@ -246,12 +248,14 @@ def universal_metric(metric: Metric) -> Callable:
     """Functional version of the torchmetric so I can use it on sklearn models."""
 
     def apply_metric(
-        predicted: torch.Tensor,
-        target: torch.Tensor,
-        missing_indictors: Optional[torch.Tensor] = None,
+        predicted: Union[pd.DataFrame, torch.Tensor],
+        target: Union[pd.DataFrame, torch.Tensor],
+        missing_indictors: Optional[Union[pd.DataFrame, torch.Tensor]] = None,
     ) -> float:
-        metric.update(predicted, target, missing_indictors)
-        return metric.compute()
+        metric.update(*enforce_tensor(predicted, target, missing_indictors))
+        value = metric.compute()
+        metric.reset()
+        return value
 
     return apply_metric
 

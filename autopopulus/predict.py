@@ -3,9 +3,9 @@ import pickle as pk
 
 
 from autopopulus.models.prediction_models import Predictor
-from utils.get_set_cli_args import init_cli_args, load_cli_args
+from autopopulus.utils.get_set_cli_args import init_cli_args, load_cli_args
 from autopopulus.utils.utils import rank_zero_print, seed_everything
-from utils.log_utils import BasicLogger
+from autopopulus.utils.log_utils import BasicLogger
 
 
 def main():

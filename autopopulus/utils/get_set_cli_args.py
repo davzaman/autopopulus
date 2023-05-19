@@ -131,21 +131,6 @@ def init_cli_args() -> Namespace:
         default=False,
         help="Do bootstrap sampling to produce a distribution of metrics on the test set for autoencoder imputers.",
     )
-    # For MICE
-    p.add_argument(
-        "--mice-num-iterations",
-        type=int,
-        required="mice" in sys.argv or "--method=miceforest" in sys.argv,
-        default=50,
-        help="When using the mice imputer, you need to set how many datsets to complete.",
-    )  # sklearn
-    p.add_argument(
-        "--mice-njobs",
-        type=int,
-        required="miceforest" in sys.argv,
-        default=32,
-        help="When using miceforest for mice imputation, set the number of jobs for parallelization.",
-    )
 
     #### PREDICTION ####
     p = Predictor.add_prediction_args(p)

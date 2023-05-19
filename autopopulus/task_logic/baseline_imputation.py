@@ -1,8 +1,10 @@
 from argparse import Namespace
-from typing import Dict
+from typing import Dict, Optional
 from pandas import DataFrame
 import numpy as np
+from numpy.random import default_rng
 from torch import isnan, tensor
+from tqdm import tqdm
 
 # Local
 from autopopulus.utils.log_utils import IMPUTE_METRIC_TAG_FORMAT, BasicLogger
@@ -10,7 +12,7 @@ from autopopulus.task_logic import (
     baseline_static_imputation,
     baseline_longitudinal_imputation,
 )
-from autopopulus.utils.utils import rank_zero_print
+from autopopulus.utils.utils import rank_zero_print, resample_indices_only
 from autopopulus.data import CommonDataModule
 from autopopulus.utils.impute_metrics import MAAPEMetric, RMSEMetric, universal_metric
 
@@ -38,69 +40,78 @@ def baseline_imputation_logic(
     ):  # Logging here if baseline experiment (not fully observed)
         log = BasicLogger(args=args, experiment_name=args.experiment_name)
         # if args.fully_observed:
-        log_baseline_imputation_performance(imputed_data, data, log)
+        metrics = [
+            {
+                "name": "RMSE",
+                "fn": universal_metric(
+                    RMSEMetric(columnwise=true, nfeatures=data.nfeatures)
+                ),
+                "reduction": "CW",
+            },
+            {"name": "RMSE", "fn": universal_metric(RMSEMetric()), "reduction": "EW"},
+            {"name": "MAAPE", "fn": universal_metric(MAAPEMetric()), "reduction": "EW"},
+        ]
+        for split, imputed_data in imputed_data.items():
+            est = imputed_data
+
+            true = data.splits["ground_truth"][split]
+            # if the original dataset contains nans and we're not filtering to fully observed, need to fill in ground truth too for metric computation
+            ground_truth_non_missing_mask = ~np.isnan(true)
+            true = true.where(ground_truth_non_missing_mask, est)
+
+            orig = data.splits["data"][split]
+            if isinstance(orig, DataFrame):
+                orig = tensor(orig.values)
+            missing_mask = isnan(orig).bool()
+            if args.bootstrap_eval_imputer and split == "test":
+                gen = default_rng(args.seed)
+                for b in tqdm(range(args.num_bootstraps)):
+                    bootstrap_indices = resample_indices_only(len(true), gen)
+                    log_baseline_imputation_performance(
+                        est[bootstrap_indices],
+                        true[bootstrap_indices],
+                        missing_mask[bootstrap_indices],
+                        split,
+                        metrics,
+                        log,
+                        global_step=b,
+                    )
+            else:
+                log_baseline_imputation_performance(
+                    est, true, missing_mask, split, metrics, log
+                )
         log.close()
 
     return imputed_data
 
 
 def log_baseline_imputation_performance(
-    results: Dict[str, DataFrame],
-    data: CommonDataModule,
+    est,
+    true,
+    missing_mask,
+    split: str,
+    metrics,
     log: BasicLogger,
+    global_step: Optional[int] = None,
 ):
     """For a given imputation method, logs the performance for the following metrics (matches AE). Assumes results are in order: train, val, test."""
-    metrics = [
-        {
-            "name": "RMSE",
-            "fn": universal_metric(
-                RMSEMetric(columnwise=true, nfeatures=data.nfeatures)
-            ),
-            "reduction": "CW",
-        },
-        {"name": "RMSE", "fn": universal_metric(RMSEMetric()), "reduction": "EW"},
-        {"name": "MAAPE", "fn": universal_metric(MAAPEMetric()), "reduction": "EW"},
-    ]
-    for split, imputed_data in results.items():
-        est = imputed_data
-
-        true = data.splits["ground_truth"][split]
-        # if the original dataset contains nans and we're not filtering to fully observed, need to fill in ground truth too for metric computation
-        ground_truth_non_missing_mask = ~np.isnan(true)
-        true = true.where(ground_truth_non_missing_mask, est)
-
-        orig = data.splits["data"][split]
-        if isinstance(orig, DataFrame):
-            orig = tensor(orig.values)
-        missing_mask = isnan(orig).bool()
-
-        # START HERE
-        for metric in metrics.items():
-            val = metric["fn"](est, true)
-            val_missing_only = metric["fn"](est, true, missing_mask)
-            rank_zero_print(
-                f"{metric['name']}: {val}.\n Missing cols only, {metric['name']}: {val_missing_only}"
-            )
+    # START HERE
+    for metric in metrics.items():
+        for filter_subgroup in ["all", "missingonly"]:
+            args = [est, true]
+            if filter_subgroup == "missingonly":
+                args.append(missing_mask)
+            val = metric["fn"](*args)
+            rank_zero_print(f"{metric['name']} ({filter_subgroup}): {val}.")
             log.add_scalar(
                 val,
                 metric["name"],
+                global_step=global_step,
                 context={
                     "step": "impute",
                     "split": split,
                     "feature_space": "original",
-                    "filter_subgroup": "all",
-                    "reduction": metric["reduction"],
-                },
-                tb_name_format=IMPUTE_METRIC_TAG_FORMAT,
-            )
-            log.add_scalar(
-                val_missing_only,
-                metric["name"],
-                context={
-                    "step": "impute",
-                    "split": split,
-                    "feature_space": "original",
-                    "filter_subgroup": "missingonly",
+                    "filter_subgroup": filter_subgroup,
                     "reduction": metric["reduction"],
                 },
                 tb_name_format=IMPUTE_METRIC_TAG_FORMAT,

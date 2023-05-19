@@ -2,6 +2,7 @@ from typing import Callable, List, Union
 from pandas import DataFrame, MultiIndex, Series, Index, get_dummies
 from numpy import ndarray, nan
 from torch import Tensor
+import torch
 from torch.utils.data import DataLoader, TensorDataset
 
 from autopopulus.data.types import DataT
@@ -19,9 +20,18 @@ def explode_nans(X: DataFrame, onehot_groups_idxs: List[List[int]]) -> DataFrame
     return X
 
 
-def enforce_numpy(df: DataT) -> ndarray:
+def enforce_tensor(*df: DataT, enforce_numeric: bool = True) -> Tensor:
+    return (
+        torch.from_numpy(enforce_numpy(data)) if data is not None else None
+        for data in df
+    )
+
+
+def enforce_numpy(df: DataT, enforce_numeric: bool = True) -> ndarray:
     # enforce numpy is numeric with df*1 (fixes bools)
-    return (df * 1).values if isinstance(df, DataFrame) else (df * 1)
+    if enforce_numeric:
+        df = df * 1
+    return df.values if isinstance(df, DataFrame) else df
 
 
 def get_samples_from_index(index: Index) -> ndarray:

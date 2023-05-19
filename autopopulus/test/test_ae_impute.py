@@ -33,7 +33,7 @@ from autopopulus.data.transforms import list_to_tensor
 from autopopulus.models.ae import COL_IDXS_BY_TYPE_FORMAT, AEDitto
 from autopopulus.models.ap import AEImputer
 from autopopulus.models.dnn import ResetSeed
-from autopopulus.models.utils import (
+from models.torch_model_utils import (
     BatchSwapNoise,
     BinColumnThreshold,
     CtnCatLoss,
@@ -375,6 +375,7 @@ class TestAEImputer(unittest.TestCase):
                     max_epochs=3,
                     num_gpus=1,  # check data, model, and metrics go on the gpu
                 )
+                aeimp.ae_kwargs["lossn"] = "MSE"
                 # Turn off logging for testing
                 aeimp.fit(datamodule)
 
