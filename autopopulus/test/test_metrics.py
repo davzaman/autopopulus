@@ -840,6 +840,7 @@ class TestStaticOnehotCategoricalMetrics(unittest.TestCase):
 
         tensor_df = torch.tensor(df.values)
 
+        onehot_group = hypothesis["onehot"]["onehot_cols_idx"][0]
         missing_indicators = torch.ones_like(tensor_df).to(bool)
         missing_indicators[0, onehot_group] = False
         with self.subTest("All Equal"):
@@ -856,7 +857,6 @@ class TestStaticOnehotCategoricalMetrics(unittest.TestCase):
 
         with self.subTest("Observed Not Equal"):
             error_df = df.copy()
-            onehot_group = hypothesis["onehot"]["onehot_cols_idx"][0]
             error_df = self.make_onehot_error(
                 df, error_df, sample_idx=0, onehot_group=onehot_group
             )
