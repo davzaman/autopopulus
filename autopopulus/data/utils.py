@@ -21,10 +21,15 @@ def explode_nans(X: DataFrame, onehot_groups_idxs: List[List[int]]) -> DataFrame
 
 
 def enforce_tensor(*df: DataT, enforce_numeric: bool = True) -> Tensor:
-    return (
-        torch.from_numpy(enforce_numpy(data)) if data is not None else None
-        for data in df
-    )
+    def cases(data: DataT):
+        if data is None:
+            return None
+        elif isinstance(data, Tensor):
+            return data
+        else:
+            return torch.from_numpy(enforce_numpy(data, enforce_numeric))
+
+    return (cases(data) for data in df)
 
 
 def enforce_numpy(df: DataT, enforce_numeric: bool = True) -> ndarray:

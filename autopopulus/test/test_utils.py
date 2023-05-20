@@ -110,6 +110,9 @@ class TestTunableEstimator(unittest.TestCase):
         with self.assertRaises(AttributeError):
             imputer.predict_proba(datamodule.splits["data"]["train"])
 
+        # make sure this runs no errors
+        imputer.transform(datamodule.splits["data"]["train"])
+
     @patch("autopopulus.data.dataset_classes.train_test_split")
     # _fit_and_score calls _score in _validation
     @patch.object(_search, "_fit_and_score", wraps=_search._fit_and_score)
@@ -167,3 +170,7 @@ class TestTunableEstimator(unittest.TestCase):
         # should not transform since KNN imputer is a predictor
         with self.assertRaises(AttributeError):
             imputer.transform(datamodule.splits["data"]["train"])
+
+        # make sure these run no error
+        imputer.predict(datamodule.splits["data"]["train"])
+        imputer.predict_proba(datamodule.splits["data"]["train"])

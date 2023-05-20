@@ -44,7 +44,14 @@ def baseline_imputation_logic(
             {
                 "name": "RMSE",
                 "fn": universal_metric(
-                    RMSEMetric(columnwise=true, nfeatures=data.nfeatures)
+                    RMSEMetric(columnwise=True, nfeatures=data.nfeatures["original"])
+                ),
+                "reduction": "CW",
+            },
+            {
+                "name": "RMSE",
+                "fn": universal_metric(
+                    MAAPEMetric(columnwise=True, nfeatures=data.nfeatures["original"])
                 ),
                 "reduction": "CW",
             },
@@ -60,17 +67,17 @@ def baseline_imputation_logic(
             true = true.where(ground_truth_non_missing_mask, est)
 
             orig = data.splits["data"][split]
-            if isinstance(orig, DataFrame):
-                orig = tensor(orig.values)
-            missing_mask = isnan(orig).bool()
+            # if isinstance(orig, DataFrame):
+            #     orig = tensor(orig.values)
+            missing_mask = orig.isna()
             if args.bootstrap_eval_imputer and split == "test":
                 gen = default_rng(args.seed)
                 for b in tqdm(range(args.num_bootstraps)):
                     bootstrap_indices = resample_indices_only(len(true), gen)
                     log_baseline_imputation_performance(
-                        est[bootstrap_indices],
-                        true[bootstrap_indices],
-                        missing_mask[bootstrap_indices],
+                        est.iloc[bootstrap_indices],
+                        true.iloc[bootstrap_indices],
+                        missing_mask.iloc[bootstrap_indices],
                         split,
                         metrics,
                         log,
@@ -96,13 +103,12 @@ def log_baseline_imputation_performance(
 ):
     """For a given imputation method, logs the performance for the following metrics (matches AE). Assumes results are in order: train, val, test."""
     # START HERE
-    for metric in metrics.items():
+    for metric in metrics:
         for filter_subgroup in ["all", "missingonly"]:
             args = [est, true]
             if filter_subgroup == "missingonly":
                 args.append(missing_mask)
             val = metric["fn"](*args)
-            rank_zero_print(f"{metric['name']} ({filter_subgroup}): {val}.")
             log.add_scalar(
                 val,
                 metric["name"],

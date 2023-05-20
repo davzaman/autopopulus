@@ -4,7 +4,7 @@ from typing import Dict
 
 import miceforest as mf
 import pandas as pd
-from joblib import dump
+from cloudpickle import dump
 
 ## Sklearn
 # Required for IterativeImputer, as it's experimental
@@ -42,7 +42,8 @@ def simple(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
     # nothing to tune
     imputer = SimpleImpute(data.dataset_loader.continuous_cols)
     imputer.fit(data.splits["data"]["train"])
-    dump(imputer, get_serialized_model_path("simple"))
+    with open(get_serialized_model_path("simple"), "wb") as f:
+        dump(imputer, f)
     return {  # impute data
         split: imputer.transform(data.splits["data"][split])
         for split in ["train", "val", "test"]
@@ -55,13 +56,15 @@ def knn(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
         BASELINE_IMPUTER_MODEL_PARAM_GRID["knn"],
         score_fn=TransformScorer(
             universal_metric(  # sync with tuning metric for ae
-                MAAPEMetric(columnwise=True, nfeatures=data.nfeatures)
+                MAAPEMetric(columnwise=True, nfeatures=data.nfeatures["original"])
             ),
             higher_is_better=False,
         ),
     )
     imputer.fit(data.splits["data"])
-    dump(imputer, get_serialized_model_path("knn"))
+    # need to pickle with cloudpickle bc score_fn is lambda
+    with open(get_serialized_model_path("knn"), "wb") as f:
+        dump(imputer, f)
     return {
         # Add columns back in (sklearn erases) for rmse for missing only columns
         split: pd.DataFrame(
@@ -80,13 +83,14 @@ def mice(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
         BASELINE_IMPUTER_MODEL_PARAM_GRID["mice"],
         score_fn=TransformScorer(
             universal_metric(  # sync with tuning metric for ae
-                MAAPEMetric(columnwise=True, nfeatures=data.nfeatures)
+                MAAPEMetric(columnwise=True, nfeatures=data.nfeatures["original"])
             ),
             higher_is_better=False,
         ),
     )
     imputer.fit(data.splits["data"])
-    dump(imputer, get_serialized_model_path("knn"))
+    with open(get_serialized_model_path("mice"), "wb") as f:
+        dump(imputer, f)
     return {
         # Add columns back in (sklearn erases) for rmse for missing only columns
         split: pd.DataFrame(

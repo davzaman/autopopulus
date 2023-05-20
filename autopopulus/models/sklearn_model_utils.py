@@ -10,13 +10,28 @@ from pandas import DataFrame, concat
 
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.model_selection import GridSearchCV, PredefinedSplit
-from sklearn.model_selection._search import _estimator_has
+from sklearn.model_selection._search import _check_refit
 from sklearn.multiclass import available_if
 from sklearn.utils import resample
 from sklearn.utils.validation import check_is_fitted
 from sklearn.metrics._scorer import _cached_call, _BaseScorer
 
 from autopopulus.utils.utils import rank_zero_print
+
+
+def _estimator_has(attr):
+    # simplified version of sklearn fn that works for my wrapped clas
+    def check(self):
+        _check_refit(self.cv, attr)
+        if hasattr(self.cv, "best_estimator_"):
+            # raise an AttributeError if `attr` does not exist
+            getattr(self.cv.best_estimator_, attr)
+            return True
+        # raise an AttributeError if `attr` does not exist
+        getattr(self.cv.estimator, attr)
+        return True
+
+    return check
 
 
 class TransformScorer:
