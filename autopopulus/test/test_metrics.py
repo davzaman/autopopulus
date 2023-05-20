@@ -24,6 +24,31 @@ from autopopulus.data.transforms import list_to_tensor
 WITHIN = 6
 
 
+"""
+Tests are Organized as:
+class FeatureSpace_FeatureType:
+    - no mask
+        - all equal
+            compare metric(df, df)
+        - 1 error in 1 column
+            compare metric(error_df, df)
+    - mask
+        === All share missing indicator, but not error_df ===
+        - all equal
+            compare metric(df, df, missing_indicator)
+        - observed (ignored) value not equal
+            compare metric(error_df, df, missing_indicator)
+        - observed (ignored) and missing (calculated) value not equal
+            compare metric(error_df, df, missing_indicator)
+    - mask nomissing (the error_df can mirror the obs+missing neq example)
+        === All share error_df, but not missing indictor ===
+        - no missing values at all
+            compare metric(error_df, df, missing_indicator)
+        - only 1 column missing (calculated), the rest observed (ignored)
+            compare metric(error_df, df, missing_indicator)
+"""
+
+
 def batched_input_equals(self, metric, *inputs):
     """
     Assume the metric on the whole dataset is correct,
@@ -91,15 +116,14 @@ class TestStaticMulticatContinuousMetrics(unittest.TestCase):
             tensor_df = torch.tensor(df.values)
             self.setup_metrics(df)
 
-            for metric in self.metrics_list:
-                self.assertAlmostEqual(
-                    0, metric(tensor_df, tensor_df).item(), places=WITHIN
-                )
-                self.batched_input_equals(metric, tensor_df, tensor_df)
-            for metric in self.torch_metrics:
-                metric.reset()
-
-            ctn_col_idx = hypothesis["ctn_cols_idx"][0]
+            with self.subTest("All Equal"):
+                for metric in self.metrics_list:
+                    self.assertAlmostEqual(
+                        0, metric(tensor_df, tensor_df).item(), places=WITHIN
+                    )
+                    self.batched_input_equals(metric, tensor_df, tensor_df)
+                for metric in self.torch_metrics:
+                    metric.reset()
 
             # Now if they dont exactly equal each other
             with self.subTest("Not Equal 1 Error in 1 Column"):
@@ -107,24 +131,30 @@ class TestStaticMulticatContinuousMetrics(unittest.TestCase):
                 error_df = df.copy()
                 diff = 6
                 # subtraction happens in np cuz with torch i was getting the wrong values
+                ctn_col_idx = hypothesis["ctn_cols_idx"][0]
                 error_df.iloc[0, ctn_col_idx] = df.iloc[0, ctn_col_idx] - diff
                 error_df = torch.tensor(error_df.values)
 
                 with self.subTest("RMSE"):
-                    self.assertAlmostEqual(
-                        ((diff**2 / len(df)) ** 0.5) / df.shape[1],
-                        self.rmse_colwise(error_df, tensor_df).item(),
-                        places=WITHIN,
-                    )
-                    self.batched_input_equals(self.rmse_colwise, error_df, tensor_df)
-                    ew_rmse_true = ((diff**2) / len(df) / df.shape[1]) ** 0.5
-                    self.assertAlmostEqual(
-                        ew_rmse_true,
-                        self.rmse_elwise(error_df, tensor_df).item(),
-                        places=WITHIN,
-                    )
-                    self.batched_input_equals(self.rmse_elwise, error_df, tensor_df)
+                    with self.subTest("CWRMSE"):
+                        self.assertAlmostEqual(
+                            ((diff**2 / len(df)) ** 0.5) / df.shape[1],
+                            self.rmse_colwise(error_df, tensor_df).item(),
+                            places=WITHIN,
+                        )
+                        self.batched_input_equals(
+                            self.rmse_colwise, error_df, tensor_df
+                        )
+                    with self.subTest("EWRMSE"):
+                        ew_rmse_true = ((diff**2) / len(df) / df.shape[1]) ** 0.5
+                        self.assertAlmostEqual(
+                            ew_rmse_true,
+                            self.rmse_elwise(error_df, tensor_df).item(),
+                            places=WITHIN,
+                        )
+                        self.batched_input_equals(self.rmse_elwise, error_df, tensor_df)
                 with self.subTest("MAAPE"):
+                    # cw = ew when there's no mask
                     maape_true = (
                         np.arctan(
                             abs(diff / tensor_df[0, ctn_col_idx] + EPSILON)
@@ -133,19 +163,24 @@ class TestStaticMulticatContinuousMetrics(unittest.TestCase):
                         * 2
                         / pi
                     )
-                    self.assertAlmostEqual(
-                        maape_true,
-                        self.maape_elwise(error_df, tensor_df).item(),
-                        places=WITHIN,
-                    )
-                    self.batched_input_equals(self.maape_elwise, error_df, tensor_df)
-                    # cw = ew when there's no mask
-                    self.assertAlmostEqual(
-                        maape_true,
-                        self.maape_colwise(error_df, tensor_df).item(),
-                        places=WITHIN,
-                    )
-                    self.batched_input_equals(self.maape_colwise, error_df, tensor_df)
+                    with self.subTest("CWMAAPE"):
+                        self.assertAlmostEqual(
+                            maape_true,
+                            self.maape_colwise(error_df, tensor_df).item(),
+                            places=WITHIN,
+                        )
+                        self.batched_input_equals(
+                            self.maape_colwise, error_df, tensor_df
+                        )
+                    with self.subTest("EWMAAPE"):
+                        self.assertAlmostEqual(
+                            maape_true,
+                            self.maape_elwise(error_df, tensor_df).item(),
+                            places=WITHIN,
+                        )
+                        self.batched_input_equals(
+                            self.maape_elwise, error_df, tensor_df
+                        )
                 for metric in self.torch_metrics:
                     metric.reset()
 
@@ -166,17 +201,19 @@ class TestStaticMulticatContinuousMetrics(unittest.TestCase):
             missing_indicators = torch.ones_like(tensor_df).to(bool)
             # value at [0,0] will be ignored b/c it is "observed"
             missing_indicators[0, ctn_col_idx] = False
-            for metric in self.metrics_list:
-                self.assertAlmostEqual(
-                    0,
-                    metric(tensor_df, tensor_df, missing_indicators).item(),
-                    places=WITHIN,
-                )
-                self.batched_input_equals(
-                    metric, tensor_df, tensor_df, missing_indicators
-                )
-            for metric in self.torch_metrics:
-                metric.reset()
+
+            with self.subTest("All Equal"):
+                for metric in self.metrics_list:
+                    self.assertAlmostEqual(
+                        0,
+                        metric(tensor_df, tensor_df, missing_indicators).item(),
+                        places=WITHIN,
+                    )
+                    self.batched_input_equals(
+                        metric, tensor_df, tensor_df, missing_indicators
+                    )
+                for metric in self.torch_metrics:
+                    metric.reset()
 
             with self.subTest("Observed Value Not Equal"):
                 error_df = df.copy()
@@ -196,7 +233,7 @@ class TestStaticMulticatContinuousMetrics(unittest.TestCase):
                 for metric in self.torch_metrics:
                     metric.reset()
 
-            with self.subTest("Observed NEQ and Missing NEQ (Same Col)"):
+            with self.subTest("Observed NEQ and Missing NEQ"):
                 """
                 . = value we don't care about becaues they're the same
                 [[..., y1(obs), ..., y3, ...],
@@ -332,7 +369,6 @@ class TestStaticMulticatContinuousMetrics(unittest.TestCase):
         if len(df) > 1:
             tensor_df = torch.tensor(df.values)
             self.setup_metrics(df)
-            missing_indicators = torch.zeros_like(tensor_df).to(bool)
             diffs = [6, 4, 9, 2]
             err_locs = [
                 [0, hypothesis["ctn_cols_idx"][0]],
@@ -350,18 +386,21 @@ class TestStaticMulticatContinuousMetrics(unittest.TestCase):
                 tensor_df[err_loc[0], err_loc[1]] for err_loc in err_locs
             ]
             nsamples, nfeatures = df.shape
-            for metric in self.metrics_list:
-                # because there are no missing values at all the errors for missingonly should be 0
-                self.assertAlmostEqual(
-                    0,
-                    metric(error_df, tensor_df, missing_indicators).item(),
-                    places=WITHIN,
-                )
-                self.batched_input_equals(
-                    metric, error_df, tensor_df, missing_indicators
-                )
-            for metric in self.torch_metrics:
-                metric.reset()
+
+            with self.subTest("No Missing"):
+                missing_indicators = torch.zeros_like(tensor_df).to(bool)
+                for metric in self.metrics_list:
+                    # because there are no missing values at all the errors for missingonly should be 0
+                    self.assertAlmostEqual(
+                        0,
+                        metric(error_df, tensor_df, missing_indicators).item(),
+                        places=WITHIN,
+                    )
+                    self.batched_input_equals(
+                        metric, error_df, tensor_df, missing_indicators
+                    )
+                for metric in self.torch_metrics:
+                    metric.reset()
             with self.subTest(
                 "Columns with no Missingness (1 Col with Missing Values)"
             ):
@@ -530,6 +569,19 @@ class TestStaticMulticatCategoricalMetrics(unittest.TestCase):
 
         missing_indicators = torch.ones_like(tensor_df).to(bool)
         missing_indicators[0, bin_col_idx] = False
+
+        with self.subTest("All Equal"):
+            for metric in self.torch_metrics:
+                self.assertAlmostEqual(
+                    1,
+                    metric(tensor_df, tensor_df, missing_indicators).item(),
+                    places=WITHIN,
+                )
+                self.batched_input_equals(
+                    metric, tensor_df, tensor_df, missing_indicators
+                )
+                metric.reset()
+
         with self.subTest("Not Equal inside Mask"):
             # Create an error in one of the places
             error_df = df.copy()
@@ -550,9 +602,9 @@ class TestStaticMulticatCategoricalMetrics(unittest.TestCase):
         with self.subTest("Not Equal outside mask"):
             """
             . = value we don't care about becaues they're the same
-            [[..., y1(obs), ..., y3, ...],
-            [..., y2,      ..., y4, ...],
-            [..., .,       ..., .,  ...]]
+            [[..., e1(obs), ..., e3, ...],
+             [..., e2,      ..., e4, ...],
+             [..., .,       ..., .,  ...]]
             Column stats: (covering different test cases)
                 # ignored vals: 1 0 0(...)
                 # missing vals with error: 1 2 0(...)
@@ -609,9 +661,7 @@ class TestStaticMulticatCategoricalMetrics(unittest.TestCase):
         """
         self.hypothesis_assumptions(df)
         self.setup_metrics(df)
-
         tensor_df = torch.tensor(df.values)
-        missing_indicators = torch.zeros_like(tensor_df).to(bool)
 
         """
         . = value we don't care about becaues they're the same
@@ -638,15 +688,19 @@ class TestStaticMulticatCategoricalMetrics(unittest.TestCase):
         N = len(df)
         F = len(hypothesis["cat_cols_idx"])
 
-        for metric in self.torch_metrics:
-            # because there are no missing values at all the errors for missingonly should be 0, therefore accuracy 1
-            self.assertAlmostEqual(
-                1,
-                metric(error_df, tensor_df, missing_indicators).item(),
-                places=WITHIN,
-            )
-            self.batched_input_equals(metric, error_df, tensor_df, missing_indicators)
-            metric.reset()
+        with self.subTest("No Missing"):
+            missing_indicators = torch.zeros_like(tensor_df).to(bool)
+            for metric in self.torch_metrics:
+                # because there are no missing values at all the errors for missingonly should be 0, therefore accuracy 1
+                self.assertAlmostEqual(
+                    1,
+                    metric(error_df, tensor_df, missing_indicators).item(),
+                    places=WITHIN,
+                )
+                self.batched_input_equals(
+                    metric, error_df, tensor_df, missing_indicators
+                )
+                metric.reset()
 
         with self.subTest("Columns with no Missingness (1 Col with Missing Values)"):
             missing_indicators = torch.zeros_like(tensor_df).to(bool)
@@ -747,7 +801,7 @@ class TestStaticOnehotCategoricalMetrics(unittest.TestCase):
                 self.batched_input_equals(metric, tensor_df, tensor_df)
                 metric.reset()
 
-        with self.subTest("Not Equal"):
+        with self.subTest("Not Equal (1 Error in 1 Column)"):
             # Create an error in one of the onehots
             error_df = df.copy()
             error_df = self.make_onehot_error(
@@ -781,20 +835,32 @@ class TestStaticOnehotCategoricalMetrics(unittest.TestCase):
         self.setup_metrics(df)
         df = self.setup_data(df)
 
-        onehot_group = hypothesis["onehot"]["onehot_cols_idx"][0]
         N = len(df)  # num samples
         F = len(hypothesis["cat_cols_idx"])  # num features
 
         tensor_df = torch.tensor(df.values)
-        error_df = df.copy()
-        error_df = self.make_onehot_error(
-            df, error_df, sample_idx=0, onehot_group=onehot_group
-        )
-        error_df = torch.tensor(error_df.values)
 
         missing_indicators = torch.ones_like(tensor_df).to(bool)
         missing_indicators[0, onehot_group] = False
+        with self.subTest("All Equal"):
+            for metric in self.torch_metrics:
+                self.assertAlmostEqual(
+                    1,
+                    metric(tensor_df, tensor_df, missing_indicators).item(),
+                    places=WITHIN,
+                )
+                self.batched_input_equals(
+                    metric, tensor_df, tensor_df, missing_indicators
+                )
+                metric.reset()
+
         with self.subTest("Observed Not Equal"):
+            error_df = df.copy()
+            onehot_group = hypothesis["onehot"]["onehot_cols_idx"][0]
+            error_df = self.make_onehot_error(
+                df, error_df, sample_idx=0, onehot_group=onehot_group
+            )
+            error_df = torch.tensor(error_df.values)
             for metric in self.torch_metrics:
                 self.assertAlmostEqual(
                     1,
@@ -854,21 +920,17 @@ class TestStaticOnehotCategoricalMetrics(unittest.TestCase):
     def test_mask_nomissing(self, df):
         self.hypothesis_assumptions(df)
         self.setup_metrics(df)
-
-        df = df.replace({np.nan: 400, np.inf: 500})
-        df = build_onehot_from_hypothesis(df, hypothesis["onehot_prefixes"])
-
+        df = self.setup_data(df)
+        tensor_df = torch.tensor(df.values)
         N = len(df)  # num samples
         F = len(hypothesis["cat_cols_idx"])  # num features
 
-        tensor_df = torch.tensor(df.values)
-
-        error_df = df.copy()
-        onehot_groups = hypothesis["onehot"]["onehot_cols_idx"][:2]
         """
         onehot group 1: has 2 errors, but 1 is observed and 1 is missing
         onehot group 2: has 2 errors, but both are missing.
         """
+        onehot_groups = hypothesis["onehot"]["onehot_cols_idx"][:2]
+        error_df = df.copy()
         for onehot_group in onehot_groups:
             error_df = self.make_onehot_error(
                 df, error_df, sample_idx=0, onehot_group=onehot_group
@@ -878,16 +940,19 @@ class TestStaticOnehotCategoricalMetrics(unittest.TestCase):
             )
         error_df = torch.tensor(error_df.values)
 
-        missing_indicators = torch.zeros_like(tensor_df).to(bool)
-        for metric in self.torch_metrics:
-            # because there are no missing values at all the errors for missingonly should be 0, therefore accuracy 1
-            self.assertAlmostEqual(
-                1,
-                metric(error_df, tensor_df, missing_indicators).item(),
-                places=WITHIN,
-            )
-            self.batched_input_equals(metric, error_df, tensor_df, missing_indicators)
-            metric.reset()
+        with self.subTest("No missing"):
+            missing_indicators = torch.zeros_like(tensor_df).to(bool)
+            for metric in self.torch_metrics:
+                # because there are no missing values at all the errors for missingonly should be 0, therefore accuracy 1
+                self.assertAlmostEqual(
+                    1,
+                    metric(error_df, tensor_df, missing_indicators).item(),
+                    places=WITHIN,
+                )
+                self.batched_input_equals(
+                    metric, error_df, tensor_df, missing_indicators
+                )
+                metric.reset()
 
         with self.subTest("Columns with no Missingness (1 Col with Missing Values)"):
             missing_indicators = torch.zeros_like(tensor_df).to(bool)
