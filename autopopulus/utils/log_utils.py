@@ -13,6 +13,7 @@ from torch.utils.tensorboard import SummaryWriter
 from aim import Run, Text
 
 from autopopulus.data.types import DataTypeTimeDim
+from autopopulus.utils.utils import rank_zero_print
 
 TUNE_LOG_DIR = "tune_results"
 LOGGER_TYPE = "TensorBoard"
@@ -86,6 +87,7 @@ class BasicLogger:
         self,
         run_hash: Optional[str] = None,
         experiment_name: Optional[str] = None,
+        verbose: bool = False,
         base_context: Optional[Dict[str, Any]] = None,
         args: Optional[Namespace] = None,
     ) -> None:
@@ -94,6 +96,7 @@ class BasicLogger:
         If base context is passed, it uses it. Otherwise it looks for args.
         This is especially required if using tensorboard, otherwise you won't get a logger.
         """
+        self.verbose = verbose
         if base_context is None and args is not None:
             base_context = self.get_base_context_from_args(args)
 
@@ -182,6 +185,13 @@ class BasicLogger:
                 logged_name = tb_name_format.format(name=name, **context)
             else:
                 logged_name = name
+
+            if self.verbose:
+                if global_step is not None:
+                    rank_zero_print(f"{logged_name}[{global_step}]: {metric}")
+                else:
+                    rank_zero_print(f"{logged_name}: {metric}")
+
             self.logger.add_scalar(logged_name, metric, global_step, walltime)
         elif isinstance(self.logger, Run):
             self.logger.track(metric, name, global_step, context={**context})

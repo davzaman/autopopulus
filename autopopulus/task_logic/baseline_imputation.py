@@ -38,7 +38,9 @@ def baseline_imputation_logic(
     if (
         args.method != "none"
     ):  # Logging here if baseline experiment (not fully observed)
-        log = BasicLogger(args=args, experiment_name=args.experiment_name)
+        log = BasicLogger(
+            args=args, experiment_name=args.experiment_name, verbose=args.verbose
+        )
         # if args.fully_observed:
         metrics = [
             {
