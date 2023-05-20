@@ -93,6 +93,18 @@ class MAAPEMetric(Metric):
 
     def compute(self) -> float:
         maape = self.sum_errors / self.total
+        """
+        Fill with 0 where numerator and denominator are 0.
+            With missing_indicator, the total (denominator) might be 0.
+            When there's no missing values in a column, we get div by 0 -> nan
+            Don't fill nan to not confound where nans are leaking in the data.
+            (vs nan caused by 0/0 AKA where there's no missing values).
+        This also works for EW when no data is missing.
+        """
+        maape = maape.where(
+            ~((self.sum_errors == 0) & (self.total == 0)),
+            torch.tensor(0.0, device=self.sum_errors.device),
+        )
         if self.scale_to_01:  # range [0, pi/2] scale to [0, 1]
             maape *= 2 / pi
         if self.columnwise:
@@ -162,6 +174,18 @@ class RMSEMetric(Metric):
 
     def compute(self) -> float:
         rmse = torch.sqrt(self.sum_errors / self.total)
+        """
+        Fill with 0 where numerator and denominator are 0.
+            With missing_indicator, the total (denominator) might be 0.
+            When there's no missing values in a column, we get div by 0 -> nan
+            Don't fill nan to not confound where nans are leaking in the data.
+            (vs nan caused by 0/0 AKA where there's no missing values).
+        This also works for EW when no data is missing.
+        """
+        rmse = rmse.where(
+            ~((self.sum_errors == 0) & (self.total == 0)),
+            torch.tensor(0.0, device=self.sum_errors.device),
+        )
         if self.columnwise:
             return torch.mean(rmse)
         return rmse
@@ -239,6 +263,18 @@ class AccuracyMetric(Metric):
 
     def compute(self) -> float:
         acc = self.num_correct / self.total
+        """
+        Fill with 1 (no error) where numerator and denominator are 0.
+            With missing_indicator, the total (denominator) might be 0.
+            When there's no missing values in a column, we get div by 0 -> nan
+            Don't fill nan to not confound where nans are leaking in the data.
+            (vs nan caused by 0/0 AKA where there's no missing values).
+        This also works for EW when no data is missing.
+        """
+        acc = acc.where(
+            ~((self.num_correct == 0) & (self.total == 0)),
+            torch.tensor(1.0, device=self.num_correct.device),
+        )
         if self.columnwise:
             return torch.mean(acc)
         return acc
