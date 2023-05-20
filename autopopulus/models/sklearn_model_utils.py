@@ -1,8 +1,8 @@
 from typing import Any, Callable, Dict, List, Optional, Set, Union
 import re
-from functools import partial
 
 from timeit import default_timer as timer
+from lightning_utilities import apply_to_collection
 from tqdm import tqdm
 from numpy import ndarray
 from numpy.random import default_rng
@@ -34,45 +34,21 @@ def _estimator_has(attr):
     return check
 
 
-class TransformScorer:
-    """Modified PredictScorer/BaseScorer. There's no y involved here."""
+class TransformScorer(_BaseScorer):
+    """
+    Modified PredictScorer, calls transform instead of predict.
+    Expects score function to take in order: [preds, target, missing indicators]
+    This is only meant to be combined with my own local metrics.
+    """
 
     def __init__(
         self, score_func: Callable[..., Any], higher_is_better: int, **kwargs
     ) -> None:
-        self._score_func = score_func
-        self._sign = 1 if higher_is_better else -1
-        self._kwargs = kwargs
-
-    def __call__(self, estimator, X, sample_weight=None):
-        """Evaluate predicted target values for X relative to y_true.
-
-        Parameters
-        ----------
-        estimator : object
-            Trained estimator to use for scoring. Must have a predict_proba
-            method; the output of that is used to compute the score.
-
-        X : {array-like, sparse matrix}
-            Test data that will be fed to estimator.predict.
-
-        sample_weight : array-like of shape (n_samples,), default=None
-            Sample weights.
-
-        Returns
-        -------
-        score : float
-            Score function applied to prediction of estimator on X.
-        """
-        return self._score(
-            partial(_cached_call, None),
-            estimator,
-            X,
-            sample_weight=sample_weight,
-        )
+        sign = 1 if higher_is_better else -1
+        super().__init__(score_func, sign, kwargs)
 
     # Adjusted from PredictScorer to evaluate impute/transform accuracy
-    def _score(self, method_caller, estimator, X, sample_weight=None):
+    def _score(self, method_caller, estimator, X, X_true, sample_weight=None):
         """Evaluate predicted target values for X relative to y_true.
 
         Parameters
@@ -86,7 +62,10 @@ class TransformScorer:
             method; the output of that is used to compute the score.
 
         X : {array-like, sparse matrix}
-            Test data that will be fed to estimator.predict.
+            Test data that will be fed to estimator.transform.
+
+        X_true : {array-like, sparse matrix}
+            Golden standard for transformed data.
 
         sample_weight : array-like of shape (n_samples,), default=None
             Sample weights.
@@ -100,10 +79,10 @@ class TransformScorer:
         X_pred = method_caller(estimator, "transform", X)
         if sample_weight is not None:
             return self._sign * self._score_func(
-                X, X_pred, sample_weight=sample_weight, **self._kwargs
+                X_pred, X_true, sample_weight=sample_weight, **self._kwargs
             )
         else:
-            return self._sign * self._score_func(X, X_pred, **self._kwargs)
+            return self._sign * self._score_func(X_pred, X_true, **self._kwargs)
 
 
 class TunableEstimator(BaseEstimator, TransformerMixin):
@@ -120,13 +99,10 @@ class TunableEstimator(BaseEstimator, TransformerMixin):
         self.estimator = estimator
         self.estimator_params = estimator_params
 
-    def fit(self, X: Dict[str, DataFrame], y: Optional[Dict[str, DataFrame]] = None):
+    def fit(self, X: Dict[str, DataFrame], y: Dict[str, DataFrame]):
         # Need to concat train and val for hold-out validation with sklearn
         X_tune = concat([X["train"], X["val"]], axis=0)
-        if y is not None:
-            y_tune = concat([y["train"], y["val"]], axis=0)
-        else:
-            y_tune = None
+        y_tune = concat([y["train"], y["val"]], axis=0)
 
         # Set GridSearch with a hold-out validation instead of CV (via predefinedsplit)
         # indicate indices: -1 @ indices for train, 0 for evaluation
@@ -144,12 +120,16 @@ class TunableEstimator(BaseEstimator, TransformerMixin):
         )
         rank_zero_print(f"Starting fit of {self.estimator}")
         start = timer()
-        args = [X_tune, y_tune] if y_tune is not None else [X_tune]
+        args = [X_tune, y_tune]
         try:
             self.cv.fit(*args)
         except ValueError:  # lightgbm has a weird issue with column names.
             # https://github.com/autogluon/autogluon/issues/399#issuecomment-623326629
-            args[0] = args[0].rename(columns=lambda x: re.sub("[^A-Za-z0-9_]+", "", x))
+            args = apply_to_collection(
+                args,
+                DataFrame,
+                lambda df: df.rename(columns=lambda x: re.sub("[^A-Za-z0-9_]+", "", x)),
+            )
             self.cv.fit(*args)
         rank_zero_print(f"Fit took {timer() - start} seconds.")
 

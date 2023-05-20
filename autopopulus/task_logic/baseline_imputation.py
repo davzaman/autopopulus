@@ -5,6 +5,7 @@ import numpy as np
 from numpy.random import default_rng
 from torch import isnan, tensor
 from tqdm import tqdm
+from pytorch_lightning.utilities import rank_zero_warn
 
 # Local
 from autopopulus.utils.log_utils import IMPUTE_METRIC_TAG_FORMAT, BasicLogger
@@ -61,8 +62,10 @@ def baseline_imputation_logic(
             {"name": "MAAPE", "fn": universal_metric(MAAPEMetric()), "reduction": "EW"},
         ]
         for split, imputed_data in imputed_data.items():
-            est = imputed_data
+            if imputed_data.isna().any().any():
+                rank_zero_warn("NaNs still found in imputed data.")
 
+            est = imputed_data
             true = data.splits["ground_truth"][split]
             # if the original dataset contains nans and we're not filtering to fully observed, need to fill in ground truth too for metric computation
             ground_truth_non_missing_mask = ~np.isnan(true)

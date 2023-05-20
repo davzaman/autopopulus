@@ -61,7 +61,7 @@ def knn(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
             higher_is_better=False,
         ),
     )
-    imputer.fit(data.splits["data"])
+    imputer.fit(data.splits["data"], data.splits["ground_truth"])
     # need to pickle with cloudpickle bc score_fn is lambda
     with open(get_serialized_model_path("knn"), "wb") as f:
         dump(imputer, f)
@@ -88,7 +88,7 @@ def mice(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
             higher_is_better=False,
         ),
     )
-    imputer.fit(data.splits["data"])
+    imputer.fit(data.splits["data"], data.splits["ground_truth"])
     with open(get_serialized_model_path("mice"), "wb") as f:
         dump(imputer, f)
     return {

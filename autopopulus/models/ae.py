@@ -20,6 +20,7 @@ from torch.nn.utils.rnn import pack_padded_sequence, PackedSequence, pad_packed_
 
 ## Lightning ##
 from pytorch_lightning import LightningModule
+from pytorch_lightning.utilities import rank_zero_warn
 from lightning_utilities.core.apply_func import apply_to_collection
 
 from autopopulus.models.torch_model_utils import (
@@ -944,7 +945,7 @@ class AEDitto(LightningModule):
         ground_truth = ground_truth.where(ground_truth_non_missing_mask, pred)
 
         if imputed.isnan().sum():
-            rank_zero_print("WARNING: NaNs still found in imputed data.")
+            rank_zero_warn("NaNs still found in imputed data.")
         return imputed, ground_truth, non_missing_mask
 
     @staticmethod

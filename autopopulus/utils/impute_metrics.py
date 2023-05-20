@@ -77,6 +77,15 @@ class MAAPEMetric(Metric):
     ):
         # preds, target = self._input_format(preds, target)
         assert preds.shape == target.shape
+        assert not (
+            any(
+                [
+                    torch.isnan(data).any()
+                    for data in [preds, target, missing_indicators]
+                    if data is not None
+                ]
+            )
+        )
 
         row_maape = torch.arctan(torch.abs((target - preds) / (target + self.epsilon)))
         if missing_indicators is not None:
@@ -156,8 +165,16 @@ class RMSEMetric(Metric):
         target: torch.Tensor,
         missing_indicators: Optional[torch.BoolTensor] = None,
     ):
-        # preds, target = format_tensor(preds, target)
         assert preds.shape == target.shape
+        assert not (
+            any(
+                [
+                    torch.isnan(data).any()
+                    for data in [preds, target, missing_indicators]
+                    if data is not None
+                ]
+            )
+        )
 
         squared_error = torch.pow(preds - target, 2)
         if missing_indicators is not None:
@@ -237,10 +254,16 @@ class AccuracyMetric(Metric):
         target: torch.Tensor,
         missing_indicators: Optional[torch.BoolTensor] = None,
     ):
-        # preds, target, bin_cols_idx, onehot_cols_idx, mask = self._input_format(
-        #     preds, target, bin_cols_idx, onehot_cols_idx, mask
-        # )
         assert preds.shape == target.shape
+        assert not (
+            any(
+                [
+                    torch.isnan(data).any()
+                    for data in [preds, target, missing_indicators]
+                    if data is not None
+                ]
+            )
+        )
 
         predicted_cats = get_categories(preds, self.bin_cols_idx, self.onehot_cols_idx)
         target_cats = get_categories(target, self.bin_cols_idx, self.onehot_cols_idx)

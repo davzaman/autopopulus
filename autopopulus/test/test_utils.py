@@ -45,12 +45,13 @@ class TestTransformScorer(unittest.TestCase):
         pred.iloc[0, 0] = pred.iloc[0, 0] - diff
 
         # return the "messed up" version
+        input_data = true
         estimator = FunctionTransformer(lambda data: pred)
         # the tuning tests use MAAPE so we'll try RMSE here
         scorer = TransformScorer(universal_metric(RMSEMetric()), higher_is_better=False)
         ew_rmse_true = ((diff**2) / len(true) / true.shape[1]) ** 0.5
         # multiply by -1 because sign will be -1 for the score (higher is not better)
-        self.assertEqual(scorer(estimator, true), -1 * ew_rmse_true)
+        self.assertEqual(scorer(estimator, input_data, true), -1 * ew_rmse_true)
 
 
 class TestTunableEstimator(unittest.TestCase):
@@ -82,13 +83,21 @@ class TestTunableEstimator(unittest.TestCase):
             ),
         )
 
-        imputer.fit(datamodule.splits["data"])
+        imputer.fit(
+            datamodule.splits["data"],
+            # TODO: this should be datamodule.splits["ground_truth"]
+            # TODO: i need to be able to deal with when ground_truth has nans in it for baselines like I have for AE imputation
+            {
+                split: X["nomissing"].iloc[splits[split]]
+                for split in ["train", "val", "test"]
+            },
+        )
         # make sure the test set is correctly the val set
         for call_args in mock_score.call_args_list:
             true_call = call(
                 ANY,
                 X["X"].iloc[splits["train"] + splits["val"]],
-                None,
+                X["nomissing"].iloc[splits["train"] + splits["val"]],
                 train=splits["train"],
                 test=splits["val"],
                 parameters=ANY,
