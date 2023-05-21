@@ -682,7 +682,9 @@ class TestAEDitto(unittest.TestCase):
         ae.setup("fit")
         self.assertTrue(hasattr(ae, "fc_mu"))
         self.assertTrue(hasattr(ae, "fc_var"))
-        self.assertIsInstance(ae.loss, ReconstructionKLDivergenceLoss)
+        self.assertEqual(
+            ae.loss.__repr__(), ReconstructionKLDivergenceLoss(nn.MSELoss()).__repr__()
+        )
 
         encoder = nn.ModuleList(
             [
@@ -853,6 +855,70 @@ class TestAEDitto(unittest.TestCase):
 
             ae.decode("train", code, tensor([6] * 6))
             self.assertEqual(ae.curr_rnn_depth, 0)
+
+    def test_batchnorm(self):
+        with self.subTest("Batchnorm"):
+            ae = AEDitto(
+                **basic_imputer_args,
+                **get_data_args(),
+                batchnorm=True,
+            )
+            ae.setup("fit")
+            encoder = nn.ModuleList(
+                [
+                    nn.Linear(6, 3, bias=False),
+                    nn.BatchNorm1d(3),
+                    nn.ReLU(inplace=True),
+                    nn.Linear(3, 2, bias=False),
+                    nn.BatchNorm1d(2),
+                    nn.ReLU(inplace=True),
+                ]
+            )
+            decoder = nn.ModuleList(
+                [
+                    nn.Linear(2, 3, bias=False),
+                    nn.BatchNorm1d(3),
+                    nn.ReLU(inplace=True),
+                    nn.Linear(3, 6),
+                ]
+            )
+            self.assertEqual(ae.encoder.__repr__(), encoder.__repr__())
+            self.assertEqual(ae.decoder.__repr__(), decoder.__repr__())
+
+        with self.subTest("With Dropout"):
+            ae = AEDitto(
+                **basic_imputer_args,
+                **get_data_args(),
+                dropout=0.5,
+                batchnorm=True,
+            )
+            ae.setup("fit")
+            encoder = nn.ModuleList(
+                [
+                    nn.Linear(6, 3, bias=False),
+                    nn.BatchNorm1d(3),
+                    nn.ReLU(inplace=True),
+                    ResetSeed(seed),
+                    Dropout(0.5),
+                    nn.Linear(3, 2, bias=False),
+                    nn.BatchNorm1d(2),
+                    nn.ReLU(inplace=True),
+                    ResetSeed(seed),
+                    Dropout(0.5),
+                ]
+            )
+            decoder = nn.ModuleList(
+                [
+                    nn.Linear(2, 3, bias=False),
+                    nn.BatchNorm1d(3),
+                    nn.ReLU(inplace=True),
+                    ResetSeed(seed),
+                    Dropout(0.5),
+                    nn.Linear(3, 6),
+                ]
+            )
+            self.assertEqual(ae.encoder.__repr__(), encoder.__repr__())
+            self.assertEqual(ae.decoder.__repr__(), decoder.__repr__())
 
     def test_dae(self):
         with self.subTest("Dropout Corruption"):

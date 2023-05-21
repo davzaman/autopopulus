@@ -122,6 +122,7 @@ class AEDitto(LightningModule):
         ] = None,
         replace_nan_with: Optional[Union[int, str]] = None,  # warm start
         mvec: bool = False,
+        batchnorm: bool = False,
         variational: bool = False,
         longitudinal: bool = False,  # Convenience on top of data type time dim
         data_type_time_dim: DataTypeTimeDim = DataTypeTimeDim.STATIC,
@@ -809,9 +810,13 @@ class AEDitto(LightningModule):
         for i in range(stop_at):
             encoder_layers.append(
                 self.select_layer_type(
-                    self.hparams.layer_dims[i], self.hparams.layer_dims[i + 1]
+                    self.hparams.layer_dims[i],
+                    self.hparams.layer_dims[i + 1],
+                    set_layer_bias=not self.hparams.batchnorm,
                 )
             )
+            if self.hparams.batchnorm:
+                encoder_layers.append(nn.BatchNorm1d(self.hparams.layer_dims[i + 1]))
             encoder_layers.append(self.select_activation())
             if self.hparams.dropout:
                 encoder_layers += [
@@ -839,9 +844,13 @@ class AEDitto(LightningModule):
         for i in range(self.code_index, len(self.hparams.layer_dims) - 2):
             decoder_layers.append(
                 self.select_layer_type(
-                    self.hparams.layer_dims[i], self.hparams.layer_dims[i + 1]
+                    self.hparams.layer_dims[i],
+                    self.hparams.layer_dims[i + 1],
+                    set_layer_bias=not self.hparams.batchnorm,
                 )
             )
+            if self.hparams.batchnorm:
+                decoder_layers.append(nn.BatchNorm1d(self.hparams.layer_dims[i + 1]))
             decoder_layers.append(self.select_activation())
             if self.hparams.dropout:
                 decoder_layers += [
@@ -855,11 +864,13 @@ class AEDitto(LightningModule):
         # will will NOT sigmoid/softmax here since our loss expects logits
         self.decoder = nn.ModuleList(decoder_layers)
 
-    def select_layer_type(self, dim1: int, dim2: int) -> nn.Module:
+    def select_layer_type(
+        self, dim1: int, dim2: int, set_layer_bias: bool
+    ) -> nn.Module:
         """LSTM/RNN if longitudinal, else Linear."""
         if self.hparams.longitudinal:
-            return nn.LSTM(dim1, dim2, batch_first=True)
-        return nn.Linear(dim1, dim2)
+            return nn.LSTM(dim1, dim2, batch_first=True, bias=set_layer_bias)
+        return nn.Linear(dim1, dim2, bias=set_layer_bias)
 
     def select_activation(self) -> nn.Module:
         kwargs = {"inplace": True} if self.hparams.activation == "ReLU" else {}

@@ -69,7 +69,7 @@ def get_tune_grid(args: Namespace) -> Dict[str, Any]:
         # ray.init(local_mode=True)  # Local debugging for tuning
         # tune will try everything in the grid, so just do 1
         hidden_layers_grid = [[0.5]]
-        max_epochs = [3]
+        batchnorm = [True]
     else:
         hidden_layers_grid = [
             [0.5, 0.25, 0.5],
@@ -78,12 +78,12 @@ def get_tune_grid(args: Namespace) -> Dict[str, Any]:
             [1.5],
             [1.0, 1.5, 1.0],
         ]
-        max_epochs = [100, 200]
+        batchnorm = [True, False]
 
     config = {
         "learning_rate": tune.loguniform(1e-5, 1e-1),
         "l2_penalty": tune.loguniform(1e-5, 1),
-        # "max_epochs": tune.choice(max_epochs),
+        "batchnorm": tune.choice(batchnorm),
         # "patience": tune.choice([3, 5, 10]),
         # assume discretized, so num inputs on the dataset is 56
         "hidden_layers": tune.choice(hidden_layers_grid),
