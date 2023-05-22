@@ -53,6 +53,49 @@ class TestTransformScorer(unittest.TestCase):
         # multiply by -1 because sign will be -1 for the score (higher is not better)
         self.assertEqual(scorer(estimator, input_data, true), -1 * ew_rmse_true)
 
+    def test_missing_only(self):
+        """Example taken from test_metrics."""
+        true = X["nomissing"]
+        input_data = X["nomissing"].copy()
+        input_data.iloc[0, 1] = np.nan
+        # the tuning tests use MAAPE so we'll try RMSE here
+        scorer = TransformScorer(
+            universal_metric(RMSEMetric()), higher_is_better=False, missingonly=True
+        )
+        with self.subTest("Error On Observed Value"):
+            # mess up the index to make sure it's set properly later
+            pred = X["nomissing"].copy().reset_index(drop=True)
+            diff = 6
+            pred.iloc[0, 0] = pred.iloc[0, 0] - diff
+            # return the "messed up" version
+            estimator = FunctionTransformer(lambda data: pred)
+            self.assertEqual(scorer(estimator, input_data, true), 0)
+
+        with self.subTest("Error On Missing Value"):
+            # mess up the index to make sure it's set properly later
+            pred = X["nomissing"].copy().reset_index(drop=True)
+            diff = 6
+            pred.iloc[0, 1] = pred.iloc[0, 1] - diff
+            # return the "messed up" version
+            estimator = FunctionTransformer(lambda data: pred)
+            # only 1 value missing
+            ew_rmse_true = ((diff**2) / 1) ** 0.5
+            self.assertEqual(scorer(estimator, input_data, true), -1 * ew_rmse_true)
+
+    def test_ground_truth_missing(self):
+        X_true = X["X"]  # has missing values
+        input_data = X["X"]
+        X_pred = X["nomissing"].copy()
+        diff = 6
+        X_pred.iloc[0, 0] = X_pred.iloc[0, 0] - diff
+        estimator = FunctionTransformer(lambda data: X_pred)
+        # the tuning tests use MAAPE so we'll try RMSE here
+        scorer = TransformScorer(
+            universal_metric(RMSEMetric()), higher_is_better=False, missingonly=True
+        )
+        # When GT is missing it should fill with pred and the error should be 0
+        self.assertEqual(scorer(estimator, input_data, X_true), 0)
+
 
 class TestTunableEstimator(unittest.TestCase):
     # _fit_and_score calls _score in _validation

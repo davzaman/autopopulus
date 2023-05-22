@@ -16,11 +16,12 @@ from autopopulus.task_logic import (
 from autopopulus.utils.utils import rank_zero_print, resample_indices_only
 from autopopulus.data import CommonDataModule
 from autopopulus.utils.impute_metrics import MAAPEMetric, RMSEMetric, universal_metric
+from models.sklearn_model_utils import TransformScorer
 
 
 def baseline_imputation_logic(
     args: Namespace, data: CommonDataModule
-) -> Dict[str, Dict[str, DataFrame]]:
+) -> Dict[str, DataFrame]:
     """
     Wrapper for Baseline static methods: setup dataset and logging.
     """
@@ -33,8 +34,16 @@ def baseline_imputation_logic(
     # will create train/val/test
     data.setup("fit")
 
-    imputed_data = fn(args, data)
+    imputed_data_per_split = fn(args, data)
+    evaluate_baseline_imputation(args, data, imputed_data_per_split)
+    return imputed_data_per_split
 
+
+def evaluate_baseline_imputation(
+    args: Namespace,
+    data: CommonDataModule,
+    imputed_data_per_split: Dict[str, DataFrame],
+):
     ## LOGGING ##
     if (
         args.method != "none"
@@ -52,7 +61,7 @@ def baseline_imputation_logic(
                 "reduction": "CW",
             },
             {
-                "name": "RMSE",
+                "name": "MAAPE",
                 "fn": universal_metric(
                     MAAPEMetric(columnwise=True, nfeatures=data.nfeatures["original"])
                 ),
@@ -61,28 +70,27 @@ def baseline_imputation_logic(
             {"name": "RMSE", "fn": universal_metric(RMSEMetric()), "reduction": "EW"},
             {"name": "MAAPE", "fn": universal_metric(MAAPEMetric()), "reduction": "EW"},
         ]
-        for split, imputed_data in imputed_data.items():
+        for split, imputed_data in imputed_data_per_split.items():
             if imputed_data.isna().any().any():
                 rank_zero_warn("NaNs still found in imputed data.")
-
-            est = imputed_data
-            true = data.splits["ground_truth"][split]
-            # if the original dataset contains nans and we're not filtering to fully observed, need to fill in ground truth too for metric computation
-            ground_truth_non_missing_mask = ~np.isnan(true)
-            true = true.where(ground_truth_non_missing_mask, est)
-
-            orig = data.splits["data"][split]
-            # if isinstance(orig, DataFrame):
-            #     orig = tensor(orig.values)
-            missing_mask = orig.isna()
+            (
+                pred,
+                true,
+                where_data_are_missing,
+            ) = TransformScorer.get_imputed_data_from_model_output(
+                X=data.splits["data"][split],
+                X_pred=imputed_data,
+                X_true=data.splits["ground_truth"][split],
+                return_where_data_are_missing=True,
+            )
             if args.bootstrap_eval_imputer and split == "test":
                 gen = default_rng(args.seed)
                 for b in tqdm(range(args.num_bootstraps)):
                     bootstrap_indices = resample_indices_only(len(true), gen)
                     log_baseline_imputation_performance(
-                        est.iloc[bootstrap_indices],
+                        pred.iloc[bootstrap_indices],
                         true.iloc[bootstrap_indices],
-                        missing_mask.iloc[bootstrap_indices],
+                        where_data_are_missing.iloc[bootstrap_indices],
                         split,
                         metrics,
                         log,
@@ -90,11 +98,9 @@ def baseline_imputation_logic(
                     )
             else:
                 log_baseline_imputation_performance(
-                    est, true, missing_mask, split, metrics, log
+                    pred, true, where_data_are_missing, split, metrics, log
                 )
         log.close()
-
-    return imputed_data
 
 
 def log_baseline_imputation_performance(
@@ -111,8 +117,7 @@ def log_baseline_imputation_performance(
     for metric in metrics:
         for filter_subgroup in ["all", "missingonly"]:
             args = [est, true]
-            if filter_subgroup == "missingonly":
-                args.append(missing_mask)
+            args.append(missing_mask if filter_subgroup == "missingonly" else None)
             val = metric["fn"](*args)
             log.add_scalar(
                 val,

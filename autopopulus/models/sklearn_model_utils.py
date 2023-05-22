@@ -1,10 +1,10 @@
-from typing import Any, Callable, Dict, List, Optional, Set, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 import re
 
 from timeit import default_timer as timer
 from lightning_utilities import apply_to_collection
 from tqdm import tqdm
-from numpy import ndarray
+from numpy import isnan, ndarray
 from numpy.random import default_rng
 from pandas import DataFrame, concat
 
@@ -17,6 +17,7 @@ from sklearn.utils.validation import check_is_fitted
 from sklearn.metrics._scorer import _cached_call, _BaseScorer
 
 from autopopulus.utils.utils import rank_zero_print
+from data.types import DataT
 
 
 def _estimator_has(attr):
@@ -42,9 +43,14 @@ class TransformScorer(_BaseScorer):
     """
 
     def __init__(
-        self, score_func: Callable[..., Any], higher_is_better: int, **kwargs
+        self,
+        score_func: Callable[..., Any],
+        higher_is_better: bool,
+        missingonly: bool = False,
+        **kwargs,
     ) -> None:
         sign = 1 if higher_is_better else -1
+        self.missingonly = missingonly
         super().__init__(score_func, sign, kwargs)
 
     # Adjusted from PredictScorer to evaluate impute/transform accuracy
@@ -75,14 +81,36 @@ class TransformScorer(_BaseScorer):
         score : float
             Score function applied to prediction of estimator on X.
         """
-
         X_pred = method_caller(estimator, "transform", X)
         if sample_weight is not None:
             return self._sign * self._score_func(
-                X_pred, X_true, sample_weight=sample_weight, **self._kwargs
+                *self.get_imputed_data_from_model_output(
+                    X, X_pred, X_true, self.missingonly
+                ),
+                sample_weight=sample_weight,
+                **self._kwargs,
             )
         else:
-            return self._sign * self._score_func(X_pred, X_true, **self._kwargs)
+            return self._sign * self._score_func(
+                *self.get_imputed_data_from_model_output(
+                    X, X_pred, X_true, self.missingonly
+                ),
+                **self._kwargs,
+            )
+
+    @staticmethod
+    def get_imputed_data_from_model_output(
+        X: DataT, X_pred: DataT, X_true: DataT, return_where_data_are_missing: bool
+    ) -> Tuple[DataT, DataT, Optional[DataT]]:
+        """This closely mirror AEDitto.get_imputed_tensor_from_model_output()"""
+        # this logic will mirror what happens in evalute_baseline_imputation
+        # if the original dataset contains nans and we're not filtering to fully observed, need to fill in ground truth too for metric computation
+        ground_truth_are_observed = ~isnan(X_true)
+        X_pred.index = X.index
+        X_true = X_true.where(ground_truth_are_observed, X_pred)
+        # numpy method works on both np and pd
+        where_data_are_missing = isnan(X) if return_where_data_are_missing else None
+        return (X_pred, X_true, where_data_are_missing)
 
 
 class TunableEstimator(BaseEstimator, TransformerMixin):

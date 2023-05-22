@@ -59,6 +59,7 @@ def knn(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
                 MAAPEMetric(columnwise=True, nfeatures=data.nfeatures["original"])
             ),
             higher_is_better=False,
+            missingonly=True,
         ),
     )
     imputer.fit(data.splits["data"], data.splits["ground_truth"])
@@ -71,6 +72,8 @@ def knn(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
             # impute data
             imputer.transform(data.splits["data"][split]),
             columns=data.columns["original"],
+            # some pandas operations rely on the pandas indices (e.g. pd.where)
+            index=data.splits["data"][split].index,
         )
         for split in ["train", "val", "test"]
     }
@@ -86,6 +89,7 @@ def mice(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
                 MAAPEMetric(columnwise=True, nfeatures=data.nfeatures["original"])
             ),
             higher_is_better=False,
+            missingonly=True,
         ),
     )
     imputer.fit(data.splits["data"], data.splits["ground_truth"])
@@ -97,6 +101,8 @@ def mice(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
             # impute data
             imputer.transform(data.splits["data"][split]),
             columns=data.columns["original"],
+            # some pandas operations rely on the pandas indices (e.g. pd.where)
+            index=data.splits["data"][split].index,
         )
         for split in ["train", "val", "test"]
     }
