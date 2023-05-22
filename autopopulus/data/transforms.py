@@ -101,7 +101,7 @@ class SimpleImpute(TransformerMixin, BaseEstimator):
 
 def simple_impute_tensor(
     data: Tensor,
-    non_missing_mask: Tensor,
+    where_data_are_observed: Tensor,
     ctn_col_idxs: Tensor,
     bin_col_idxs: Tensor,
     onehot_group_idxs: Tensor,
@@ -119,7 +119,7 @@ def simple_impute_tensor(
     modes = []
     for bin_col in bin_col_idxs:
         # filter the rows with missing bin_col values and compute the mode
-        mode = X[non_missing_mask[:, bin_col]][:, bin_col].mode().values
+        mode = X[where_data_are_observed[:, bin_col]][:, bin_col].mode().values
         X[:, bin_col] = nan_to_num(X[:, bin_col], mode)
         modes.append(mode)
     # WARNING: https://github.com/pytorch/pytorch/issues/46225
@@ -128,7 +128,7 @@ def simple_impute_tensor(
         # ignore pads of -1
         onehot_group_idx = onehot_group_idx[onehot_group_idx != PAD_VALUE]
         # all the onehot categories should be nan
-        non_missing = non_missing_mask[:, onehot_group_idx]
+        non_missing = where_data_are_observed[:, onehot_group_idx]
 
         # mode but numerically encoded
         # get the "index/bin/category" for each sample, then the mode of that

@@ -281,73 +281,51 @@ class AEDitto(LightningModule):
             else None
         )
         # set this before filling in data with replacement (if doing so)
-        non_missing_mask = ~(isnan(data)).bool()
+        where_data_are_observed = ~(isnan(data)).bool()
 
         ### Warm Start ###
         # replace nan in ground truth too if its missing any
         if self.hparams.replace_nan_with is not None:
-            if self.hparams.replace_nan_with == "simple":  # simple impute warm start
-                # TODO[LOW]: this fails if the whole column is accidentally nan as part of the amputation process
-                fn = simple_impute_tensor
-                kwargs = {
-                    "non_missing_mask": non_missing_mask,
-                    "ctn_col_idxs": self.get_col_idxs_by_type(
-                        data_feature_space=self.hparams.data_feature_space,
-                        feature_type="continuous",
-                    ),
-                    "bin_col_idxs": self.get_col_idxs_by_type(
-                        data_feature_space=self.hparams.data_feature_space,
-                        feature_type="binary",
-                    ),
-                    "onehot_group_idxs": self.get_col_idxs_by_type(
-                        data_feature_space=self.hparams.data_feature_space,
-                        feature_type="onehot",
-                    ),
-                }
-            else:  # Replace nans with a single value provided
-                fn = nan_to_num
-                kwargs = {"nan": self.hparams.replace_nan_with}
-
-            # apply
-            data = fn(data, **kwargs)
-            if split != "predict":
-                ground_truth = fn(ground_truth, **kwargs)
+            data, ground_truth = self._warm_start_imputation(
+                split, data, ground_truth, where_data_are_observed
+            )
 
         ### Model ###
         # pass through the sequence length (if they're none, nothing happens)
         reconstruct_batch = self(split, data, seq_len)
         if self.hparams.variational:  # unpack when vae
             reconstruct_batch, (mu, logvar) = reconstruct_batch
-        else:
-            reconstruct_batch = reconstruct_batch
+
+        # On Predict stop here, no loss/evaluation
+        if split == "predict":
+            return pred
 
         ### Loss ###
-        if split != "predict":
-            """
-            Note: mvec will treat missing values as 0 (ignore in loss during training)
-            data * mask: normalize by # all features (missing and observed).
-            data[mask]: normalize by only # observed features. (Want)
-            """
-            if self.hparams.mvec:  # and self.training
-                eval_pred = reconstruct_batch[non_missing_mask]
-                eval_true = ground_truth[non_missing_mask]
-            else:
-                eval_pred = reconstruct_batch
-                eval_true = ground_truth
+        """
+        Note: mvec will treat missing values as 0 (ignore in loss during training)
+        data * mask: normalize by # all features (missing and observed).
+        data[mask]: normalize by only # observed features. (Want)
+        """
+        if self.hparams.mvec:  # and self.training
+            eval_pred = reconstruct_batch[where_data_are_observed]
+            eval_true = ground_truth[where_data_are_observed]
+        else:
+            eval_pred = reconstruct_batch
+            eval_true = ground_truth
 
-            if self.hparams.variational:
-                loss = self.loss(eval_pred, eval_true, mu, logvar)
-            else:
-                # NOTE: if no mvec and no vae for some reason it says the loss is modifying the output in place, the clone is a quick hack
-                # loss = self.loss(eval_pred.clone(), eval_true)
-                loss = self.loss(eval_pred, eval_true)
+        if self.hparams.variational:
+            loss = self.loss(eval_pred, eval_true, mu, logvar)
+        else:
+            # NOTE: if no mvec and no vae for some reason it says the loss is modifying the output in place, the clone is a quick hack
+            # loss = self.loss(eval_pred.clone(), eval_true)
+            loss = self.loss(eval_pred, eval_true)
 
         #### Evaluations ####
         # detach so it metric computation doesn't go into the computational graph
         # cpu since feature space inversion atm can't go on the GPU
         # float because sigmoid on half precision isn't implemented for CPU
         detached_data = apply_to_collection(
-            (data, reconstruct_batch, ground_truth, non_missing_mask),
+            (data, reconstruct_batch, ground_truth, where_data_are_observed),
             Tensor,
             detach_tensor,
             to_cpu=False,
@@ -355,16 +333,13 @@ class AEDitto(LightningModule):
         (
             pred,
             ground_truth,
-            non_missing_mask,
+            where_data_are_observed,
         ) = self.get_imputed_tensor_from_model_output(
             *detached_data,
             detach_tensor(batch["original"]["data"]),
             detach_tensor(batch["original"]["ground_truth"]),
             "original",
         )
-
-        if split == "predict":  # Just get the predictions there's no loss/evaluation
-            return pred
 
         # evaluate in mapped feature space
         if "mapped" in batch:  # test not empty or None
@@ -382,9 +357,44 @@ class AEDitto(LightningModule):
                 "loss": loss.item(),
                 "pred": pred,
                 "ground_truth": ground_truth,
-                "non_missing_mask": non_missing_mask,
+                "where_data_are_observed": where_data_are_observed,
             },
         )
+
+    def _warm_start_imputation(
+        self,
+        split: str,
+        data: Tensor,
+        ground_truth: Tensor,
+        where_data_are_observed: Tensor,
+    ) -> Tuple[Tensor, Tensor]:
+        if self.hparams.replace_nan_with == "simple":  # simple impute warm start
+            # TODO[LOW]: this fails if the whole column is accidentally nan as part of the amputation process
+            fn = simple_impute_tensor
+            kwargs = {
+                "where_data_are_observed": where_data_are_observed,
+                "ctn_col_idxs": self.get_col_idxs_by_type(
+                    data_feature_space=self.hparams.data_feature_space,
+                    feature_type="continuous",
+                ),
+                "bin_col_idxs": self.get_col_idxs_by_type(
+                    data_feature_space=self.hparams.data_feature_space,
+                    feature_type="binary",
+                ),
+                "onehot_group_idxs": self.get_col_idxs_by_type(
+                    data_feature_space=self.hparams.data_feature_space,
+                    feature_type="onehot",
+                ),
+            }
+        else:  # Replace nans with a single value provided
+            fn = nan_to_num
+            kwargs = {"nan": self.hparams.replace_nan_with}
+
+        # apply
+        data = fn(data, **kwargs)
+        if split != "predict":
+            ground_truth = fn(ground_truth, **kwargs)
+        return (data, ground_truth)
 
     def shared_logging_step_end(self, outputs: Dict[str, float], split: str):
         """Log metrics + loss at end of step.
@@ -410,7 +420,7 @@ class AEDitto(LightningModule):
         self.metric_logging_step(
             outputs["pred"],
             outputs["ground_truth"],
-            outputs["non_missing_mask"],
+            outputs["where_data_are_observed"],
             split,
             "original",
         )
@@ -419,7 +429,7 @@ class AEDitto(LightningModule):
         self,
         pred: Tensor,
         true: Tensor,
-        non_missing_mask: Tensor,
+        where_data_are_observed: Tensor,
         split: str,
         data_feature_space: str,
     ):
@@ -457,9 +467,11 @@ class AEDitto(LightningModule):
                     # Ref: https://torchmetrics.readthedocs.io/en/latest/pages/lightning.html#common-pitfalls
                     if (
                         filter_subgroup == "missingonly"
-                        and (missing_only_mask := ~(non_missing_mask.bool())).any()
+                        and (
+                            where_data_are_missing := ~(where_data_are_observed.bool())
+                        ).any()
                     ):  # Compute metrics for missing only data
-                        metric_val = metric(pred, true, missing_only_mask)
+                        metric_val = metric(pred, true, where_data_are_missing)
                     else:
                         metric_val = metric(pred, true)
 
@@ -906,7 +918,7 @@ class AEDitto(LightningModule):
         data: Tensor,
         reconstruct_batch: Tensor,
         ground_truth: Tensor,
-        non_missing_mask: Tensor,
+        data_are_observed: Tensor,
         original_data: Optional[Tensor],
         original_ground_truth: Optional[Tensor],
         data_feature_space: str,  # original/mapped
@@ -926,8 +938,8 @@ class AEDitto(LightningModule):
                 pred = self.feature_map_inversion(pred)
             data = original_data
             ground_truth = original_ground_truth
-            # re-compute non_missing_mask
-            non_missing_mask = (~isnan(data)).bool()
+            # re-compute locations where data is observed
+            data_are_observed = (~isnan(data)).bool()
 
         # Sigmoid/softmax and threshold but in original space
         pred = binary_column_threshold(
@@ -948,16 +960,17 @@ class AEDitto(LightningModule):
             ),
         )  # do nothing if no "binary" cols (empty list [])
 
-        # Keep original where it's not missing
-        imputed = data.where(non_missing_mask, pred)
+        # Keep original where it's not missing, otherwise fill with pred
+        imputed = data.where(data_are_observed, pred)
         # If the original dataset contains nans (no fully observed), we need to fill in ground_truth too for the metric computation
         # potentially nan in different places than data if amputing (should do nothing if originally fully observed/amputing)
-        ground_truth_non_missing_mask = (~isnan(ground_truth)).bool()
-        ground_truth = ground_truth.where(ground_truth_non_missing_mask, pred)
+        ground_truth_are_observed = (~isnan(ground_truth)).bool()
+        # keep where ground_truth is observed, otherwise fill with pred
+        ground_truth = ground_truth.where(ground_truth_are_observed, pred)
 
         if imputed.isnan().sum():
             rank_zero_warn("NaNs still found in imputed data.")
-        return imputed, ground_truth, non_missing_mask
+        return imputed, ground_truth, data_are_observed
 
     @staticmethod
     def add_imputer_args(parent_parser: ArgumentParser) -> ArgumentParser:
