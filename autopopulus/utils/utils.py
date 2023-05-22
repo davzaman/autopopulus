@@ -32,7 +32,7 @@ def seed_everything(seed: int):
     os.environ["PYTHONHASHSEED"] = str(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-    pl_seed_everything(seed)
+    pl_seed_everything(seed, workers=True)
     # RNN/LSTM determininsm error with cuda 10.1/10.2
     # Ref: https://pytorch.org/docs/stable/generated/torch.nn.LSTM.html#torch.nn.LSTM
     os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
