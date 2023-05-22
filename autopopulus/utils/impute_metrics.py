@@ -309,9 +309,9 @@ def universal_metric(metric: Metric) -> Callable:
     def apply_metric(
         predicted: Union[pd.DataFrame, torch.Tensor],
         target: Union[pd.DataFrame, torch.Tensor],
-        missing_indictors: Optional[Union[pd.DataFrame, torch.Tensor]] = None,
+        missing_indicators: Optional[Union[pd.DataFrame, torch.Tensor]] = None,
     ) -> float:
-        metric.update(*enforce_tensor(predicted, target, missing_indictors))
+        metric.update(*enforce_tensor(predicted, target, missing_indicators))
         value = metric.compute()
         metric.reset()
         return value
