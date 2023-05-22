@@ -64,7 +64,7 @@ def cli_str(obj) -> str:
 
 def run_command(command_args: Dict[str, str]):
     if experiment_tracker == "guild":
-        base = "guild run main "
+        base = "guild run --force-flags main "
         base += "--stage" if guild_use_queues else "--background"
         subprocess.run(
             base.split() + [f"{name}={val}" for name, val in command_args.items()]
