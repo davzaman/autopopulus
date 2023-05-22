@@ -338,7 +338,7 @@ class TestStaticMulticatContinuousMetrics(unittest.TestCase):
                                 np.arctan(abs(diffs[1] / (true_at_err[1] + EPSILON)))
                                 + np.arctan(abs(diffs[2] / (true_at_err[2] + EPSILON)))
                                 + np.arctan(abs(diffs[3] / (true_at_err[3] + EPSILON)))
-                            )  # 1 obs value ignored in entire df
+                            ).item()  # 1 obs value ignored in entire df
                             / (nsamples * nfeatures - 1)
                             * scale,  # scale
                             self.maape_elwise(
