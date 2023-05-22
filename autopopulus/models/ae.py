@@ -300,29 +300,26 @@ class AEDitto(LightningModule):
         if self.hparams.variational:  # unpack when vae
             reconstruct_batch, (mu, logvar) = reconstruct_batch
 
-        # On Predict stop here, no loss/evaluation
-        if split == "predict":
-            return pred
-
         ### Loss ###
-        """
-        Note: mvec will treat missing values as 0 (ignore in loss during training)
-        data * mask: normalize by # all features (missing and observed).
-        data[mask]: normalize by only # observed features. (Want)
-        """
-        if self.hparams.mvec:  # and self.training
-            eval_pred = reconstruct_batch[where_data_are_observed]
-            eval_true = ground_truth[where_data_are_observed]
-        else:
-            eval_pred = reconstruct_batch
-            eval_true = ground_truth
+        if split != "predict":
+            """
+            Note: mvec will treat missing values as 0 (ignore in loss during training)
+            data * mask: normalize by # all features (missing and observed).
+            data[mask]: normalize by only # observed features. (Want)
+            """
+            if self.hparams.mvec:  # and self.training
+                eval_pred = reconstruct_batch[where_data_are_observed]
+                eval_true = ground_truth[where_data_are_observed]
+            else:
+                eval_pred = reconstruct_batch
+                eval_true = ground_truth
 
-        if self.hparams.variational:
-            loss = self.loss(eval_pred, eval_true, mu, logvar)
-        else:
-            # NOTE: if no mvec and no vae for some reason it says the loss is modifying the output in place, the clone is a quick hack
-            # loss = self.loss(eval_pred.clone(), eval_true)
-            loss = self.loss(eval_pred, eval_true)
+            if self.hparams.variational:
+                loss = self.loss(eval_pred, eval_true, mu, logvar)
+            else:
+                # NOTE: if no mvec and no vae for some reason it says the loss is modifying the output in place, the clone is a quick hack
+                # loss = self.loss(eval_pred.clone(), eval_true)
+                loss = self.loss(eval_pred, eval_true)
 
         #### Evaluations ####
         # detach so it metric computation doesn't go into the computational graph
@@ -344,6 +341,9 @@ class AEDitto(LightningModule):
             detach_tensor(batch["original"]["ground_truth"]),
             "original",
         )
+
+        if split == "predict":  # don't do evaluation
+            return pred
 
         # evaluate in mapped feature space
         if "mapped" in batch:  # test not empty or None
