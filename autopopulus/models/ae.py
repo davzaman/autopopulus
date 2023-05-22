@@ -227,7 +227,11 @@ class AEDitto(LightningModule):
         """Deals with special output of RNNBased layers."""
         X_packed = (
             pack_padded_sequence(
-                X, orig_seq_lens.cpu(), batch_first=True, enforce_sorted=False
+                # X, orig_seq_lens.cpu(), batch_first=True, enforce_sorted=False
+                X,
+                orig_seq_lens,
+                batch_first=True,
+                enforce_sorted=False,
             )
             if isinstance(X, Tensor)
             else X  # already packed
@@ -354,7 +358,7 @@ class AEDitto(LightningModule):
         return (
             loss,
             {
-                "loss": loss.item(),
+                "loss": loss,
                 "pred": pred,
                 "ground_truth": ground_truth,
                 "where_data_are_observed": where_data_are_observed,
