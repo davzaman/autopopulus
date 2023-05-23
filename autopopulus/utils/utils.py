@@ -35,10 +35,10 @@ def seed_everything(seed: int):
     pl_seed_everything(seed, workers=True)
     # RNN/LSTM determininsm error with cuda 10.1/10.2
     # Ref: https://pytorch.org/docs/stable/generated/torch.nn.LSTM.html#torch.nn.LSTM
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
-    os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-    # os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
-    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:2"
+    # os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
+    # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+    # # os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
+    # os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:2"
 
     # https://github.com/pytorch/pytorch/issues/1637#issuecomment-730423426
     # https://github.com/Lightning-AI/lightning/issues/4420#issuecomment-926495956
