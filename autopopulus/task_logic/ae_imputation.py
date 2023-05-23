@@ -8,9 +8,8 @@ from pytorch_lightning.profiler import AdvancedProfiler
 
 ## Local Modules
 from autopopulus.data import CommonDataModule
-from autopopulus.task_logic.ray import create_autoencoder_with_tuning
 from autopopulus.models.ap import AEImputer
-from autopopulus.utils.log_utils import AutoencoderLogger
+from autopopulus.utils.log_utils import IMPUTE_METRIC_TAG_FORMAT, AutoencoderLogger
 from autopopulus.utils.utils import rank_zero_print
 
 AE_METHOD_SETTINGS = {
@@ -120,20 +119,29 @@ def ae_imputation_logic(
         ae_imputer = AEImputer.from_checkpoint(args)
         data.setup("fit")
     else:
+        ae_imputer = AEImputer.from_argparse_args(
+            args,
+            logger=AutoencoderLogger(args),
+            tune_callback=None,
+            **settings,
+        )
         if args.tune_n_samples:
-            ae_imputer = create_autoencoder_with_tuning(args, data, settings)
-            # need to setup data since it was setup in each tune run, but not this object
-            data.setup("fit")
-        else:  # If not tuning assume we've been given a specific setting for hyperparams
-            ae_imputer = AEImputer.from_argparse_args(
-                args,
-                logger=AutoencoderLogger(args),
-                tune_callback=None,
-                # profiler=AdvancedProfiler(
-                #     dirpath="profiling-results", filename="advanced-real"
-                # ),
-                **settings,
+            ae_imputer.tune(
+                args.experiment_name,
+                args.tune_n_samples,
+                args.total_cpus_on_machine,
+                args.total_gpus_on_machine,
+                args.n_gpus_per_trial,
+                tune_metric=IMPUTE_METRIC_TAG_FORMAT.format(
+                    name="MAAPE",
+                    feature_space="original",
+                    filter_subgroup="missingonly",
+                    reduction="CW",
+                    split="val",
+                ),
+                data=data,
             )
+        else:
             ae_imputer.fit(data)
 
     transformed = {

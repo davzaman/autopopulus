@@ -1,5 +1,5 @@
 import cloudpickle
-from typing import Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 from argparse import ArgumentParser, Namespace
 import pandas as pd
 import warnings
@@ -8,6 +8,15 @@ from sklearn.base import TransformerMixin, BaseEstimator
 #### Pytorch ####
 import torch
 from torch.utils.data import DataLoader
+
+from ray import tune, air
+from ray.tune.schedulers import ASHAScheduler
+from ray.air.config import RunConfig, ScalingConfig, CheckpointConfig
+from ray.train.lightning import (
+    LightningTrainer,
+    LightningConfigBuilder,
+    LightningCheckpoint,
+)
 
 ## Lightning ##
 import pytorch_lightning as pl
@@ -27,6 +36,7 @@ warnings.filterwarnings(action="ignore", category=LightningDeprecationWarning)
 from autopopulus.models.ae import AEDitto
 from autopopulus.utils.log_utils import (
     IMPUTE_METRIC_TAG_FORMAT,
+    TUNE_LOG_DIR,
     AutoencoderLogger,
     get_serialized_model_path,
 )
@@ -87,104 +97,32 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
 
         # train trainer needs to know the data feature space so its created on fit
         # inference trainer doesn't need this so we can create on ini
-        self.inference_trainer = self.create_trainer(
-            logger,
-            self.patience,
-            self.max_epochs,
-            None,  # don't care about early stopping during eval
-            self.num_nodes,
-            # Ensure run on 1 GPU if we want to use GPUs for correctness
-            # Also bc synchronizing outputs on inference/predict is not supported for ddp
-            # Ref: https://github.com/PyTorchLightning/pytorch-lightning/discussions/12906
-            num_gpus=1 if self.num_gpus else 0,
-            fast_dev_run=self.fast_dev_run,
-            model_monitoring=self.model_monitoring,
-            early_stopping=self.early_stopping,
-            tune_callback=None,  # No tuning since we're testing
-            strategy=strategy,
-            profiler=self.profiler,
-        )
-
-    @staticmethod
-    def create_trainer(
-        logger: Logger,
-        patience: int,
-        max_epochs: int,
-        loss_feature_space: str,
-        num_nodes: Optional[int] = None,
-        num_gpus: Optional[int] = None,
-        fast_dev_run: Optional[bool] = None,
-        model_monitoring: bool = False,
-        early_stopping: bool = True,
-        tune_callback: Optional[Callback] = None,
-        strategy: Strategy = "auto",
-        profiler: Optional[Union[str, Profiler]] = None,
-    ) -> pl.Trainer:
-        callbacks = []  # ModelSummary(max_depth=3),
-        if early_stopping:
-            callbacks.append(
-                EarlyStopping(
-                    check_on_train_epoch_end=False,
-                    monitor=IMPUTE_METRIC_TAG_FORMAT.format(
-                        name="loss",
-                        feature_space=loss_feature_space,
-                        filter_subgroup="all",
-                        reduction="NA",
-                        split="val",
-                    ),
-                    patience=patience,
-                )
+        self.inference_trainer = pl.Trainer(
+            **self._get_trainer_args(
+                data=None,
+                trainer_overrides={
+                    # Ensure run on 1 GPU if we want to use GPUs for correctness
+                    # Also bc synchronizing outputs on inference/predict is not supported for ddp
+                    # Ref: https://github.com/PyTorchLightning/pytorch-lightning/discussions/12906
+                    "devices": 1 if self.num_gpus else 0,
+                    "num_nodes": 1,
+                },
+                callback_overrides={  # don't care about early stopping during eval
+                    "loss_feature_space": None,
+                    "early_stopping": False,
+                    "tune_callback": None,  # No tuning since we're testing
+                },
             )
-
-        if model_monitoring:
-            callbacks.append(VisualizeModelCallback())
-
-        # https://github.com/PyTorchLightning/pytorch-lightning/discussions/6761#discussioncomment-1152286
-        if strategy == "auto":
-            # Use DDP if there's more than 1 GPU, otherwise, it's not necessary.
-            strategy = "ddp_find_unused_parameters_false" if num_gpus > 1 else None
-            accelerator = "gpu" if num_gpus else "cpu"
-        else:
-            accelerator = None
-
-        if tune_callback is not None:
-            callbacks.append(tune_callback)
-
-        trainer = pl.Trainer(
-            max_epochs=max_epochs,
-            logger=logger,
-            deterministic=True,
-            num_nodes=num_nodes,
-            devices=num_gpus if num_gpus else "auto",
-            accelerator=accelerator,
-            strategy=strategy,
-            # https://pytorch-lightning.readthedocs.io/en/stable/accelerators/gpu_intermediate.html#distributed-and-16-bit-precision
-            precision=16,
-            enable_checkpointing=False,
-            callbacks=callbacks,
-            profiler=profiler,
-            fast_dev_run=fast_dev_run,  # For debugging
         )
-        return trainer
 
     def fit(self, data: CommonDataModule):
         """Trains the autoencoder for imputation."""
         data.setup("fit")
-        self._create_model(data)
-        self.trainer = self.create_trainer(
-            self.logger,
-            self.patience,
-            self.max_epochs,
-            self.ae.hparams.data_feature_space,
-            self.num_nodes,
-            self.num_gpus,
-            fast_dev_run=self.fast_dev_run,
-            model_monitoring=self.model_monitoring,
-            early_stopping=self.early_stopping,
-            tune_callback=self.tune_callback,
-            strategy=self.strategy,
-            profiler=self.profiler,
-        )
+
+        args, kwargs = self._get_model_args(data)
+        self.ae = AEDitto(*args, **kwargs)
+
+        self.trainer = pl.Trainer(**self._get_trainer_args(data))
         self.trainer.fit(self.ae, datamodule=data)
         self.trainer.save_checkpoint(
             get_serialized_model_path(
@@ -194,35 +132,105 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         self._save_test_data(data)
         return self
 
-    def _create_model(self, data: CommonDataModule):
-        self.ae_kwargs.update(self.get_args_from_data(data))
-        self.ae = AEDitto(
-            *self.ae_args,
-            longitudinal=self.longitudinal,
-            data_type_time_dim=self.data_type_time_dim,
-            **self.ae_kwargs,
+    def tune(
+        self,
+        experiment_name: str,
+        tune_n_samples: int,
+        total_cpus_on_machine: int,
+        total_gpus_on_machine: int,
+        n_gpus_per_trial: int,
+        tune_metric: str,
+        data: CommonDataModule,
+    ):
+        """
+        Set to use Ray 2.4.0.
+        Ref: https://docs.ray.io/en/latest/train/examples/lightning/lightning_mnist_example.html
+        Ref: https://docs.ray.io/en/latest/tune/examples/tune-pytorch-lightning.html
+        """
+        data.setup("fit")
+        #### Setup LightningTrainer ####
+        run_config = RunConfig(
+            name=experiment_name,
+            # TODO: if i'm doing keep=1 do i need this?
+            local_dir=TUNE_LOG_DIR,
+            # define AIR CheckpointConfig to properly save checkpoints in AIR format.
+            checkpoint_config=CheckpointConfig(
+                # this needs to basically mirror .checkpointing(...) above
+                num_to_keep=1,
+                # deciding how to kick out old checkpoints
+                checkpoint_score_attribute=tune_metric,
+                checkpoint_score_order="min",
+            ),
         )
 
-    @rank_zero_only
-    def _save_test_data(self, data: CommonDataModule):
-        if self.runtest:  # Serialize test dataloader to run in separate script
-            # Serialize data with torch but serialize model with plightning
-            torch.save(
-                data.test_dataloader(),
-                get_serialized_model_path(
-                    f"{self.data_type_time_dim.name}_test_dataloader",
-                    "pt",
-                    self.trial_num,
-                ),
-                pickle_module=cloudpickle,
+        # Uses the total hardware on the machine and the gpus per trial requested
+        # to determine how many CPUs per trial.
+        # More workers means more parallel dataloading, but more overhead (slower start).
+        ncpu_per_gpu = total_cpus_on_machine // total_gpus_on_machine
+        scaling_config = ScalingConfig(
+            num_workers=min(4, ncpu_per_gpu),
+            use_gpu=self.num_gpus > 0,
+            # TODO: should cpu be 1?
+            resources_per_worker={
+                "CPU": int(0.8 * ncpu_per_gpu),
+                "GPU": min(n_gpus_per_trial, self.num_gpus),
+            },
+        )
+        # set up the model without the param grid params
+        ae_args, ae_kwargs = self._get_model_args(data)
+        lightning_config = (
+            LightningConfigBuilder()
+            .module(cls=AEDitto, *ae_args, **ae_kwargs)
+            .trainer(
+                **self._get_trainer_args(
+                    data, trainer_overrides={"enable_checkpointing": True}
+                )
             )
+            .fit_params(datamodule=data)
+            # LightningTrainer: freq of metric reporting == freq of checkpointing
+            .checkpointing(monitor=tune_metric, save_top_k=1, mode="min")
+            .build()
+        )
+        # separately passing constant configs to Trainer and searchable configs to Tuner (one for search one for the model itself)
+        lightning_trainer = LightningTrainer(
+            lightning_config=lightning_config,
+            scaling_config=scaling_config,
+            run_config=run_config,
+        )
+
+        #### Setup Tuner ####
+        # config for tuner
+        search_lightning_config = (
+            LightningConfigBuilder().module(**self._get_tune_grid(data)).build()
+        )
+        tuner = tune.Tuner(
+            lightning_trainer,
+            param_space={"lightning_config": search_lightning_config},
+            tune_config=tune.TuneConfig(
+                metric=tune_metric,
+                mode="min",
+                scheduler=ASHAScheduler(),
+                num_samples=tune_n_samples,
+                trial_name_creator=lambda trial: trial.trial_id,
+            ),
+            # run_config=air.RunConfig(),  # different from ray.air.config.RunConfig
+        )
+        result = tuner.fit()
+        best_result: air.Result = result.get_best_result(metric=tune_metric, mode="min")
+        checkpoint: LightningCheckpoint = best_result.checkpoint
+        best_model: pl.LightningModule = checkpoint.get_model(AEDitto)
+        self.ae = best_model
+        # TODO: do i need to do any cleanup?
+        # TODO: do i need to move the serialized model?
+        self._save_test_data(data)
+        return self
 
     def transform(self, dataloader: DataLoader) -> pd.DataFrame:
         """
         Applies trained autoencoder to given data X.
         Calls predict on pl model and then recovers columns and indices.
         """
-        assert hasattr(self, "ae"), "You need to call fit first!"
+        assert hasattr(self, "ae"), "You need to call tune or fit first!"
         preds_list = self.inference_trainer.predict(self.ae, dataloader)
         # stack the list of preds from dataloader
         preds = torch.vstack(preds_list).cpu().numpy()
@@ -253,7 +261,21 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
             return preds_df
         return pd.DataFrame(preds, columns=columns, index=ids)
 
-    def get_args_from_data(self, data: CommonDataModule):
+    ######################
+    #     Model Args     #
+    ######################
+    def _get_model_args(self, data: CommonDataModule) -> Tuple[Any, Any]:
+        return (
+            self.ae_args,
+            {
+                "longitudinal": self.longitudinal,
+                "data_type_time_dim": self.data_type_time_dim,
+                **self.ae_kwargs,
+                **self._get_args_from_data(data),
+            },
+        )
+
+    def _get_args_from_data(self, data: CommonDataModule):
         """
         Set model info that we can only dynamically get from the data after it's been setup(). Normally this happens in trainer.fit()
         However, I need to build the model in __init__ so I need this info upfront.
@@ -272,6 +294,149 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
             # We still need this if we're loading the ae from a file and not calling fit
             "col_idxs_by_type": data.col_idxs_by_type,
         }
+
+    def _get_trainer_args(
+        self,
+        data: Optional[CommonDataModule] = None,
+        trainer_overrides: Optional[Dict[str, Any]] = None,
+        callback_overrides: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """This MUST get called after data.setup("fit")!!!!"""
+
+        trainer_args = {
+            "logger": self.logger,
+            "max_epochs": self.max_epochs,
+            "deterministic": True,
+            "num_nodes": self.num_nodes,
+            "devices": self.num_gpus if self.num_gpus else "auto",
+            # https://pytorch-lightning.readthedocs.io/en/stable/accelerators/gpu_intermediate.html#distributed-and-16-bit-precision
+            "precision": 16,
+            "enable_checkpointing": False,
+            "strategy": self.strategy,
+            "profiler": self.profiler,
+            "fast_dev_run": self.fast_dev_run,
+        }
+        if data is not None:
+            trainer_args["callbacks"] = self._get_callbacks(data, callback_overrides)
+
+        if trainer_overrides is not None:
+            assert all(
+                [k in trainer_args for k in trainer_overrides]
+            ), "Provided a trainer override for a key that doesn't exist."
+            trainer_args.update(trainer_overrides)
+
+        # update these after potentially overriding trainer args
+        # https://github.com/PyTorchLightning/pytorch-lightning/discussions/6761#discussioncomment-1152286
+        if trainer_args["strategy"] == "auto":
+            # Use DDP if there's more than 1 GPU, otherwise, it's not necessary.
+            trainer_args["strategy"] = (
+                "ddp_find_unused_parameters_false"
+                if trainer_args["devices"] > 1
+                else None
+            )
+            trainer_args["accelerator"] = "gpu" if self.num_gpus else "cpu"
+        else:
+            trainer_args["accelerator"] = None
+
+        return trainer_args
+
+    def _get_callback_args(self, data: CommonDataModule) -> Dict[str, Any]:
+        return {
+            "patience": self.patience,
+            "loss_feature_space": "mapped" if "mapped" in data.groupby else "original",
+            "model_monitoring": self.model_monitoring,
+            "early_stopping": self.early_stopping,
+            "tune_callback": self.tune_callback,
+        }
+
+    def _get_callbacks(
+        self,
+        data: CommonDataModule,
+        callback_overrides: Optional[Dict[str, Any]] = None,
+    ) -> List[Callback]:
+        """To pass to pl.Trainer."""
+        callback_args = self._get_callback_args(data)
+        if callback_overrides is not None:
+            assert all(
+                [k in callback_args for k in callback_overrides]
+            ), "Provided a callback override for a key that doesn't exist."
+            callback_args.update(callback_overrides)
+        return self._create_callbacks_from_args(**callback_args)
+
+    @staticmethod
+    def _create_callbacks_from_args(
+        patience: int,
+        loss_feature_space: str,
+        model_monitoring: bool,
+        early_stopping: bool,
+        tune_callback: Callback,
+    ) -> List[Callback]:
+        """To pass to pl.Trainer."""
+        callbacks = []  # ModelSummary(max_depth=3),
+        if early_stopping:
+            callbacks.append(
+                EarlyStopping(
+                    check_on_train_epoch_end=False,
+                    monitor=IMPUTE_METRIC_TAG_FORMAT.format(
+                        name="loss",
+                        feature_space=loss_feature_space,
+                        filter_subgroup="all",
+                        reduction="NA",
+                        split="val",
+                    ),
+                    patience=patience,
+                )
+            )
+        if model_monitoring:
+            callbacks.append(VisualizeModelCallback())
+        if tune_callback is not None:
+            callbacks.append(tune_callback)
+
+        return callbacks
+
+    def _get_tune_grid(self, data: CommonDataModule) -> Dict[str, Any]:
+        if self.fast_dev_run or data.limit_data:
+            # Will have to set cuda_visible devices before running the python code if true
+            # ray.init(local_mode=True)  # Local debugging for tuning
+            # tune will try everything in the grid, so just do 1
+            hidden_layers_grid = [[0.5]]
+            batchnorm = [False]
+        else:
+            hidden_layers_grid = [
+                [0.5, 0.25, 0.5],
+                [0.5],
+                [1.0, 0.5, 1.0],
+                [1.5],
+                [1.0, 1.5, 1.0],
+            ]
+            batchnorm = [True, False]
+
+        config = {
+            "learning_rate": tune.loguniform(1e-5, 1e-1),
+            "l2_penalty": tune.loguniform(1e-5, 1),
+            "batchnorm": tune.choice(batchnorm),
+            # "patience": tune.choice([3, 5, 10]),
+            # assume discretized, so num inputs on the dataset is 56
+            "hidden_layers": tune.choice(hidden_layers_grid),
+        }
+        return config
+
+    ######################
+    #    Checkpointing   #
+    ######################
+    @rank_zero_only
+    def _save_test_data(self, data: CommonDataModule):
+        if self.runtest:  # Serialize test dataloader to run in separate script
+            # Serialize data with torch but serialize model with plightning
+            torch.save(
+                data.test_dataloader(),
+                get_serialized_model_path(
+                    f"{self.data_type_time_dim.name}_test_dataloader",
+                    "pt",
+                    self.trial_num,
+                ),
+                pickle_module=cloudpickle,
+            )
 
     @classmethod
     def from_checkpoint(
@@ -298,6 +463,9 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         autoencoder.eval()
         return autoencoder
 
+    ######################
+    #        Args        #
+    ######################
     @classmethod
     def from_argparse_args(cls, args: Union[Namespace, ArgumentParser], **kwargs):
         return super().from_argparse_args(args, [AEDitto], **kwargs)
