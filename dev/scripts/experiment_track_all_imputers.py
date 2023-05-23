@@ -126,6 +126,8 @@ for dataset in datasets:
                     "feature-map": cli_str(feature_mapping_variational),
                     "replace-nan-with": cli_str(replace_nan_with),
                 }
+            if command_args["feature-map"] == "discretize_continuous":
+                command_args["uniform-prob"] = True
 
             if all_data:
                 # When multiple flags have list values, Guild generates the cartesian product of all possible flag combinations.

@@ -1221,6 +1221,12 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
             help="When training the autoencoder, whether or not to scale the data before passing the data to the network.",
         )
         p.add_argument(
+            "--uniform-prob",
+            type=str2bool,
+            default=False,
+            help="When training an autoencoder with feature_map=discretize_continuous, whether or not to impose uniform distribution on missing values of onehot features.",
+        )
+        p.add_argument(
             "--separate_ground_truth_transform",
             type=str2bool,
             default=False,
