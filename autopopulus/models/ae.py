@@ -416,6 +416,9 @@ class AEDitto(LightningModule):
             outputs["loss"],
             on_step=False,
             on_epoch=True,
+            # for torchmetrics sync_dist won't affect metric logging at all
+            # this is just to get rid of the warning
+            sync_dist=True,
             prog_bar=True,
             logger=True,
             rank_zero_only=True,
@@ -463,6 +466,9 @@ class AEDitto(LightningModule):
                     log_settings = {
                         "on_step": False,
                         "on_epoch": True,
+                        # for torchmetrics sync_dist won't affect metric logging at all
+                        # this is just to get rid of the warning
+                        "sync_dist": True,
                         "prog_bar": False,
                         "logger": True,
                         "rank_zero_only": True,
@@ -873,6 +879,7 @@ class AEDitto(LightningModule):
                     ResetSeed(self.hparams.seed),  # ensures reprodudicibility
                     nn.Dropout(self.hparams.dropout),
                 ]
+        # Logits
         decoder_layers.append(
             nn.Linear(self.hparams.layer_dims[-2], self.hparams.layer_dims[-1])
         )
