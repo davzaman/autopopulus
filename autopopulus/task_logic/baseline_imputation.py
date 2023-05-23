@@ -106,7 +106,7 @@ def evaluate_baseline_imputation(
 def log_baseline_imputation_performance(
     est,
     true,
-    missing_mask,
+    where_data_are_missing,
     split: str,
     metrics,
     log: BasicLogger,
@@ -116,9 +116,10 @@ def log_baseline_imputation_performance(
     # START HERE
     for metric in metrics:
         for filter_subgroup in ["all", "missingonly"]:
-            args = [est, true]
-            args.append(missing_mask if filter_subgroup == "missingonly" else None)
-            val = metric["fn"](*args)
+            if filter_subgroup == "missingonly":
+                val = metric["fn"](est, true, where_data_are_missing)
+            else:
+                val = metric["fn"](est, true)
             log.add_scalar(
                 val,
                 metric["name"],
