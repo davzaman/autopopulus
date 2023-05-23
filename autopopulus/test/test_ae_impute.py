@@ -105,12 +105,9 @@ def mock_training_step(self, batch, split):
     # metric on gpu
     for split_level_metrics in self.metrics["train_metrics"].values():
         for high_level_metrics in split_level_metrics.values():
-            if "original" in high_level_metrics:
-                high_level_metrics = high_level_metrics["original"]
-            elif "mapped" in high_level_metrics:
-                high_level_metrics = high_level_metrics["mapped"]
-            for metric in high_level_metrics.values():
-                assert metric.device == self.device
+            for feature_space_metrics in high_level_metrics.values():
+                for metric in feature_space_metrics.values():
+                    assert metric.device == self.device
     return self.shared_step(batch, "train")[0]
 
 
@@ -154,6 +151,7 @@ class TestAEImputer(unittest.TestCase):
                         ANY,
                         on_step=ANY,
                         on_epoch=ANY,
+                        sync_dist=ANY,
                         prog_bar=ANY,
                         logger=ANY,
                         rank_zero_only=ANY,
@@ -173,6 +171,7 @@ class TestAEImputer(unittest.TestCase):
                                     ANY,
                                     on_step=ANY,
                                     on_epoch=ANY,
+                                    sync_dist=ANY,
                                     prog_bar=ANY,
                                     logger=ANY,
                                     rank_zero_only=ANY,
@@ -201,6 +200,7 @@ class TestAEImputer(unittest.TestCase):
                         ANY,
                         on_step=ANY,
                         on_epoch=ANY,
+                        sync_dist=ANY,
                         prog_bar=ANY,
                         logger=ANY,
                         rank_zero_only=ANY,
@@ -208,11 +208,8 @@ class TestAEImputer(unittest.TestCase):
                 for split in ["train", "val"]:
                     for filter_subgroup in ["all", "missingonly"]:
                         for reduction in ["CW", "EW"]:
-                            feature_spaces = ["original"]
-                            metrics = ["RMSE", "MAAPE"]
-                            if reduction == "CW":
-                                feature_spaces.append("mapped")
-                                metrics.append("Accuracy")
+                            feature_spaces = ["original", "mapped"]
+                            metrics = ["RMSE", "MAAPE", "Accuracy"]
                             for feature_space in feature_spaces:
                                 # disc -> accuracy
                                 for metric in metrics:
@@ -227,6 +224,7 @@ class TestAEImputer(unittest.TestCase):
                                         ANY,
                                         on_step=ANY,
                                         on_epoch=ANY,
+                                        sync_dist=ANY,
                                         prog_bar=ANY,
                                         logger=ANY,
                                         rank_zero_only=ANY,
@@ -410,18 +408,9 @@ class TestAEImputer(unittest.TestCase):
             for subgroup_moduledict in split_moduledict.values():
                 self.assertEqual(list(subgroup_moduledict.keys()), ["CW", "EW"])
                 for reduction, reduction_moduledict in subgroup_moduledict.items():
-                    if reduction == "CW":
-                        self.assertEqual(
-                            list(reduction_moduledict.keys()), ["original"]
-                        )
-                        for leaf_metrics in reduction_moduledict.values():
-                            self.assertEqual(
-                                list(leaf_metrics.keys()), ["RMSE", "MAAPE"]
-                            )
-                    else:
-                        self.assertEqual(
-                            list(reduction_moduledict.keys()), ["RMSE", "MAAPE"]
-                        )
+                    self.assertEqual(list(reduction_moduledict.keys()), ["original"])
+                    for leaf_metrics in reduction_moduledict.values():
+                        self.assertEqual(list(leaf_metrics.keys()), ["RMSE", "MAAPE"])
 
         with self.subTest("discretize_continuous"):
             mock_disc_cuts.return_value = discretization["cuts"]
@@ -461,19 +450,12 @@ class TestAEImputer(unittest.TestCase):
                 for subgroup_moduledict in split_moduledict.values():
                     self.assertEqual(list(subgroup_moduledict.keys()), ["CW", "EW"])
                     for reduction, reduction_moduledict in subgroup_moduledict.items():
-                        if reduction == "CW":
+                        self.assertEqual(
+                            list(reduction_moduledict.keys()), ["original", "mapped"]
+                        )
+                        for leaf_metrics in reduction_moduledict.values():
                             self.assertEqual(
-                                list(reduction_moduledict.keys()),
-                                ["original", "mapped"],
-                            )
-                            for leaf_metrics in reduction_moduledict.values():
-                                self.assertEqual(
-                                    list(leaf_metrics.keys()),
-                                    ["RMSE", "MAAPE", "Accuracy"],
-                                )
-                        else:
-                            self.assertEqual(
-                                list(reduction_moduledict.keys()), ["RMSE", "MAAPE"]
+                                list(leaf_metrics.keys()), ["RMSE", "MAAPE", "Accuracy"]
                             )
         with self.subTest("target_encode_categorical"):
             datamodule = CommonDataModule(
@@ -511,18 +493,13 @@ class TestAEImputer(unittest.TestCase):
                 for subgroup_moduledict in split_moduledict.values():
                     self.assertEqual(list(subgroup_moduledict.keys()), ["CW", "EW"])
                     for reduction, reduction_moduledict in subgroup_moduledict.items():
-                        if reduction == "CW":
-                            self.assertEqual(
-                                list(reduction_moduledict.keys()),
-                                ["original", "mapped"],
-                            )
-                            for leaf_metrics in reduction_moduledict.values():
-                                self.assertEqual(  # no accuracy bc target_encode
-                                    list(leaf_metrics.keys()), ["RMSE", "MAAPE"]
-                                )
-                        else:
-                            self.assertEqual(
-                                list(reduction_moduledict.keys()), ["RMSE", "MAAPE"]
+                        self.assertEqual(
+                            list(reduction_moduledict.keys()),
+                            ["original", "mapped"],
+                        )
+                        for leaf_metrics in reduction_moduledict.values():
+                            self.assertEqual(  # no accuracy bc target_encode
+                                list(leaf_metrics.keys()), ["RMSE", "MAAPE"]
                             )
 
     def _test_set_col_idxs_by_type(

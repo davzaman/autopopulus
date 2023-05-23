@@ -443,7 +443,7 @@ class AEDitto(LightningModule):
         """
         Log all metrics.
         Order of keys:
-        split -> filter_subgroup -> reduction -> (? feature space) -> name -> fn
+        split -> filter_subgroup -> reduction -> feature space -> name -> fn
         https://torchmetrics.readthedocs.io/en/latest/pages/lightning.html#logging-torchmetrics
         # NOTE: if you add too many metrics it will mess up the progress bar
         """
@@ -451,11 +451,7 @@ class AEDitto(LightningModule):
             f"{split}_metrics"
         ].items():
             for reduction, moduledict in split_moduledict.items():
-                # EW is reduction -> metric
-                # CW is reduction -> feature space -> metric
-                if data_feature_space in moduledict:
-                    moduledict = moduledict[data_feature_space]
-                for name, metric in moduledict.items():
+                for name, metric in moduledict[data_feature_space].items():
                     context = {  # listed in order of metric dict keys for reference
                         "split": split,
                         "filter_subgroup": filter_subgroup,
@@ -504,7 +500,7 @@ class AEDitto(LightningModule):
         """
         if metrics is None:
             # separate metrics
-            # split -> filter subgroup -> reduction -> (?feature space) -> name -> fn
+            # split -> filter subgroup -> reduction -> feature space -> name -> fn
             self.metrics = nn.ModuleDict(
                 {
                     split: nn.ModuleDict(
@@ -521,16 +517,18 @@ class AEDitto(LightningModule):
             self.metrics = metrics
 
     def get_reduction_metrics(self) -> nn.ModuleDict:
-        """RMSE, MAAPE, (?Accuracy) x (?{original, mapped}) x {cw, ew}"""
-        cwmetric_names = [("RMSE", RMSEMetric), ("MAAPE", MAAPEMetric)]
-        # we need separate metrics for each feature map for cw metrics
+        """RMSE, MAAPE, (?Accuracy) x {original, mapped} x {cw, ew}"""
+        ctn_metric_names = [("RMSE", RMSEMetric), ("MAAPE", MAAPEMetric)]
+        # we need separate metrics for each feature map
         # since they depend on the number of features (which differs bc mapping)
+        # we also need them for CW so the update between mapped and original doesn't overlap
         feature_spaces = (
             ["original", "mapped"]
             if self.hparams.data_feature_space == "mapped"
             else ["original"]
         )
 
+        # Add continuous metrics
         cwmetrics = nn.ModuleDict(
             {
                 feature_space: nn.ModuleDict(
@@ -539,8 +537,16 @@ class AEDitto(LightningModule):
                             columnwise=True,
                             nfeatures=self.hparams.nfeatures[feature_space],
                         )
-                        for name, metric in cwmetric_names
+                        for name, metric in ctn_metric_names
                     }
+                )
+                for feature_space in feature_spaces
+            }
+        )
+        ewmetrics = nn.ModuleDict(
+            {
+                feature_space: nn.ModuleDict(
+                    {name: metric() for name, metric in ctn_metric_names}
                 )
                 for feature_space in feature_spaces
             }
@@ -549,24 +555,23 @@ class AEDitto(LightningModule):
         # we don't care about element-wise categorical Accuracy
         if self.hparams.feature_map == "discretize_continuous":
             for feature_space in feature_spaces:
-                cwmetrics[feature_space].update(
-                    nn.ModuleDict(
-                        {
-                            "Accuracy": AccuracyMetric(
-                                self.get_col_idxs_by_type(
-                                    data_feature_space=feature_space,
-                                    feature_type="binary",
-                                ),
-                                self.get_col_idxs_by_type(
-                                    data_feature_space=feature_space,
-                                    feature_type="onehot",
-                                ),
-                                columnwise=True,
-                            ),
-                        }
-                    )
+                args = (
+                    self.get_col_idxs_by_type(
+                        data_feature_space=feature_space,
+                        feature_type="binary",
+                    ),
+                    self.get_col_idxs_by_type(
+                        data_feature_space=feature_space,
+                        feature_type="onehot",
+                    ),
                 )
-        ewmetrics = nn.ModuleDict({"RMSE": RMSEMetric(), "MAAPE": MAAPEMetric()})
+                cwmetrics[feature_space].update(
+                    nn.ModuleDict({"Accuracy": AccuracyMetric(*args, columnwise=True)})
+                )
+                ewmetrics[feature_space].update(
+                    nn.ModuleDict({"Accuracy": AccuracyMetric(*args)})
+                )
+
         # again, i can't even have ANY normal dicts here, it all has to be nn.moduledict/list, even wrappers
         # EW: reduction -> moduledict(name -> fn)
         # CW: reduction -> moduledict(feature_space -> moduledict(name -> fun))

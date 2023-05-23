@@ -414,7 +414,7 @@ class TestStaticMulticatContinuousMetrics(unittest.TestCase):
                                 (
                                     sqrt(((diffs[2] ** 2) + (diffs[3] ** 2)) / nsamples)
                                 )  # all other columns the same / 0 error
-                                / nfeatures  # average over all columns
+                                / 1  # average over all 1 missing column
                             ),
                             self.rmse_colwise(
                                 error_df, tensor_df, missing_indicators

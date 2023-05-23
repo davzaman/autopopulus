@@ -1121,31 +1121,34 @@ class TestCommonDataModule(unittest.TestCase):
             with self.subTest("MNAR (not recoverable"):
                 # should do nothing
                 data.amputation_patterns = [{"mechanism": "MNAR"}]
-                res = data._add_latent_features(df)
+                res, pyampute_patterns = data._add_latent_features(df)
                 # shouldn't add any features
                 np.testing.assert_array_equal(res.columns, df.columns)
                 # shouldn't change patterns
+                self.assertEqual(pyampute_patterns, [{"mechanism": "MNAR"}])
                 self.assertEqual(data.amputation_patterns, [{"mechanism": "MNAR"}])
 
             with self.subTest("MNAR (recoverable)"):
                 data.amputation_patterns = [{"mechanism": "MNAR(G)"}]
-                res = data._add_latent_features(df)
+                res, pyampute_patterns = data._add_latent_features(df)
                 np.testing.assert_array_equal(
                     res.columns, df.columns.append(pd.Index(["latent_p0_g0"]))
                 )
                 self.assertEqual(
-                    data.amputation_patterns,
+                    pyampute_patterns,
                     [{"mechanism": "MNAR", "weights": {"latent_p0_g0": 1}}],
                 )
+                # leave original untouched
+                self.assertEqual(data.amputation_patterns, [{"mechanism": "MNAR(G)"}])
                 with self.subTest("Multiple Latent Features"):
                     data.amputation_patterns = [{"mechanism": "MNAR(G, G)"}]
-                    res = data._add_latent_features(df)
+                    res, pyampute_patterns = data._add_latent_features(df)
                     np.testing.assert_array_equal(
                         res.columns,
                         df.columns.append(pd.Index(["latent_p0_g0", "latent_p0_g1"])),
                     )
                     self.assertEqual(
-                        data.amputation_patterns,
+                        pyampute_patterns,
                         [
                             {
                                 "mechanism": "MNAR",
@@ -1153,13 +1156,16 @@ class TestCommonDataModule(unittest.TestCase):
                             }
                         ],
                     )
+                    self.assertEqual(
+                        data.amputation_patterns, [{"mechanism": "MNAR(G, G)"}]
+                    )
 
                 with self.subTest("Multiple Patterns"):
                     data.amputation_patterns = [
                         {"mechanism": "MNAR(Y)"},
                         {"mechanism": "MNAR(G)"},
                     ]
-                    res = data._add_latent_features(df)
+                    res, pyampute_patterns = data._add_latent_features(df)
                     np.testing.assert_array_equal(
                         res.columns,
                         df.columns.append(
@@ -1167,7 +1173,7 @@ class TestCommonDataModule(unittest.TestCase):
                         ),
                     )
                     self.assertEqual(
-                        data.amputation_patterns,
+                        pyampute_patterns,
                         [
                             {
                                 "mechanism": "MNAR",
@@ -1179,16 +1185,20 @@ class TestCommonDataModule(unittest.TestCase):
                             },
                         ],
                     )
+                    self.assertEqual(
+                        data.amputation_patterns,
+                        [{"mechanism": "MNAR(Y)"}, {"mechanism": "MNAR(G)"}],
+                    )
 
                 with self.subTest("Existing Weights"):
                     with self.subTest("Dict"):
                         data.amputation_patterns = [
                             {"mechanism": "MNAR(G)", "weights": {"bin": 1}}
                         ]
-                        res = data._add_latent_features(df)
+                        res, pyampute_patterns = data._add_latent_features(df)
                         # add to the weights
                         self.assertEqual(
-                            data.amputation_patterns,
+                            pyampute_patterns,
                             [
                                 {
                                     "mechanism": "MNAR",
@@ -1196,15 +1206,23 @@ class TestCommonDataModule(unittest.TestCase):
                                 }
                             ],
                         )
+                        self.assertEqual(
+                            data.amputation_patterns,
+                            [{"mechanism": "MNAR(G)", "weights": {"bin": 1}}],
+                        )
                     with self.subTest("List"):
                         data.amputation_patterns = [
                             {"mechanism": "MNAR(G)", "weights": [1, 0, 0, 0, 0]}
                         ]
-                        res = data._add_latent_features(df)
+                        res, pyampute_patterns = data._add_latent_features(df)
                         # add to the weights
                         self.assertEqual(
-                            data.amputation_patterns,
+                            pyampute_patterns,
                             [{"mechanism": "MNAR", "weights": [1, 0, 0, 0, 0, 1]}],
+                        )
+                        self.assertEqual(
+                            data.amputation_patterns,
+                            [{"mechanism": "MNAR(G)", "weights": [1, 0, 0, 0, 0]}],
                         )
 
 
