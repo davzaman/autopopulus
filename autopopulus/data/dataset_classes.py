@@ -707,7 +707,7 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         )
         train_ids, val_ids = train_test_split(
             train_val_ids,
-            val_size=self.val_size,
+            test_size=self.val_size,
             stratify=labels[train_val_ids],
             random_state=self.seed,
         )

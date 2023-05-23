@@ -92,14 +92,14 @@ def init_cli_args() -> Namespace:
     #### DATA HANDLING ####
     p = CommonDataModule.add_data_args(p)
     p.add_argument(
-        "--val-test-size",
+        "--test-size",
         type=float,
         # required=True,
         default=0.40,
         help="What percent of the dataset should be set aside for validation and test.",
     )
     p.add_argument(
-        "--test-size",
+        "--val-size",
         type=float,
         # required=True,
         default=0.50,
