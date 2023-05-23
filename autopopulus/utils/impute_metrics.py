@@ -75,7 +75,6 @@ class MAAPEMetric(Metric):
         target: torch.Tensor,
         missing_indicators: Optional[torch.BoolTensor] = None,
     ):
-        # preds, target = self._input_format(preds, target)
         assert preds.shape == target.shape
         assert not (
             any(

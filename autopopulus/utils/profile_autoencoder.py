@@ -95,8 +95,8 @@ if __name__ == "__main__":
     )
     data = CommonDataModule(
         seed=seed,
-        val_test_size=0.5,
         test_size=0.5,
+        val_size=0.5,
         batch_size=batch_size,
         num_workers=num_workers,
         scale=True,

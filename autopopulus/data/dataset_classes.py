@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from argparse import ArgumentParser
+from copy import deepcopy
 from functools import reduce
 from itertools import chain
 from os import cpu_count
@@ -355,8 +356,8 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         feature_map: Optional[str] = None,
         uniform_prob: bool = False,
         separate_ground_truth_transform: bool = False,
-        val_test_size: Optional[float] = None,
         test_size: Optional[float] = None,
+        val_size: Optional[float] = None,
         percent_missing: Optional[float] = None,
         amputation_patterns: Optional[List[Dict[str, Any]]] = None,
         seed: Optional[int] = None,
@@ -366,8 +367,8 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         self.seed = seed
         self.dataset_loader = dataset_loader
 
-        self.val_test_size = val_test_size
         self.test_size = test_size
+        self.val_size = val_size
         self.batch_size = batch_size
         if isinstance(num_workers, int):
             self.num_workers = num_workers
@@ -425,10 +426,10 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
             # Don't ampute if we're doing a purely F.O. experiment.
             if self.ampute:
                 # TODO: add tests for _add_latent_features, refact into function to test?
-                X = self._add_latent_features(X)
+                X, pyampute_patterns = self._add_latent_features(X)
                 amputer = MultivariateAmputation(
                     prop=self.percent_missing,
-                    patterns=self.amputation_patterns,
+                    patterns=pyampute_patterns,
                     seed=self.seed,
                 )
                 X = amputer.fit_transform(X)
@@ -465,7 +466,7 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         assert (self.num_workers >= 0) and (
             self.num_workers <= cpu_count()
         ), "Number of CPUs has to be a non-negative integer, and not exceed the number of cores."
-        assert (self.val_test_size is not None and self.test_size is not None) or (
+        assert (self.test_size is not None and self.val_size is not None) or (
             hasattr(self.dataset_loader, "split_ids")
         ), "Need to either specify split percentages or provide custom splits to the dataset loader."
         if self.feature_map == "discretize_continuous":
@@ -487,7 +488,9 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
                 and self.amputation_patterns is not None
             ), "Failed to provide settings for amputation."
 
-    def _add_latent_features(self, data: DataFrame) -> DataFrame:
+    def _add_latent_features(
+        self, data: DataFrame
+    ) -> Tuple[DataFrame, List[Dict[str, Any]]]:
         """
         For amputation, if MNAR is recoverable we need to create and add our own latent features.
         If we want MNAR (recoverable) specify the distribution name(s) in parentheses.
@@ -495,8 +498,9 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         Mutates self.amputation_patterns.
         """
         X = data.copy()
-        # TODO: is the pattern dict inside the list mutable in this way?
-        for i, pattern in enumerate(self.amputation_patterns):
+        # we might modify the patterns passed in so we create a new object
+        pyampute_patterns = deepcopy(self.amputation_patterns)
+        for i, pattern in enumerate(pyampute_patterns):
             # match MNAR(*) or MNAR(*, *, ...) but not MNAR alone
             if re.search(r"MNAR\(\w+(?:,\s*\w+)*\)", pattern["mechanism"]):
                 # Grab everything in between () and split by comma
@@ -531,7 +535,7 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
 
                     # Change name to be pyampute compatible
                     pattern["mechanism"] = "MNAR"
-        return X
+        return (X, pyampute_patterns)
 
     def _set_col_idxs_by_type(self):
         """
@@ -697,22 +701,18 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
 
         train_val_ids, test_ids = train_test_split(
             sample_ids,
-            test_size=self.val_test_size,
+            test_size=self.test_size,
             stratify=labels,
             random_state=self.seed,
         )
         train_ids, val_ids = train_test_split(
             train_val_ids,
-            test_size=self.test_size,
+            val_size=self.val_size,
             stratify=labels[train_val_ids],
             random_state=self.seed,
         )
 
-        return {
-            "train": train_ids,
-            "val": val_ids,
-            "test": test_ids,
-        }
+        return {"train": train_ids, "val": val_ids, "test": test_ids}
 
     def _set_post_split_transforms(self):
         """
@@ -762,6 +762,16 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
                         ),
                     )
                 )
+                if uniform_prob:
+                    steps.append(
+                        (
+                            "uniform_probability_across_nans",
+                            # I don't need groupby in mapped space since i'm not using the indices, but the names.
+                            UniformProbabilityAcrossNans(
+                                self.groupby["original"], self.columns["original"]
+                            ),
+                        )
+                    )
             elif feature_map == "target_encode_categorical":
                 intermediate_categorical_cols = self.dataset_loader.categorical_cols
                 if "onehot" in self.col_idxs_by_type["original"]:
@@ -791,6 +801,7 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
                             self.dataset_loader.onehot_prefixes, sort=False
                         )
                     )
+                    # a mix of binary and multicategorical (not one hot/now combined) features
                     intermediate_categorical_cols = self.columns["mapped"].drop(
                         self.columns["original"][
                             self.col_idxs_by_type["original"]["continuous"]
@@ -809,16 +820,6 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
                     ),
                 )
 
-            if uniform_prob:
-                steps.append(
-                    (
-                        "uniform_probability_across_nans",
-                        # I don't need groupby in mapped space since i'm not using the indices, but the names.
-                        UniformProbabilityAcrossNans(
-                            self.groupby["original"], self.columns["original"]
-                        ),
-                    )
-                )
             return steps
 
         #### POST FIT LOGIC ####
@@ -1132,11 +1133,11 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
             collate_fn=self._batch_collate if is_longitudinal else None,
             batch_size=self.batch_size,
             shuffle=False,
-            prefetch_factor=8,
+            prefetch_factor=256,
             persistent_workers=True,
             num_workers=self.num_workers,
             # don't use pin memory: https://discuss.pytorch.org/t/dataloader-method-acquire-of-thread-lock-objects/52943
-            pin_memory=False,
+            pin_memory=True,
         )
         return loader
 

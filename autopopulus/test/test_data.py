@@ -34,8 +34,8 @@ from autopopulus.data.utils import onehot_multicategorical_column
 standard = {
     # "dataset_loader": get_dataset_loader(X["X"], y),
     "seed": seed,
-    "val_test_size": 0.5,
     "test_size": 0.5,
+    "val_size": 0.5,
     "batch_size": 2,
     "percent_missing": 0.33,
     # "missingness_mechanism": "MCAR",

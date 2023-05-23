@@ -110,8 +110,8 @@ class TestTunableEstimator(unittest.TestCase):
             # allow missing for imputer transformer
             "dataset_loader": get_dataset_loader(X["X"], y),
             "seed": seed,
-            "val_test_size": 0.5,
             "test_size": 0.5,
+            "val_size": 0.5,
             "batch_size": 2,
         }
         datamodule = CommonDataModule(**data_settings, scale=True)
@@ -177,8 +177,8 @@ class TestTunableEstimator(unittest.TestCase):
             # nomissing here so predictions don't complain about nan
             "dataset_loader": get_dataset_loader(X["nomissing"], y),
             "seed": seed,
-            "val_test_size": 0.5,
             "test_size": 0.5,
+            "val_size": 0.5,
             "batch_size": 2,
             "scale": True,
         }

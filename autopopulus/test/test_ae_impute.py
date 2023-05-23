@@ -122,8 +122,8 @@ class TestAEImputer(unittest.TestCase):
         self.data_settings = {
             "dataset_loader": get_dataset_loader(X["X"], y),
             "seed": seed,
-            "val_test_size": 0.5,
             "test_size": 0.5,
+            "val_size": 0.5,
             "batch_size": 2,
         }
         self.datamodule = CommonDataModule(**self.data_settings, scale=True)
