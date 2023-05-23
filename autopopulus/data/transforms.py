@@ -469,6 +469,10 @@ def get_invert_target_encode_tensor_args(
     orig_cols: pd.Index,
     to_device: torch.device = DEFAULT_DEVICE,
 ) -> Dict[str, Union[Tensor, List[Tensor]]]:
+    """
+    Mapped cols may be out of order with original space.
+    This doesn't matter because we're going by column name in the encoder_mapping.
+    """
     args = {
         "mean_encoded_values": [],  # List of tensors
         "col_idxs": [],  # tensor
