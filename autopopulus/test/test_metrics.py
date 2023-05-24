@@ -405,15 +405,13 @@ class TestStaticMulticatContinuousMetrics(unittest.TestCase):
                 "Columns with no Missingness (1 Col with Missing Values)"
             ):
                 missing_indicators = torch.zeros_like(tensor_df).to(bool)
-                # make the first ctn column to be missing
-                missing_indicators[:, hypothesis["ctn_cols_idx"][0]] = True
+                # make the second ctn column to be missing
+                missing_indicators[:, hypothesis["ctn_cols_idx"][1]] = True
                 with self.subTest("RMSE"):
                     with self.subTest("CWRMSE"):
                         self.assertAlmostEqual(
                             (  # no obs values in 2nd column, 2 errors
-                                (
-                                    sqrt(((diffs[2] ** 2) + (diffs[3] ** 2)) / nsamples)
-                                )  # all other columns the same / 0 error
+                                (sqrt(((diffs[2] ** 2) + (diffs[3] ** 2)) / nsamples))
                                 / 1  # average over all 1 missing column
                             ),
                             self.rmse_colwise(
@@ -455,7 +453,7 @@ class TestStaticMulticatContinuousMetrics(unittest.TestCase):
                                 )
                                 / nsamples
                             ).item()
-                            / nfeatures  # average over al cols
+                            / 1  # average over the 1 missing col
                             * scale,  # scale
                             self.maape_colwise(
                                 error_df, tensor_df, missing_indicators
@@ -473,8 +471,8 @@ class TestStaticMulticatContinuousMetrics(unittest.TestCase):
                             (
                                 np.arctan(abs(diffs[2] / (true_at_err[2] + EPSILON)))
                                 + np.arctan(abs(diffs[3] / (true_at_err[3] + EPSILON)))
-                            )  # all columns observed except one
-                            / nsamples
+                            ).item()
+                            / nsamples  # all columns observed except one
                             * scale,  # scale
                             self.maape_elwise(
                                 error_df, tensor_df, missing_indicators
@@ -708,8 +706,8 @@ class TestStaticMulticatCategoricalMetrics(unittest.TestCase):
             missing_indicators[:, hypothesis["bin_cols_idx"][0]] = True
             self.assertAlmostEqual(
                 # nsamples is the missing col is all N, but 2 errors
-                # For the remaining F - 1, cols acc is 1
-                (((N - 2) / N) + (F - 1)) / F,
+                # For the remaining F - 1, we don't care bc they're observed
+                ((N - 2) / N) / 1,
                 self.accuracy_colwise(error_df, tensor_df, missing_indicators).item(),
                 places=WITHIN,
             )
@@ -960,9 +958,8 @@ class TestStaticOnehotCategoricalMetrics(unittest.TestCase):
             missing_indicators[:, hypothesis["onehot"]["onehot_cols_idx"][0]] = True
             self.assertAlmostEqual(
                 # nsamples is the missing col is all N, but 2 errors
-                # For the remaining F - 1, cols acc is 1
-                (((N - 2) / N) + (F - 1)) / F,
-                # (((N - 1 - 1) / (N - 1)) + F - 1) / F,
+                # For the remaining F - 1, they're all observed so we don't care
+                ((N - 2) / N) / 1,
                 self.accuracy_colwise(error_df, tensor_df, missing_indicators).item(),
                 places=WITHIN,
             )

@@ -109,14 +109,18 @@ class MAAPEMetric(Metric):
             (vs nan caused by 0/0 AKA where there's no missing values).
         This also works for EW when no data is missing.
         """
-        maape = maape.where(
-            ~((self.sum_errors == 0) & (self.total == 0)),
-            torch.tensor(0.0, device=self.sum_errors.device),
-        )
+        assert (
+            self.sum_errors[self.total == 0] == 0
+        ).all(), "Calculated sum error where there are no indicated values."
+        num_maape_items = self.total != 0
+        # no items to calc error over (due to indicators)
+        if not torch.sum(num_maape_items):
+            return torch.tensor(0.0, device=self.sum_errors.device)
         if self.scale_to_01:  # range [0, pi/2] scale to [0, 1]
             maape *= 2 / pi
-        if self.columnwise:
-            return torch.mean(maape)
+        if self.columnwise:  # mean, ignoring the unincluded cols
+            # sum the rmse for the cols we care about / # cols we care about
+            return torch.sum(maape[num_maape_items]) / torch.sum(num_maape_items)
         return maape
 
 
@@ -198,12 +202,17 @@ class RMSEMetric(Metric):
             (vs nan caused by 0/0 AKA where there's no missing values).
         This also works for EW when no data is missing.
         """
-        rmse = rmse.where(
-            ~((self.sum_errors == 0) & (self.total == 0)),
-            torch.tensor(0.0, device=self.sum_errors.device),
-        )
-        if self.columnwise:
-            return torch.mean(rmse)
+        assert (
+            self.sum_errors[self.total == 0] == 0
+        ).all(), "Calculated sum error where there are no indicated values."
+        num_rmse_items = self.total != 0
+        # no items to calc error over (due to indicators)
+        if not torch.sum(num_rmse_items):
+            return torch.tensor(0.0, device=self.sum_errors.device)
+
+        if self.columnwise:  # mean, ignoring the unincluded cols
+            # sum the rmse for the cols we care about / # cols we care about
+            return torch.sum(rmse[num_rmse_items]) / torch.sum(num_rmse_items)
         return rmse
 
 
@@ -293,12 +302,17 @@ class AccuracyMetric(Metric):
             (vs nan caused by 0/0 AKA where there's no missing values).
         This also works for EW when no data is missing.
         """
-        acc = acc.where(
-            ~((self.num_correct == 0) & (self.total == 0)),
-            torch.tensor(1.0, device=self.num_correct.device),
-        )
-        if self.columnwise:
-            return torch.mean(acc)
+        assert (
+            self.num_correct[self.total == 0] == 0
+        ).all(), "Calculated sum error where there are no indicated values."
+        num_acc_items = self.total != 0
+        # no items to calc accuracy over (due to indicators)
+        if not torch.sum(num_acc_items):
+            return torch.tensor(1.0, device=self.num_correct.device)
+
+        if self.columnwise:  # mean, ignoring the unincluded cols
+            # sum the rmse for the cols we care about / # cols we care about
+            return torch.sum(acc[num_acc_items]) / torch.sum(num_acc_items)
         return acc
 
 
