@@ -811,7 +811,8 @@ class AEDitto(LightningModule):
             ]
 
         stop_at = self.code_index
-        if self.hparams.variational:  # for fc_mu and fc_var, stop before code
+        if self.hparams.variational:
+            # the mu and logvar parallel layers act as the last layer in encoder
             stop_at -= 1
 
         for i in range(stop_at):

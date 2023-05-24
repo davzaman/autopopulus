@@ -1077,7 +1077,7 @@ class TestAEDitto(unittest.TestCase):
             steps = OnehotColumnThreshold(tensor([[0, 1]]).long())
             self.assertTrue(steps(data).allclose(correct))
 
-    def test_loss(self):
+    def test_loss(self):  # make sure my custom loss classes are differentiable
         var = Variable(randn(10, 10), requires_grad=True)
         with self.subTest("CEMSELoss"):
             loss = CtnCatLoss(
@@ -1099,6 +1099,31 @@ class TestAEDitto(unittest.TestCase):
                 res.backward()
             except Exception as e:
                 self.fail("Failed to call backward: " + e)
+
+    def test_CtnCatLoss(self):
+        var = Variable(tensor(X["wrong"].values), requires_grad=True)
+        true_var = Variable(tensor(X["nomissing"].values), requires_grad=True)
+        loss = CtnCatLoss(
+            list_to_tensor(col_idxs_by_type["original"]["continuous"]),
+            list_to_tensor(col_idxs_by_type["original"]["binary"]),
+            list_to_tensor(col_idxs_by_type["original"]["onehot"]),
+        )
+        res = loss(var, true_var).item()
+        loss = 0
+        loss += nn.functional.binary_cross_entropy_with_logits(
+            tensor(X["wrong"][columns["bin_cols"]].values).float(),
+            tensor(X["nomissing"][columns["bin_cols"]].values).float(),
+        )
+        for onehot_col_group in columns["onehot_cols"]:
+            loss += nn.functional.cross_entropy(
+                tensor(X["wrong"][onehot_col_group].values).float(),
+                tensor(X["nomissing"][onehot_col_group].values).float(),
+            )
+        loss += nn.functional.mse_loss(
+            tensor(X["wrong"][columns["ctn_cols"]].values).float(),
+            tensor(X["nomissing"][columns["ctn_cols"]].values).float(),
+        )
+        self.assertEqual(res, loss)
 
 
 if __name__ == "__main__":

@@ -91,6 +91,9 @@ columns = {  # Contains continuous, binary, and onehot
     "ctn_cols": ["age", "weight"],
     "onehot_prefix_names": ["fries"],
     "no_onehot": ["age", "weight", "ismale", "fries"],
+    "cat_cols": ["ismale", "fries_s", "fries_m" "fries_l"],
+    "onehot_cols": [["fries_s", "fries_m", "fries_l"]],
+    "bin_cols": ["ismale"],
 }
 
 col_idxs_by_type = {
@@ -138,6 +141,18 @@ X = {
             [26, 26.3, 0, nan, nan, nan],
             [16, 73.4, 1, 1, 0, 0],
             [nan, 56.5, 1, 0, 1, 0],
+            [57, 29.6, 0, 1, 0, 0],
+        ],
+        columns=columns["columns"],
+    ),
+    "wrong": DataFrame(
+        [
+            [44, 15.1 - 6, 0, 0, 1, 0],
+            [49, 57.2, 1, 0, 0, 1],
+            [26, 26.3, 0, 1, 0, 0],
+            [16, 73.4, 1, 1, 0, 0],
+            # extra bin col wrong even tho it wasn't nan
+            [13 + 2, 56.5, 1 - 1, 0, 1, 0],
             [57, 29.6, 0, 1, 0, 0],
         ],
         columns=columns["columns"],
