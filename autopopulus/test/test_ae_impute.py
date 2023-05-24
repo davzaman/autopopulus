@@ -1,3 +1,4 @@
+from itertools import chain
 import re
 import unittest
 from argparse import Namespace
@@ -1077,53 +1078,89 @@ class TestAEDitto(unittest.TestCase):
             steps = OnehotColumnThreshold(tensor([[0, 1]]).long())
             self.assertTrue(steps(data).allclose(correct))
 
-    def test_loss(self):  # make sure my custom loss classes are differentiable
-        var = Variable(randn(10, 10), requires_grad=True)
-        with self.subTest("CEMSELoss"):
-            loss = CtnCatLoss(
-                tensor([0, 1, 2, 3]).long(),
-                tensor([4, 5, 6]).long(),
-                tensor([[7, 8, 9]]).long(),
+    def test_loss(self):
+        with self.subTest("Ensure Differentiable"):
+            var = Variable(randn(10, 10), requires_grad=True)
+            with self.subTest("CtnCatLoss"):
+                loss = CtnCatLoss(
+                    tensor([0, 1, 2, 3]).long(),
+                    tensor([4, 5, 6]).long(),
+                    tensor([[7, 8, 9]]).long(),
+                )
+                res = loss(var, var)
+                try:  # should get no errors
+                    res.backward()
+                except Exception as e:
+                    self.fail("Failed to call backward: " + e)
+            with self.subTest("ReconstructionKLDivergenceLoss"):
+                loss = ReconstructionKLDivergenceLoss(MSELoss())
+                mu = Variable(randn(10, 1), requires_grad=True)
+                logvar = Variable(randn(10, 1), requires_grad=True)
+                res = loss(var, var, mu, logvar)
+                try:  # should get no errors
+                    res.backward()
+                except Exception as e:
+                    self.fail("Failed to call backward: " + e)
+
+    @patch("autopopulus.models.ae.AEDitto.forward")
+    def test_shared_step(self, mock_model_output):
+        with self.subTest("semi_observed_training Loss"):
+            ae = AEDitto(
+                **basic_imputer_args,
+                **get_data_args_orig(),
+                semi_observed_training=True,
             )
-            res = loss(var, var)
-            try:  # should get no errors
-                res.backward()
-            except Exception as e:
-                self.fail("Failed to call backward: " + e)
-        with self.subTest("ReconstructionKLDivergenceLoss"):
-            loss = ReconstructionKLDivergenceLoss(MSELoss())
-            mu = Variable(randn(10, 1), requires_grad=True)
-            logvar = Variable(randn(10, 1), requires_grad=True)
-            res = loss(var, var, mu, logvar)
-            try:  # should get no errors
-                res.backward()
-            except Exception as e:
-                self.fail("Failed to call backward: " + e)
+            ae.loss = CtnCatLoss(
+                list_to_tensor(col_idxs_by_type["original"]["continuous"]),
+                # treat onehots like binary they're already in 0/1, don't need CE
+                list_to_tensor(
+                    list(
+                        chain.from_iterable(col_idxs_by_type["original"]["onehot"])
+                    )  # flattened onehot
+                    + col_idxs_by_type["original"]["binary"]
+                ),
+                list_to_tensor([]),
+                loss_bin=nn.BCELoss(),
+                loss_ctn=nn.MSELoss(),
+            )
+            # all the positions that were originally nan are wrong
+            var = Variable(
+                tensor(X["X"].where(lambda x: ~x.isna(), -5000).values),
+                requires_grad=True,
+            )
+            true_var = Variable(tensor(X["X"].values), requires_grad=True)
+            batch = {"original": {"data": var, "ground_truth": true_var}}
+            mock_model_output.return_value = var
+            # I can't mock a child module (ae.loss) with MagicMock :(, so i can't test what the inputs to the loss are
+            loss, outputs = ae.shared_step(batch, "train")
+            # this should ignore all the nan positions, so errors should be 0
+            self.assertEqual(loss.item(), 0)
 
     def test_CtnCatLoss(self):
-        var = Variable(tensor(X["wrong"].values), requires_grad=True)
-        true_var = Variable(tensor(X["nomissing"].values), requires_grad=True)
-        loss = CtnCatLoss(
-            list_to_tensor(col_idxs_by_type["original"]["continuous"]),
-            list_to_tensor(col_idxs_by_type["original"]["binary"]),
-            list_to_tensor(col_idxs_by_type["original"]["onehot"]),
-        )
-        res = loss(var, true_var).item()
-        loss = 0
-        loss += nn.functional.binary_cross_entropy_with_logits(
-            tensor(X["wrong"][columns["bin_cols"]].values).float(),
-            tensor(X["nomissing"][columns["bin_cols"]].values).float(),
-        )
-        for onehot_col_group in columns["onehot_cols"]:
-            loss += nn.functional.cross_entropy(
-                tensor(X["wrong"][onehot_col_group].values).float(),
-                tensor(X["nomissing"][onehot_col_group].values).float(),
+        with self.subTest("Inputs Not Equal"):
+            var = Variable(tensor(X["wrong"].values), requires_grad=True)
+            true_var = Variable(tensor(X["nomissing"].values), requires_grad=True)
+            loss = CtnCatLoss(
+                list_to_tensor(col_idxs_by_type["original"]["continuous"]),
+                list_to_tensor(col_idxs_by_type["original"]["binary"]),
+                list_to_tensor(col_idxs_by_type["original"]["onehot"]),
             )
-        loss += nn.functional.mse_loss(
-            tensor(X["wrong"][columns["ctn_cols"]].values).float(),
-            tensor(X["nomissing"][columns["ctn_cols"]].values).float(),
-        )
-        self.assertEqual(res, loss)
+            res = loss(var, true_var).item()
+            loss = 0
+            loss += nn.functional.binary_cross_entropy_with_logits(
+                tensor(X["wrong"][columns["bin_cols"]].values).float(),
+                tensor(X["nomissing"][columns["bin_cols"]].values).float(),
+            )
+            for onehot_col_group in columns["onehot_cols"]:
+                loss += nn.functional.cross_entropy(
+                    tensor(X["wrong"][onehot_col_group].values).float(),
+                    tensor(X["nomissing"][onehot_col_group].values).float(),
+                )
+            loss += nn.functional.mse_loss(
+                tensor(X["wrong"][columns["ctn_cols"]].values).float(),
+                tensor(X["nomissing"][columns["ctn_cols"]].values).float(),
+            )
+            self.assertEqual(res, loss)
 
 
 if __name__ == "__main__":
