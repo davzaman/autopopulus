@@ -422,6 +422,7 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
                 y = y[fully_observed_mask]
 
             ground_truth = X.copy()
+            self.ground_truth_has_nans = ground_truth.isna().any().any()
 
             # Don't ampute if we're doing a purely F.O. experiment.
             if self.ampute:

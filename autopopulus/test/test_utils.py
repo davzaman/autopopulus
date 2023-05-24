@@ -93,8 +93,9 @@ class TestTransformScorer(unittest.TestCase):
         scorer = TransformScorer(
             universal_metric(RMSEMetric()), higher_is_better=False, missingonly=True
         )
-        # When GT is missing it should fill with pred and the error should be 0
-        self.assertEqual(scorer(estimator, input_data, X_true), 0)
+        # should complain that there's nans in the ground_truth
+        with self.assertRaises(AssertionError):
+            scorer(estimator, input_data, X_true)
 
 
 class TestTunableEstimator(unittest.TestCase):

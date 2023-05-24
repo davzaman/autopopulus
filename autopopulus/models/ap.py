@@ -285,7 +285,6 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         """
         return {
             "nfeatures": data.nfeatures,
-            # "groupby": data.groupby,  # TODO: remove, AEDitto doesn't use this anymore (but still necessary for preproc)
             "columns": data.columns,
             "discretizations": data.discretizations,
             "inverse_target_encode_map": data.inverse_target_encode_map,
@@ -293,6 +292,7 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
             "data_feature_space": "mapped" if "mapped" in data.groupby else "original",
             # We still need this if we're loading the ae from a file and not calling fit
             "col_idxs_by_type": data.col_idxs_by_type,
+            "semi_observed_training": data.ground_truth_has_nans,
         }
 
     def _get_trainer_args(
@@ -308,7 +308,7 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
             "max_epochs": self.max_epochs,
             "deterministic": True,
             "num_nodes": self.num_nodes,
-            "devices": self.num_gpus if self.num_gpus else "auto",
+            "devices": self.num_gpus,
             # https://pytorch-lightning.readthedocs.io/en/stable/accelerators/gpu_intermediate.html#distributed-and-16-bit-precision
             "precision": 16,
             "enable_checkpointing": False,
@@ -334,9 +334,12 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
                 if trainer_args["devices"] > 1
                 else None
             )
-            trainer_args["accelerator"] = "gpu" if self.num_gpus else "cpu"
+            trainer_args["accelerator"] = "gpu" if trainer_args["devices"] else "cpu"
         else:
             trainer_args["accelerator"] = None
+        # this should come after setting strategy and accelerator
+        if trainer_args["devices"] == 0:
+            trainer_args["devices"] = "auto"
 
         return trainer_args
 

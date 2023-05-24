@@ -51,6 +51,7 @@ def simple(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
 
 
 def knn(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
+    # TODO[HIGH]: What to do when ground truth has nans? no tuning at all?
     imputer = TunableEstimator(
         KNNImputer(),
         BASELINE_IMPUTER_MODEL_PARAM_GRID["knn"],

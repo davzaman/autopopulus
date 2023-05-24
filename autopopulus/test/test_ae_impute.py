@@ -1,3 +1,4 @@
+import re
 import unittest
 from argparse import Namespace
 from shutil import rmtree
@@ -70,7 +71,7 @@ layer_dims = [6, 3, 2, 3, 6]
 EPSILON = 1e-10
 
 
-def get_data_args(
+def get_data_args_orig(
     col_idxs_set_empty: Optional[Dict] = None,
 ) -> Dict[str, Union[str, Dict]]:
     res = {
@@ -113,11 +114,11 @@ def mock_training_step(self, batch, split):
 
 class TestAEImputer(unittest.TestCase):
     def setUp(self) -> None:
-        nsamples = len(X["X"])
+        nsamples = len(X["nomissing"])
         rng = default_rng(seed)
         y = pd.Series(rng.integers(0, 2, nsamples))  # random binary outcome
         self.data_settings = {
-            "dataset_loader": get_dataset_loader(X["X"], y),
+            "dataset_loader": get_dataset_loader(X["nomissing"], y),
             "seed": seed,
             "test_size": 0.5,
             "val_size": 0.5,
@@ -134,7 +135,7 @@ class TestAEImputer(unittest.TestCase):
 
     @patch("autopopulus.data.dataset_classes.train_test_split")
     def test_logging(self, mock_split):
-        mock_split.return_value = (X["X"].index, X["X"].index)
+        mock_split.return_value = (X["nomissing"].index, X["nomissing"].index)
         with self.subTest("No Feature Map"):
             with patch("autopopulus.models.ae.LightningModule.log") as mock_log:
                 self.aeimp.fit(self.datamodule)  # rerun to be inside mock/patch
@@ -230,10 +231,19 @@ class TestAEImputer(unittest.TestCase):
                                         rank_zero_only=ANY,
                                         # *[ANY for i in range(6)],
                                     )
+        with self.subTest("semi_observed_training"):
+            with patch("autopopulus.models.ae.LightningModule.log") as mock_log:
+                missing_gt_settings = self.data_settings.copy()
+                # ground truth has missing values
+                missing_gt_settings["dataset_loader"] = get_dataset_loader(X["X"], y)
+                datamodule = CommonDataModule(**missing_gt_settings)
+                self.aeimp.fit(datamodule)
+                for call in mock_log.call_args_list:
+                    self.assertTrue(re.search(r"\w+/original/all/NA/", call[0][0]))
 
     @patch("autopopulus.data.dataset_classes.train_test_split")
     def test_basic(self, mock_split):
-        mock_split.return_value = (X["X"].index, X["X"].index)
+        mock_split.return_value = (X["nomissing"].index, X["nomissing"].index)
         self.aeimp.fit(self.datamodule)
         train_dataloader = self.datamodule.train_dataloader()
         with self.subTest("Transform Function"):
@@ -290,7 +300,7 @@ class TestAEImputer(unittest.TestCase):
     @patch("autopopulus.data.dataset_classes.train_test_split")
     def test_data_transforms(self, mock_split):
         """Can't set scale because I can't guarantee how the values will come back."""
-        onehot_df = X["X"]
+        onehot_df = X["nomissing"]
         mock_split.return_value = (onehot_df.index, onehot_df.index)
 
         datamodule = CommonDataModule(**self.data_settings)
@@ -338,7 +348,7 @@ class TestAEImputer(unittest.TestCase):
     @patch.object(AEDitto, "training_step", mock_training_step)
     @patch("autopopulus.data.dataset_classes.train_test_split")
     def test_device(self, mock_split):
-        mock_split.return_value = (X["X"].index, X["X"].index)
+        mock_split.return_value = (X["nomissing"].index, X["nomissing"].index)
         aeimp = AEImputer(
             **basic_imputer_args,
             replace_nan_with=0,
@@ -388,7 +398,7 @@ class TestAEImputer(unittest.TestCase):
         Here we're concerned with making sure what AEditto receives from AEImputer/the data is correct.
         Looking at: feature_map_inversion, col_idxs_by_type, and metrics.
         """
-        mock_split.return_value = (X["X"].index, X["X"].index)
+        mock_split.return_value = (X["nomissing"].index, X["nomissing"].index)
         self.aeimp.fit(self.datamodule)
         self.assertIsNone(self.aeimp.ae.feature_map_inversion)
         self._test_set_col_idxs_by_type(
@@ -411,6 +421,13 @@ class TestAEImputer(unittest.TestCase):
                     self.assertEqual(list(reduction_moduledict.keys()), ["original"])
                     for leaf_metrics in reduction_moduledict.values():
                         self.assertEqual(list(leaf_metrics.keys()), ["RMSE", "MAAPE"])
+        with self.subTest("semi_observed_training"):
+            missing_gt_settings = self.data_settings.copy()
+            # ground truth has missing values
+            missing_gt_settings["dataset_loader"] = get_dataset_loader(X["X"], y)
+            datamodule = CommonDataModule(**missing_gt_settings)
+            self.aeimp.fit(datamodule)
+            self.assertTrue(self.aeimp.ae.hparams.semi_observed_training)
 
         with self.subTest("discretize_continuous"):
             mock_disc_cuts.return_value = discretization["cuts"]
@@ -526,14 +543,13 @@ class TestAEDitto(unittest.TestCase):
     ):
         ae = AEDitto(
             **basic_imputer_args,
-            **get_data_args(),
+            **get_data_args_orig(),
             lossn="BCE",
         )
         ae.setup("fit")
         fill_val = tensor(-5000)
 
         data = tensor(X["X"].values)
-        true = tensor(X["nomissing"].values)
         non_missing_mask = tensor(~X["X"].isna().values).bool()
         # make it wrong in all the observed places and the same fill value for the missing ones
         reconstruct_batch = (data * -1).where(non_missing_mask, fill_val)
@@ -541,97 +557,100 @@ class TestAEDitto(unittest.TestCase):
         mock_binary_column_threshold.return_value = reconstruct_batch
         mock_onehot_column_threshold.return_value = reconstruct_batch
 
-        inputs = (data, reconstruct_batch, true, non_missing_mask)
+        inputs = (data, reconstruct_batch)
         cloned_inputs = (x.clone() for x in inputs)
-        (
-            imputed,
-            res_ground_truth,
-            res_non_missing_mask,
-        ) = ae.get_imputed_tensor_from_model_output(
-            *inputs,
-            original_data=None,
-            original_ground_truth=None,
-            data_feature_space="original",
+        imputed = ae.get_imputed_tensor_from_model_output(
+            *inputs, data_feature_space="original"
         )
         # observed values should be correct, missing values should be the fill value
         assert_allclose(imputed, nan_to_num(data, fill_val))
-        # should come out the same, no changes
-        assert_allclose(res_ground_truth, true)
-        # should come out the same, no changes
-        assert_allclose(res_non_missing_mask, non_missing_mask)
         # make sure the originals are not mutated
         for tens, cloned_tens in zip(inputs, cloned_inputs):
             assert_allclose(tens, cloned_tens)
 
-        with self.subTest("NaNs in Ground Truth"):
-            inputs = (data, reconstruct_batch, data, non_missing_mask)
-            cloned_inputs = (x.clone() for x in inputs)
-            (
-                imputed,
-                res_ground_truth,
-                res_non_missing_mask,
-            ) = ae.get_imputed_tensor_from_model_output(
-                *inputs,
-                original_data=None,
-                original_ground_truth=None,
-                data_feature_space="original",
+        with self.assertRaises(AssertionError):  # there is no "mapped"
+            ae.get_imputed_tensor_from_model_output(
+                *inputs, data_feature_space="mapped"
             )
-            # observed values should be correct, missing values should be the fill value
-            assert_allclose(imputed, nan_to_num(data, fill_val))
-            # ground truth should have the predicted values filled in
-            assert_allclose(res_ground_truth, nan_to_num(data, fill_val))
-            # should come out the same, no changes
-            assert_allclose(res_non_missing_mask, non_missing_mask)
-            # make sure the originals are not mutated
-            for tens, cloned_tens in zip(inputs, cloned_inputs):
-                assert_allclose(tens, cloned_tens)
 
         with self.subTest("Feature Mapped Data"):
+            ae = AEDitto(
+                **basic_imputer_args,
+                data_feature_space="mapped",
+                feature_map="target_encode_categorical",
+                nfeatures={
+                    "original": len(columns["columns"]),
+                    "mapped": len(X["target_encoded"].columns),
+                },
+                col_idxs_by_type={
+                    "original": {
+                        k: tensor(v, dtype=torch_long)
+                        for k, v in col_idxs_by_type["original"].items()
+                    },
+                    "mapped": {
+                        "binary": tensor([]),
+                        "onehot": tensor([]),
+                        "continuous": tensor(
+                            list(range(len(X["target_encoded"].columns)))
+                        ),
+                    },
+                },
+                columns={
+                    "original": columns["columns"],
+                    "mapped": X["target_encoded"].columns,
+                },
+                discretizations=None,
+                inverse_target_encode_map=None,
+                lossn="MSE",
+            )
+            ae.setup("fit")
+            # we simulate the mapping
+            ae.feature_map_inversion = lambda x: reconstruct_batch_original
+
             data_mapped = tensor(X["target_encoded"].values)
             data_original = tensor(X["X"].values)
             non_missing_mask_mapped = ~(isnan(data_mapped))
             non_missing_mask_original = ~(isnan(data_original))
             # make it wrong in all the observed places and the same fill value for the missing ones
+            mapped_fill_val = tensor(-90000)
+            original_fill_val = tensor(-238298)
             reconstruct_batch_mapped = (data_mapped * -1).where(
-                non_missing_mask_mapped, fill_val
+                non_missing_mask_mapped, mapped_fill_val
             )
             reconstruct_batch_original = (data_original * -1).where(
-                non_missing_mask_original, fill_val
+                non_missing_mask_original, original_fill_val
             )
-            ground_truth_mapped = tensor(X["target_encoded_true"].values)
-            ground_truth_original = tensor(X["nomissing"].values)
 
-            # we simulate the mapping
-            ae.feature_map = "target_encode_categorical"
-            ae.feature_map_inversion = lambda x: reconstruct_batch_original
-            # Test these separately, they're noops here
-            mock_binary_column_threshold.return_value = reconstruct_batch_original
-            mock_onehot_column_threshold.return_value = reconstruct_batch_original
-
-            inputs = (
-                data_mapped,
-                reconstruct_batch_mapped,
-                non_missing_mask_mapped,
-                ground_truth_mapped,
-                data_original,
-                ground_truth_original,
-            )
-            cloned_inputs = (x.clone() for x in inputs)
-            (
-                imputed,
-                res_ground_truth,
-                res_non_missing_mask,
-            ) = ae.get_imputed_tensor_from_model_output(
-                *inputs,
-                data_feature_space="original",  # even though it's mapped we want it in original
-            )
-            # observed values should be correct, missing values should be the fill value
-            assert_allclose(imputed, nan_to_num(data_original, fill_val))
-            assert_allclose(res_ground_truth, ground_truth_original)
-            assert_allclose(res_non_missing_mask, non_missing_mask_original)
-            # make sure the originals are not mutated
-            for tens, cloned_tens in zip(inputs, cloned_inputs):
-                assert_allclose(tens, cloned_tens)
+            with self.subTest("In Mapped Space"):
+                # Test these separately, they're noops here
+                mock_binary_column_threshold.return_value = reconstruct_batch_mapped
+                mock_onehot_column_threshold.return_value = reconstruct_batch_mapped
+                inputs = (data_mapped, reconstruct_batch_mapped)
+                cloned_inputs = (x.clone() for x in inputs)
+                # even though it's mapped we want it in original
+                imputed = ae.get_imputed_tensor_from_model_output(
+                    *inputs, data_feature_space="mapped"
+                )
+                # observed values should be correct, missing values should be the fill value
+                assert_allclose(imputed, nan_to_num(data_mapped, mapped_fill_val))
+                # make sure the originals are not mutated
+                for tens, cloned_tens in zip(inputs, cloned_inputs):
+                    assert_allclose(tens, cloned_tens)
+            with self.subTest("In Original Space"):
+                # Test these separately, they're noops here
+                mock_binary_column_threshold.return_value = reconstruct_batch_original
+                mock_onehot_column_threshold.return_value = reconstruct_batch_original
+                inputs = (data_original, reconstruct_batch_mapped)
+                cloned_inputs = (x.clone() for x in inputs)
+                # even though it's mapped we want it in original
+                imputed = ae.get_imputed_tensor_from_model_output(
+                    *inputs, data_feature_space="original"
+                )
+                # observed values should be correct, missing values should be the fill value
+                assert_allclose(imputed, nan_to_num(data_original, original_fill_val))
+                # make sure the originals are not mutated
+                for tens, cloned_tens in zip(inputs, cloned_inputs):
+                    assert_allclose(tens, cloned_tens)
 
     def test_idxs_to_tensor(self):
         with self.subTest("List"):
@@ -649,7 +668,7 @@ class TestAEDitto(unittest.TestCase):
     def test_vae(self):
         ae = AEDitto(
             **basic_imputer_args,
-            **get_data_args(
+            **get_data_args_orig(
                 col_idxs_set_empty=["categorical", "binary_vars", "onehot"],
             ),
             variational=True,
@@ -689,7 +708,7 @@ class TestAEDitto(unittest.TestCase):
     def test_basic(self):
         ae = AEDitto(
             **basic_imputer_args,
-            **get_data_args(
+            **get_data_args_orig(
                 col_idxs_set_empty=["continuous", "categorical", "binary", "onehot"],
             ),
             lossn="BCE",
@@ -733,7 +752,7 @@ class TestAEDitto(unittest.TestCase):
             new_settings["hidden_layers"] = [0.6, 0.1, 0.05, 0.1, 0.6]
             ae = AEDitto(
                 **new_settings,
-                **get_data_args(),
+                **get_data_args_orig(),
             )
             ae.setup("fit")
             encoder = nn.ModuleList(
@@ -762,7 +781,7 @@ class TestAEDitto(unittest.TestCase):
         with self.subTest("Loss"):
             ae = AEDitto(
                 **basic_imputer_args,
-                **get_data_args(),
+                **get_data_args_orig(),
                 lossn="BCE",
             )
             ae.setup("fit")
@@ -772,7 +791,7 @@ class TestAEDitto(unittest.TestCase):
         with self.subTest("Dropout"):
             ae = AEDitto(
                 **basic_imputer_args,
-                **get_data_args(),
+                **get_data_args_orig(),
                 dropout=0.5,
             )
             ae.setup("fit")
@@ -803,7 +822,7 @@ class TestAEDitto(unittest.TestCase):
     def test_longitudinal(self):
         ae = AEDitto(
             **basic_imputer_args,
-            **get_data_args(),
+            **get_data_args_orig(),
             longitudinal=True,
         )
         ae.setup("fit")
@@ -837,7 +856,7 @@ class TestAEDitto(unittest.TestCase):
         with self.subTest("Batchnorm"):
             ae = AEDitto(
                 **basic_imputer_args,
-                **get_data_args(),
+                **get_data_args_orig(),
                 batchnorm=True,
             )
             ae.setup("fit")
@@ -865,7 +884,7 @@ class TestAEDitto(unittest.TestCase):
         with self.subTest("With Dropout"):
             ae = AEDitto(
                 **basic_imputer_args,
-                **get_data_args(),
+                **get_data_args_orig(),
                 dropout=0.5,
                 batchnorm=True,
             )
@@ -901,7 +920,7 @@ class TestAEDitto(unittest.TestCase):
         with self.subTest("Dropout Corruption"):
             ae = AEDitto(
                 **basic_imputer_args,
-                **get_data_args(),
+                **get_data_args_orig(),
                 dropout_corruption=0.5,
             )
             ae.setup("fit")
@@ -928,7 +947,7 @@ class TestAEDitto(unittest.TestCase):
         with self.subTest("Batchswap Corruption"):
             ae = AEDitto(
                 **basic_imputer_args,
-                **get_data_args(),
+                **get_data_args_orig(),
                 batchswap_corruption=0.5,
             )
             ae.setup("fit")
@@ -954,7 +973,7 @@ class TestAEDitto(unittest.TestCase):
         with self.subTest("Dropout and Batchswap Corruption"):
             ae = AEDitto(
                 **basic_imputer_args,
-                **get_data_args(),
+                **get_data_args_orig(),
                 dropout_corruption=0.5,
                 batchswap_corruption=0.5,
             )

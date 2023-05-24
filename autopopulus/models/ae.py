@@ -85,10 +85,10 @@ class AEDitto(LightningModule):
         - {static, longitudinal}
         - {dropout, no dropout}
         - warm start {0, simple (mean/mode)}
-        - losses {mvec, all} x {BCE, MSE, BCE (CAT) + MSE (CTN), reconstruction+kldivergence, accuracy (discrete version only)}
+        - losses {semi-observed, all} x {BCE, MSE, BCE (CAT) + MSE (CTN), reconstruction+kldivergence, accuracy (discrete version only)}
             - BCE is always with logits.
             - reconstruction+kldivergence is always when variational flag is chosen.
-            - mvec ensures loss is only computed on originally non missing data
+            - semi-observed ensures loss is only computed on originally non missing data (ground truth)
     """
 
     def __init__(
@@ -120,6 +120,7 @@ class AEDitto(LightningModule):
                 ]
             ]
         ] = None,
+        semi_observed_training: bool = False,  # if the ground truth has nans
         replace_nan_with: Optional[Union[int, str]] = None,  # warm start
         mvec: bool = False,
         batchnorm: bool = False,
@@ -257,17 +258,17 @@ class AEDitto(LightningModule):
     # For (h,c) passthrough (currently not using, since validation doesn't accept hiddens)
     def training_step(self, batch, batch_idx):
         loss, outputs = self.shared_step(batch, "train")
-        self.shared_logging_step_end(outputs, "train")
+        self.shared_logging_step_end(outputs, batch, "train")
         return loss
 
     def validation_step(self, batch, batch_idx):
         loss, outputs = self.shared_step(batch, "val")
-        self.shared_logging_step_end(outputs, "val")
+        self.shared_logging_step_end(outputs, batch, "val")
         return loss
 
     def test_step(self, batch, batch_idx):
         loss, outputs = self.shared_step(batch, "test")
-        self.shared_logging_step_end(outputs, "test")
+        self.shared_logging_step_end(outputs, batch, "test")
         return loss
 
     def predict_step(self, batch, batch_idx):
@@ -284,15 +285,10 @@ class AEDitto(LightningModule):
             if "seq_len" in batch[self.hparams.data_feature_space]
             else None
         )
-        # set this before filling in data with replacement (if doing so)
-        where_data_are_observed = ~(isnan(data)).bool()
 
         ### Warm Start ###
-        # replace nan in ground truth too if its missing any
         if self.hparams.replace_nan_with is not None:
-            data, ground_truth = self._warm_start_imputation(
-                split, data, ground_truth, where_data_are_observed
-            )
+            data = self._warm_start_imputation(data)
 
         ### Model ###
         # pass through the sequence length (if they're none, nothing happens)
@@ -303,13 +299,16 @@ class AEDitto(LightningModule):
         ### Loss ###
         if split != "predict":
             """
-            Note: mvec will treat missing values as 0 (ignore in loss during training)
-            data * mask: normalize by # all features (missing and observed).
-            data[mask]: normalize by only # observed features. (Want)
+            Note: will treat missing values as 0 (ignore in loss during training)
+            data * mask: normalize by # all features, but preserves shape.
+            data[mask]: normalize by only # observed features, but will flatten.
             """
-            if self.hparams.mvec:  # and self.training
-                eval_pred = reconstruct_batch[where_data_are_observed]
-                eval_true = ground_truth[where_data_are_observed]
+            if self.hparams.semi_observed_training:
+                where_ground_truth_are_observed = ~(isnan(ground_truth)).bool()
+                # eval_pred = reconstruct_batch[where_ground_truth_are_observed]
+                # eval_true = ground_truth[where_ground_truth_are_observed]
+                eval_pred = reconstruct_batch * where_ground_truth_are_observed
+                eval_true = nan_to_num(ground_truth, 0)
             else:
                 eval_pred = reconstruct_batch
                 eval_true = ground_truth
@@ -317,62 +316,49 @@ class AEDitto(LightningModule):
             if self.hparams.variational:
                 loss = self.loss(eval_pred, eval_true, mu, logvar)
             else:
-                # NOTE: if no mvec and no vae for some reason it says the loss is modifying the output in place, the clone is a quick hack
-                # loss = self.loss(eval_pred.clone(), eval_true)
                 loss = self.loss(eval_pred, eval_true)
 
-        #### Evaluations ####
+        #### Get ouputs ####
         # detach so it metric computation doesn't go into the computational graph
-        # cpu since feature space inversion atm can't go on the GPU
         # float because sigmoid on half precision isn't implemented for CPU
-        detached_data = apply_to_collection(
-            (data, reconstruct_batch, ground_truth, where_data_are_observed),
-            Tensor,
-            detach_tensor,
-            to_cpu=False,
-        )
-        (
-            pred,
-            ground_truth,
-            where_data_are_observed,
-        ) = self.get_imputed_tensor_from_model_output(
-            *detached_data,
-            detach_tensor(batch["original"]["data"]),
-            detach_tensor(batch["original"]["ground_truth"]),
+        pred = self.get_imputed_tensor_from_model_output(
+            *apply_to_collection(
+                (
+                    batch["original"]["data"],
+                    reconstruct_batch,
+                ),  # this in mapped space and should be inverted in the fn
+                Tensor,
+                detach_tensor,
+                to_cpu=False,
+            ),
             "original",
         )
 
-        if split == "predict":  # don't do evaluation
+        if split == "predict":  # don't care about loss and mapped space preds
             return pred
 
-        # evaluate in mapped feature space
-        if "mapped" in batch:  # test not empty or None
-            # assumes detached_data has not been changed
-            self.metric_logging_step(
-                *self.get_imputed_tensor_from_model_output(
-                    *detached_data, None, None, "mapped"
+        preds = {"original": pred}
+        if "mapped" in batch:
+            pred_mapped = self.get_imputed_tensor_from_model_output(
+                # both in mapped space, no inversion
+                *apply_to_collection(
+                    (batch["mapped"]["data"], reconstruct_batch),
+                    Tensor,
+                    detach_tensor,
+                    to_cpu=False,
                 ),
-                split,
                 "mapped",
             )
-        return (
-            loss,
-            {
-                "loss": loss,
-                "pred": pred,
-                "ground_truth": ground_truth,
-                "where_data_are_observed": where_data_are_observed,
-            },
-        )
+            preds["mapped"] = pred_mapped
 
-    def _warm_start_imputation(
-        self,
-        split: str,
-        data: Tensor,
-        ground_truth: Tensor,
-        where_data_are_observed: Tensor,
-    ) -> Tuple[Tensor, Tensor]:
+        return (loss, {"loss": loss, "preds": preds})
+
+    # TODO: change this to be a layer
+    def _warm_start_imputation(self, data: Tensor) -> Tensor:
+        """Should ensure the passed in data is not modified."""
+        where_data_are_observed = (~isnan(data)).bool()
         if self.hparams.replace_nan_with == "simple":  # simple impute warm start
+            data = data.clone()
             # TODO[LOW]: this fails if the whole column is accidentally nan as part of the amputation process
             fn = simple_impute_tensor
             kwargs = {
@@ -394,13 +380,12 @@ class AEDitto(LightningModule):
             fn = nan_to_num
             kwargs = {"nan": self.hparams.replace_nan_with}
 
-        # apply
         data = fn(data, **kwargs)
-        if split != "predict":
-            ground_truth = fn(ground_truth, **kwargs)
-        return (data, ground_truth)
+        return data
 
-    def shared_logging_step_end(self, outputs: Dict[str, float], split: str):
+    def shared_logging_step_end(
+        self, outputs: Dict[str, Union[float, Dict[str, Tensor]]], batch, split: str
+    ):
         """Log metrics + loss at end of step.
         Compatible with dp mode: https://pytorch-lightning.readthedocs.io/en/latest/metrics.html#classification-metrics.
         """
@@ -424,68 +409,63 @@ class AEDitto(LightningModule):
             rank_zero_only=True,
         )
 
-        self.metric_logging_step(
-            outputs["pred"],
-            outputs["ground_truth"],
-            outputs["where_data_are_observed"],
-            split,
-            "original",
-        )
+        self.metric_logging_step(outputs["preds"], batch, split)
 
-    def metric_logging_step(
-        self,
-        pred: Tensor,
-        true: Tensor,
-        where_data_are_observed: Tensor,
-        split: str,
-        data_feature_space: str,
-    ):
+    def metric_logging_step(self, preds: Dict[str, Tensor], batch, split: str):
         """
-        Log all metrics.
+        Log all metrics. Do nothing if semi_observed_training (ground truth has nans, nothing to log).
         Order of keys:
         split -> filter_subgroup -> reduction -> feature space -> name -> fn
         https://torchmetrics.readthedocs.io/en/latest/pages/lightning.html#logging-torchmetrics
         # NOTE: if you add too many metrics it will mess up the progress bar
         """
-        for filter_subgroup, split_moduledict in self.metrics[
-            f"{split}_metrics"
-        ].items():
-            for reduction, moduledict in split_moduledict.items():
-                for name, metric in moduledict[data_feature_space].items():
-                    context = {  # listed in order of metric dict keys for reference
-                        "split": split,
-                        "filter_subgroup": filter_subgroup,
-                        "feature_space": data_feature_space,
-                        "reduction": reduction,
-                    }
+        if self.hparams.semi_observed_training:  # no logging
+            return
+        universal_log_settings = {
+            "on_step": False,
+            "on_epoch": True,
+            # for torchmetrics sync_dist won't affect metric logging at all
+            # this is just to get rid of the warning
+            "sync_dist": True,
+            "prog_bar": False,
+            "logger": True,
+            "rank_zero_only": True,
+        }
 
-                    log_settings = {
-                        "on_step": False,
-                        "on_epoch": True,
-                        # for torchmetrics sync_dist won't affect metric logging at all
-                        # this is just to get rid of the warning
-                        "sync_dist": True,
-                        "prog_bar": False,
-                        "logger": True,
-                        "rank_zero_only": True,
-                    }
-                    # I need to compute the metric in a separate line from logging
-                    # Ref: https://torchmetrics.readthedocs.io/en/latest/pages/lightning.html#common-pitfalls
-                    if (
-                        filter_subgroup == "missingonly"
-                        and (
-                            where_data_are_missing := ~(where_data_are_observed.bool())
-                        ).any()
-                    ):  # Compute metrics for missing only data
-                        metric_val = metric(pred, true, where_data_are_missing)
-                    else:
-                        metric_val = metric(pred, true)
+        for data_feature_space, imputed_data in preds.items():
+            data, ground_truth = (
+                detach_tensor(batch[data_feature_space]["data"]),
+                detach_tensor(batch[data_feature_space]["ground_truth"]),
+            )
+            for filter_subgroup, split_moduledict in self.metrics[
+                f"{split}_metrics"
+            ].items():
+                for reduction, moduledict in split_moduledict.items():
+                    for name, metric in moduledict[data_feature_space].items():
+                        context = {  # listed in order of metric dict keys for reference
+                            "split": split,
+                            "filter_subgroup": filter_subgroup,
+                            "feature_space": data_feature_space,
+                            "reduction": reduction,
+                        }
 
-                    self.log(
-                        IMPUTE_METRIC_TAG_FORMAT.format(name=name, **context),
-                        metric_val,
-                        **log_settings,
-                    )
+                        # I need to compute the metric in a separate line from logging
+                        # Ref: https://torchmetrics.readthedocs.io/en/latest/pages/lightning.html#common-pitfalls
+                        if (
+                            filter_subgroup == "missingonly"
+                            and (where_data_are_missing := isnan(data).bool()).any()
+                        ):  # Compute metrics for missing only data
+                            metric_val = metric(
+                                imputed_data, ground_truth, where_data_are_missing
+                            )
+                        else:
+                            metric_val = metric(imputed_data, ground_truth)
+
+                        self.log(
+                            IMPUTE_METRIC_TAG_FORMAT.format(name=name, **context),
+                            metric_val,
+                            **universal_log_settings,
+                        )
 
     #######################
     #   Initialization    #
@@ -933,29 +913,29 @@ class AEDitto(LightningModule):
         self,
         data: Tensor,
         reconstruct_batch: Tensor,
-        ground_truth: Tensor,
-        data_are_observed: Tensor,
-        original_data: Optional[Tensor],
-        original_ground_truth: Optional[Tensor],
         data_feature_space: str,  # original/mapped
-    ) -> Tuple[Tensor, Tensor, Tensor]:
+    ) -> Tensor:
         """
         Assumes all tensors passed in are detached.
         This function should not mutate the inputs.
-        1. Invert any feature mapping (if passing original data)
+        1. Invert any feature mapping (if passing original data when feature mapping)
         2. sigmoid/softmax categorical columns only + threshold
         3. keep original values where it's not missing.
         """
+        #
+        assert not (
+            data_feature_space == "mapped"
+            and self.hparams.data_feature_space == "original"
+        ), "Asked to get imputed output from model in mapped space when the data was not feature mapped."
         # don't modify the original one passed in when inverting/etc
         pred = reconstruct_batch.clone()
-        # get unmapped versions of everything
-        if original_data is not None and original_ground_truth is not None:
-            if self.feature_map_inversion is not None:
-                pred = self.feature_map_inversion(pred)
-            data = original_data
-            ground_truth = original_ground_truth
-            # re-compute locations where data is observed
-            data_are_observed = (~isnan(data)).bool()
+        data_are_observed = (~isnan(data)).bool()
+        # get unmapped versions of everything, logging in original but data is mapped
+        if (
+            data_feature_space == "original"
+            and self.hparams.data_feature_space == "mapped"
+        ) and self.feature_map_inversion is not None:
+            pred = self.feature_map_inversion(pred)
 
         # Sigmoid/softmax and threshold but in original space
         pred = binary_column_threshold(
@@ -978,15 +958,10 @@ class AEDitto(LightningModule):
 
         # Keep original where it's not missing, otherwise fill with pred
         imputed = data.where(data_are_observed, pred)
-        # If the original dataset contains nans (no fully observed), we need to fill in ground_truth too for the metric computation
-        # potentially nan in different places than data if amputing (should do nothing if originally fully observed/amputing)
-        ground_truth_are_observed = (~isnan(ground_truth)).bool()
-        # keep where ground_truth is observed, otherwise fill with pred
-        ground_truth = ground_truth.where(ground_truth_are_observed, pred)
 
         if imputed.isnan().sum():
             rank_zero_warn("NaNs still found in imputed data.")
-        return imputed, ground_truth, data_are_observed
+        return imputed
 
     @staticmethod
     def add_imputer_args(parent_parser: ArgumentParser) -> ArgumentParser:
