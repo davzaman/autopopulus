@@ -3,7 +3,6 @@ from typing import Callable, Dict, List, Optional, Union
 from pandas import DataFrame
 import numpy as np
 from numpy.random import default_rng
-from torch import isnan, tensor
 from tqdm import tqdm
 from pytorch_lightning.utilities import rank_zero_warn
 
@@ -35,7 +34,10 @@ def baseline_imputation_logic(
 
     imputed_data_per_split = fn(args, data)
     if any(
-        [imputed_data.isna().any().any() for imputed_data in imputed_data_per_split]
+        [
+            imputed_data.isna().any().any()
+            for imputed_data in imputed_data_per_split.values()
+        ]
     ):
         rank_zero_warn("NaNs still found in imputed data.")
     log = BasicLogger(
@@ -84,9 +86,9 @@ def evaluate_baseline_imputation(
 
     for split, imputed_data in imputed_data_per_split.items():
         pred = imputed_data
-        data = data.splits["data"][split]
+        input_data = data.splits["data"][split]
         true = data.splits["ground_truth"][split]
-        where_data_are_missing = isnan(data)
+        where_data_are_missing = np.isnan(input_data)
         if args.bootstrap_eval_imputer and split == "test":
             gen = default_rng(args.seed)
             for b in tqdm(range(args.num_bootstraps)):
