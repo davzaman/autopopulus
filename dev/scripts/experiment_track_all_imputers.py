@@ -34,7 +34,7 @@ imputer_groups = {
     # "baseline_imputers" :["simple","mice", "knn"],
     "baseline": ["simple", "mice"],
     "ae": ["vanilla", "dae", "batchswap"],
-    "vae": ["vae", "dvae"],
+    "variational": ["vae", "dvae"],
 }
 # replace_nan_with = ["simple", "0"]
 replace_nan_with = ["0"]
@@ -43,6 +43,7 @@ replace_nan_with = ["0"]
 #  Select experiments to run here  #
 ####################################
 # experiment switches: all experiments: none, baseline, ae, vae
+# can use a mix of group names and also individual ones
 # chosen_methods = ["none", "baseline", "ae", "vae"]
 chosen_methods = ["baseline"]
 experiment_tracker = "guild"
@@ -51,10 +52,15 @@ datasets = ["cure_ckd"]
 guild_use_queues: int = 0
 # fully_observed=no uses entire dataset
 all_data = False
-# all_data = True
 # fully_observed=yes will ampute and impute a missingness scenario
 fully_observed = True
 # fully_observed = False
+
+
+# expand to individual names
+chosen_methods = [
+    method for name in chosen_methods for method in imputer_groups.get(name, [name])
+]
 
 
 def cli_str(obj) -> str:
@@ -106,7 +112,7 @@ for dataset in datasets:
             )
         else:
             command_args = {
-                "method": cli_str(imputer_groups[method]),
+                "method": cli_str(method),
                 "dataset": cli_str(dataset),
             }
             # bootstrap evaluate the baseline models no matter what
