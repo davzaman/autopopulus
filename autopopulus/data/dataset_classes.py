@@ -412,8 +412,8 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
                 X = X.loc[idx]
                 y = y.loc[idx]
 
-            # get the columns before sklearn/other preprocessing steps strip them away
-            self.columns = {"original": X.columns}
+            # get the columns info before sklearn/other preprocessing steps strip them away
+            self._set_auxilliary_column_info(X)
 
             if self.fully_observed:
                 # keep rows NOT missing a value for any feature
@@ -437,18 +437,12 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
                 # drop the added latent features.
                 X = X.drop(X.filter(regex=r"latent_p\d+_.+").columns, axis=1)
 
-            # cat indices and ctn indices
-            self._set_col_idxs_by_type()
-            # group categorical (bin/multicat/onehot) vars together, etc.
-            self._set_groupby()
-
             # expand nans where its onehot to make sure the whole group is nan
             # before assigned to splits
             X = explode_nans(X, self.col_idxs_by_type["original"].get("onehot", []))
 
             # split by pt id
             self._split_dataset(ground_truth, X, y)
-            self._set_nfeatures()
             self._set_post_split_transforms()
 
     def train_dataloader(self):
@@ -537,6 +531,14 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
                     # Change name to be pyampute compatible
                     pattern["mechanism"] = "MNAR"
         return (X, pyampute_patterns)
+
+    def _set_auxilliary_column_info(self, X: DataFrame):
+        self.columns = {"original": X.columns}
+        # cat indices and ctn indices
+        self._set_col_idxs_by_type()
+        # group categorical (bin/multicat/onehot) vars together, etc.
+        self._set_groupby()
+        self._set_nfeatures()
 
     def _set_col_idxs_by_type(self):
         """
@@ -722,6 +724,11 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         There are separate pipelines for data and ground_truth.
         If feature_map, we will keep a separate transform function that only applies the non-mapping steps.
         If discretizing update the groupby (so all bins for the same var can be grouped later), and save the bins fitted/learned by discretizer.
+
+        # TODO write tests and asserts for these?
+        NOTE: FEATURE MAPPINGS SHOULD
+            1. preserve nans.
+            2. not introduce any new nans.
         """
 
         def get_steps(
@@ -816,7 +823,7 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
                         "target_encode_categorical",
                         TargetEncoder(
                             cols=intermediate_categorical_cols,
-                            handle_unknown="return_nan",
+                            handle_missing="return_nan",
                         ),
                     ),
                 )
@@ -1011,12 +1018,23 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         elif self.feature_map == "target_encode_categorical":
             target_encoder = data_pipeline.named_steps["target_encode_categorical"]
             # TODO: should there be data and ground_truth?
+            """
+            We drop the "unknown" and "nan" handling mappings.
+            When we're inverting there should be no nans, so we don't need nan inversion.
+                1. the model output should not have any nans
+                2. the ground truth should not have any nans. When we're semi_observed_training there will be no feature inversion. We only compute the loss in mapped space.
+            When we're inverting we don't care about the unknown mapping, we will opt for the closes known category and fill with that.
+            """
+            # If this changes test_transforms needs to change
             self.inverse_target_encode_map = {
-                "mapping": {  # get rid of "handle missing"/"handle unknown" categories, it will make the number of categories misalign when inverting
-                    k: v.drop([-1, -2], axis=0)
+                "mapping": {
+                    k: v.drop([-1, -2], axis=0, errors="ignore").dropna()
                     for k, v in target_encoder.mapping.items()
                 },  # Dict[str, DataFrame]
-                "ordinal_mapping": target_encoder.ordinal_encoder.mapping,  # List[Dict[str, Union[str, DataFrame, dtype]]]
+                "ordinal_mapping": [
+                    info["mapping"].drop([nan], axis=0, errors="ignore")
+                    for info in target_encoder.ordinal_encoder.mapping
+                ],  # List[Dict[str, Union[str, DataFrame, dtype]]]
             }
 
             # This changes the cardinality of the dataset

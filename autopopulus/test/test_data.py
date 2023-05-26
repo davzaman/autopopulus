@@ -274,10 +274,7 @@ class TestCommonDataModule(unittest.TestCase):
                         **self.standard,
                         scale=True,
                     )
-                    data.columns = {"original": df.columns}
-                    data._set_col_idxs_by_type()
-                    data._set_groupby()
-                    data._set_nfeatures()
+                    data._set_auxilliary_column_info(df)
                     data._split_dataset(df, df, y)
                     data._set_post_split_transforms()
                     for data_name in ["data", "ground_truth"]:
@@ -306,10 +303,7 @@ class TestCommonDataModule(unittest.TestCase):
                         feature_map="discretize_continuous",
                         uniform_prob=True,
                     )
-                    data.columns = {"original": df.columns}
-                    data._set_col_idxs_by_type()
-                    data._set_groupby()
-                    data._set_nfeatures()
+                    data._set_auxilliary_column_info(df)
                     data._split_dataset(df, df, y)
                     data._set_post_split_transforms()
 
@@ -376,10 +370,7 @@ class TestCommonDataModule(unittest.TestCase):
                         **self.standard,
                         feature_map="target_encode_categorical",
                     )
-                    data.columns = {"original": df.columns}
-                    data._set_col_idxs_by_type()
-                    data._set_groupby()
-                    data._set_nfeatures()
+                    data._set_auxilliary_column_info(df)
                     data._split_dataset(df, df, y)
                     data._set_post_split_transforms()
                     # If i called setup this would set auxilliary data, I want the intermediate stuff
@@ -444,10 +435,7 @@ class TestCommonDataModule(unittest.TestCase):
                     feature_map="target_encode_categorical",
                     scale=True,
                 )
-                data.columns = {"original": df.columns}
-                data._set_col_idxs_by_type()
-                data._set_groupby()
-                data._set_nfeatures()
+                data._set_auxilliary_column_info(df)
                 data._split_dataset(df, df, y)
                 data._set_post_split_transforms()
                 for data_name in ["data", "ground_truth"]:
@@ -567,10 +555,7 @@ class TestCommonDataModule(unittest.TestCase):
                         **self.standard,
                         scale=True,
                     )
-                    data.columns = {"original": df.columns}
-                    data._set_col_idxs_by_type()
-                    data._set_groupby()
-                    data._set_nfeatures()
+                    data._set_auxilliary_column_info(df)
                     data._split_dataset(df, df, y)
                     data._set_post_split_transforms()
                     for data_name in ["data", "ground_truth"]:
@@ -596,10 +581,7 @@ class TestCommonDataModule(unittest.TestCase):
                         feature_map="discretize_continuous",
                         uniform_prob=True,
                     )
-                    data.columns = {"original": df.columns}
-                    data._set_col_idxs_by_type()
-                    data._set_groupby()
-                    data._set_nfeatures()
+                    data._set_auxilliary_column_info(df)
                     data._split_dataset(df, df, y)
                     data._set_post_split_transforms()
 
@@ -652,10 +634,7 @@ class TestCommonDataModule(unittest.TestCase):
                         **self.standard,
                         feature_map="target_encode_categorical",
                     )
-                    data.columns = {"original": df.columns}
-                    data._set_col_idxs_by_type()
-                    data._set_groupby()
-                    data._set_nfeatures()
+                    data._set_auxilliary_column_info(df)
                     data._split_dataset(df, df, y)
                     data._set_post_split_transforms()
                     # should have both original and mapped now
@@ -692,10 +671,7 @@ class TestCommonDataModule(unittest.TestCase):
                     feature_map="target_encode_categorical",
                     scale=True,
                 )
-                data.columns = {"original": df.columns}
-                data._set_col_idxs_by_type()
-                data._set_groupby()
-                data._set_nfeatures()
+                data._set_auxilliary_column_info(df)
                 data._split_dataset(df, df, y)
                 data._set_post_split_transforms()
                 for data_name in ["data", "ground_truth"]:

@@ -490,16 +490,19 @@ def get_invert_target_encode_tensor_args(
         )
     args["col_idxs"] = list_to_tensor(args["col_idxs"], device=to_device)
     args["orig_col_idxs"] = list_to_tensor(args["orig_col_idxs"], device=to_device)
-    # ordinal_values = [
-    #     list_to_tensor(list(mapping.keys()), dtype=torch.float)
-    #     for mapping in mean_to_ordinal_map["mapping"].values()
-    # ]
     args["original_categorical_values"] = [  # list of tensors
-        list_to_tensor(
-            info["mapping"].index.values, dtype=torch.float, device=to_device
-        )
-        for info in ordinal_encoder_mapping
+        list_to_tensor(mapping.index.values, dtype=torch.float, device=to_device)
+        for mapping in ordinal_encoder_mapping
     ]
+    # can't reliably check # classes bc if it's multicat but not onehot itll say 1 class
+    assert all(
+        [
+            len(ordinal_to_ctn_mapping) == len(cat_to_ordinal_mapping)
+            for ordinal_to_ctn_mapping, cat_to_ordinal_mapping in zip(
+                args["mean_encoded_values"], args["original_categorical_values"]
+            )
+        ]
+    ), "Mapping from category to ordinal doesn't match mapping from ordinal to continuous."
     return args
 
 
@@ -528,7 +531,7 @@ def invert_target_encoding_tensor_gpu(
             )
             for i, col_idx in enumerate(col_idxs)
         ]
-    )  # .T  # returns 1 row per column but we want to keep column format (so transpose)
+    )
     # replace the continuous values with the categorcal numerical encoded number
     mapped_to_categorical = []
     for i, cat_vals in enumerate(original_categorical_values):

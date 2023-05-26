@@ -250,7 +250,6 @@ class TestTransforms(unittest.TestCase):
                 onehot_df.astype(float),
                 hypothesis["cat_cols"],
                 onehot_df.columns,
-                combined_groupby,
             )
 
     # @patch("autopopulus.data.MDLDiscretization.EntropyMDL._entropy_discretize_sorted")
@@ -614,30 +613,47 @@ class TestTransforms(unittest.TestCase):
         true_df: pd.DataFrame,
         cat_cols: List[str],
         orig_cols: List[str],
-        combined_onehots_groupby: Optional[Dict[int, int]] = None,
     ):
-        enc = TargetEncoder(
-            cols=cat_cols, handle_missing="return_nan", handle_unknown="return_nan"
-        )
+        # this needs to match CommonDataModule set_post_split_transform
+        enc = TargetEncoder(cols=cat_cols, handle_missing="return_nan")
         enc.fit(df, y)
-        # make the encoding random
+        # make the encoding random, otherwise multiple categories might map to the same thing, and I can't reliably recover the values to check
+        # however, keep the nans and unknown value stuff to make sure i deal with them properly.
         rng = default_rng()
         enc.mapping = {
-            colname: series_mapping.map(lambda enc_v: rng.random())
+            colname: series_mapping.map(
+                lambda enc_v: rng.random() if not np.isnan(enc_v) else enc_v
+            )
             for colname, series_mapping in enc.mapping.items()
         }
+        inverse_target_encode_map = {
+            "mapping": {
+                k: v.drop([-1, -2], axis=0, errors="ignore").dropna()
+                for k, v in enc.mapping.items()
+            },  # Dict[str, DataFrame]
+            "ordinal_mapping": [
+                info["mapping"].drop([np.nan], axis=0, errors="ignore")
+                for info in enc.ordinal_encoder.mapping
+            ],  # List[Dict[str, Union[str, DataFrame, dtype]]]
+        }
+
         unencoded_tensor = invert_target_encoding_tensor_gpu(
             torch.tensor(enc.transform(df, y).values),
             **get_invert_target_encode_tensor_args(
-                enc.mapping,
-                enc.ordinal_encoder.mapping,
-                df.columns,
-                orig_cols,
+                inverse_target_encode_map["mapping"],
+                inverse_target_encode_map["ordinal_mapping"],
+                df.columns,  # mapped
+                orig_cols,  # orig
                 DEFAULT_DEVICE,
             ),
         )
+        # by the time we invert we shouldn't have nans, but for our tests I can't control that
+        # I just need to ensure we've reliably recovered the observe values
+        where_input_data_observed = torch.tensor(~true_df.isna().values)
         np.testing.assert_allclose(
-            unencoded_tensor, torch.tensor(true_df.values), atol=1
+            unencoded_tensor[where_input_data_observed],
+            torch.tensor(true_df.values)[where_input_data_observed],
+            atol=1,
         )
 
 
