@@ -38,6 +38,7 @@ from autopopulus.utils.log_utils import (
     IMPUTE_METRIC_TAG_FORMAT,
     TUNE_LOG_DIR,
     AutoencoderLogger,
+    copy_artifacts_from_tune,
     get_serialized_model_path,
 )
 from autopopulus.models.callbacks import VisualizeModelCallback
@@ -217,11 +218,7 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         )
         result = tuner.fit()
         best_result: air.Result = result.get_best_result(metric=tune_metric, mode="min")
-        checkpoint: LightningCheckpoint = best_result.checkpoint
-        best_model: pl.LightningModule = checkpoint.get_model(AEDitto)
-        self.ae = best_model
-        # TODO: do i need to do any cleanup?
-        # TODO: do i need to move the serialized model?
+        self._save_artifacts_from_tune(best_result)
         self._save_test_data(data)
         return self
 
@@ -396,6 +393,21 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
             callbacks.append(tune_callback)
 
         return callbacks
+
+    ######################
+    #    Tune Helpers    #
+    ######################
+    def _save_artifacts_from_tune(self, best_result: air.Result):
+        # Assign best model, and then copy the metrics and model to the right dir for logging
+        checkpoint: LightningCheckpoint = best_result.checkpoint
+        best_model: pl.LightningModule = checkpoint.get_model(AEDitto)
+        self.ae = best_model
+        model_log_path = get_serialized_model_path(
+            f"AEDitto_{self.data_type_time_dim.name}", "pt", self.trial_num
+        )
+        copy_artifacts_from_tune(
+            best_result, model_path=model_log_path, metric_path=self.logger.save_dir
+        )
 
     def _get_tune_grid(self, data: CommonDataModule) -> Dict[str, Any]:
         if self.fast_dev_run or data.limit_data:

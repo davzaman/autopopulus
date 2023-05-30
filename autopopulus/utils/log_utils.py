@@ -1,6 +1,6 @@
 from argparse import Namespace
 from logging import FileHandler, StreamHandler, basicConfig, INFO
-from shutil import copy
+from shutil import copy, rmtree
 from typing import Any, Dict, List, Optional, Union
 
 from regex import search
@@ -10,6 +10,7 @@ import sys
 
 from torch.utils.tensorboard import SummaryWriter
 
+from ray import air
 from aim import Run, Text
 
 from autopopulus.data.types import DataTypeTimeDim
@@ -249,6 +250,7 @@ def copy_log_from_tune(
     best_tune_logdir: str, logdir: str, logger: SummaryWriter = None
 ):
     """
+    NOTE: This is for older version of Ray.
     We want to copy these over locally so we can remove the tune files and readily compare the output later.
     Walk through the best tune run logdirectory,
         ignoring top-level (which is tune metadata we don't care about),
@@ -259,3 +261,44 @@ def copy_log_from_tune(
             for file in files:
                 if search("tfevents", file):  # only tfevent files
                     copy(join(root, file), logdir)
+
+
+def copy_artifacts_from_tune(
+    best_result: air.Result, model_path: str, metric_path: str
+):
+    """
+    Copy metrics and model.
+    Ray Tune output in 2.4.0 looks like:
+    long_tune_name/
+        checkpoint_000<num>/
+            model --> KEEP
+        rank_0/
+            checkpoints/
+                *.ckpt
+            *tfevents*
+            hparams.yaml
+        rank_.../
+        ...
+        *tfevents* --> KEEP
+        params.json --> KEEP
+        params.pkl (just a pkl of the json)
+        progress.csv
+        result.json --> KEEP
+
+    We don't want the per-rank tfevents, just the high level one.
+    """
+    # if not exists(metric_path):
+    #     makedirs(metric_path)
+    # Model path should already exist
+
+    copy(  # copy model checkpoint
+        join(best_result.checkpoint.path, "model"), model_path
+    )
+    # NOTE: looks like metrics are captured anyway from normal logging.
+    # copy metrics
+    # for root, dirs, files in walk(best_result.log_dir):
+    #     if root == str(best_result.log_dir):  # only look at high level (not per rank)
+    #         for file in files:  # only tfevent and json files
+    #             if search("tfevents|.*.json", file):
+    #                 copy(join(root, file), metric_path)
+    rmtree(TUNE_LOG_DIR)  # delete tune files
