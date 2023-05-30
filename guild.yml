@@ -28,6 +28,9 @@
     dataset:
       required: no
       type: string
+    bootstrap-evaluate-imputer:
+      required: no
+      type: string
 
 # what to do when you run `guild run`
 - operations:
@@ -44,9 +47,9 @@
         $include:
           - high-level-flags
       steps:
-        - run: impute method=${method} experiment-name=${experiment-name}  fully-observed=${fully-observed} feature-map=${feature-map} percent-missing=${percent-missing} amputation-patterns=${amputation-patterns} replace-nan-with=${replace-nan-with} dataset=${dataset}
+        - run: impute method=${method} experiment-name=${experiment-name}  fully-observed=${fully-observed} feature-map=${feature-map} percent-missing=${percent-missing} amputation-patterns=${amputation-patterns} replace-nan-with=${replace-nan-with} dataset=${dataset} bootstrap-evaluate-imputer=${bootstrap-evaluate-imputer}
+        - run: evaluate method=${method} experiment-name=${experiment-name} fully-observed=${fully-observed} feature-map=${feature-map} percent-missing=${percent-missing} amputation-patterns=${amputation-patterns} replace-nan-with=${replace-nan-with} dataset=${dataset} bootstrap-evaluate-imputer=${bootstrap-evaluate-imputer}
         - run: predict method=${method} experiment-name=${experiment-name}  fully-observed=${fully-observed} feature-map=${feature-map} percent-missing=${percent-missing} amputation-patterns=${amputation-patterns} replace-nan-with=${replace-nan-with} dataset=${dataset}
-        - run: evaluate method=${method} experiment-name=${experiment-name} fully-observed=${fully-observed} feature-map=${feature-map} percent-missing=${percent-missing} amputation-patterns=${amputation-patterns} replace-nan-with=${replace-nan-with} dataset=${dataset}
 
     impute:
       description: Train an imputer and run predictions.
