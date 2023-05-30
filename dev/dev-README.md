@@ -1,6 +1,8 @@
 # Project Structure
 - `options.yml`: argument values for running autopopulus in general (e.g., data paths to datasets, and other arguments to run imputation).
+  When not running with guild, all ArgParse defaults will be overriden with values provided here.
 - `guild.yml`: config for running experiments via guild for experiment tracking.
+  Note that any flags defined here need to be passed in on calling `guild run ...`, the `options.yml` values will not be filled in, only the ArgParse defaults defined in my code.
 - `scripts/`: directory of helpful scripts for running experiments via guild.
 - `notebooks/`: directory of jupyter notebooks for experimental or adhoc scripts
 - `autopopulus/`: root directory for all the source code
@@ -98,14 +100,7 @@ It turns out you need `ray-default` in order to use the dashboard in addition to
 Ray Tune is on pip and conda-forge. You can check if conda-forge has the most up-to-date versions [here](https://github.com/conda-forge/ray-packages-feedstock).
 Installation instructions from ray [here](https://docs.ray.io/en/latest/ray-overview/installation.html#installing-from-conda-forge).
 
-## ray-lightning
-It's very finicky, and I need to use the most up-to-date version on github.
-First uninstall `ray-lightning` and then reinstall with `pip install git+https://github.com/ray-project/ray_lightning@<desiredcommithash>`.
-If using ray-lightning, expect `GPU Available: False`.
-This is fine, as we have to tell pytorch-lightning there are no GPUs so it [doesn't complain](https://github.com/ray-project/ray_lightning/issues/64).
-
 # Includes:
-
 - A .gitignore file from this [source](https://raw.githubusercontent.com/github/gitignore/master/Python.gitignore)
 - The nbstripout library that removes any jupyter notebook outputs to be avoided from versioning.
   - Follow instructions on [official repo site](https://github.com/kynan/nbstripout)
