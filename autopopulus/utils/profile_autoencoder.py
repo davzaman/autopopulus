@@ -120,7 +120,6 @@ if __name__ == "__main__":
             num_gpus=num_gpus,
             hidden_layers=[0.5],
             learning_rate=0.1,
-            mvec=False,
             variational=False,
             activation="ReLU",
             optimn=optimn,

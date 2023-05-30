@@ -25,7 +25,6 @@ AE_METHOD_SETTINGS = {
             "uniform_prob": True,
         },
         "train": {
-            "mvec": False,
             "variational": False,
             "activation": "ReLU",
             "optimn": "Adam",
@@ -42,7 +41,6 @@ AE_METHOD_SETTINGS = {
             "lossn": "MSE",
             "optimn": "SGD",
             "activation": "Tanh",
-            "mvec": False,
             "variational": False,
             "dropout_corruption": 0.5,
             "replace_nan_with": "simple",
@@ -57,6 +55,7 @@ AE_METHOD_SETTINGS = {
     # - Categorical vars are one-hot encoded.
     # - Everything including continuous vars are sigmoided at the end.
     # Ref: https://github.com/greenelab/DAPS/
+    # WARNING: This is deprecated, mvec is deprecated.
     "dae_mvec": {
         "data": {
             "scale": True,

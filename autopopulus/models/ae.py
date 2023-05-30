@@ -122,7 +122,6 @@ class AEDitto(LightningModule):
         ] = None,
         semi_observed_training: bool = False,  # if the ground truth has nans
         replace_nan_with: Optional[Union[int, str]] = None,  # warm start
-        mvec: bool = False,
         batchnorm: bool = False,
         variational: bool = False,
         longitudinal: bool = False,  # Convenience on top of data type time dim
@@ -1011,12 +1010,6 @@ class AEDitto(LightningModule):
             type=str,
             default="ReLU",
             help="When training the autoencoder, what activation function to use between each layer.",
-        )
-        p.add_argument(
-            "--mvec",
-            type=str2bool,
-            default=False,
-            help="When training the autoencoder, ignore missing values in the loss.",
         )
         p.add_argument(
             "--variational",
