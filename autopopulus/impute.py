@@ -1,4 +1,3 @@
-from logging import error
 from os import makedirs
 from typing import Callable
 from argparse import Namespace
@@ -8,6 +7,7 @@ from os.path import join, dirname
 
 #### Traceback ####
 from rich.traceback import install
+
 
 install(theme="solarized-dark")
 
@@ -24,24 +24,18 @@ from autopopulus.utils.log_utils import init_sys_logger
 from autopopulus.utils.utils import rank_zero_print, seed_everything, should_ampute
 from autopopulus.datasets import DATA_LOADERS
 from autopopulus.data import CommonDataModule
-from autopopulus.task_logic import (
-    baseline_static_imputation,
-    baseline_longitudinal_imputation,
-    baseline_imputation,
-)
+from autopopulus.task_logic import baseline_static_imputation, baseline_imputation
 from autopopulus.task_logic.ae_imputation import AE_METHOD_SETTINGS, ae_imputation_logic
+from autopopulus.task_logic.utils import ImputerT
 from autopopulus.data.types import DataT  # Filter warnings
 
 
 def get_imputation_logic(args: Namespace) -> Callable[[Namespace, DataT], None]:
-    if args.method in AE_METHOD_SETTINGS:
+    imputer_type = ImputerT.type(args.method)
+    if imputer_type == ImputerT.AE:
         return ae_imputation_logic
-    elif hasattr(baseline_static_imputation, args.method) or hasattr(
-        baseline_longitudinal_imputation, args.method
-    ):
+    elif imputer_type == ImputerT.BASELINE:
         return baseline_imputation.baseline_imputation_logic
-    else:
-        error(f"Method passed ({args.method}) is not a supported method.")
 
 
 def main():

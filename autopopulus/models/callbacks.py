@@ -16,6 +16,7 @@ from autopopulus.utils.log_utils import TIME_TAG_FORMAT
 
 
 class EpochTimerCallback(Callback):
+    # TODO[LOW]: Write test
     # modified from Timer
     # https://lightning.ai/docs/pytorch/stable/_modules/lightning/pytorch/callbacks/timer.html#Timer
     def __init__(self) -> None:
