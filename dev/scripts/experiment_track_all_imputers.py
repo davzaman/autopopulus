@@ -45,7 +45,7 @@ replace_nan_with = ["0"]
 # experiment switches: all experiments: none, baseline, ae, vae
 # can use a mix of group names and also individual ones
 # chosen_methods = ["none", "baseline", "ae", "vae"]
-chosen_methods = ["baseline"]
+chosen_methods = ["baseline", "ae", "variational"]
 experiment_tracker = "guild"
 datasets = ["cure_ckd"]
 # if use_queues nonzero, will use queues, specify the number of queues (parralellism).
@@ -120,19 +120,21 @@ for dataset in datasets:
             if method in imputer_groups["baseline"]:
                 command_args["bootstrap_eval_imputer"] = cli_str(True)
             # Added to the end if the conditions are met otherwise nothing happens
-            if method == "ae":
+            if method in imputer_groups["ae"]:
                 command_args = {
                     **command_args,
                     "feature-map": cli_str(feature_mapping),
                     "replace-nan-with": cli_str(replace_nan_with),
                 }
-            elif method == "vae":  # on vae and dvae only try target_encode_categorical
+            elif (
+                method in imputer_groups["variational"]
+            ):  # on vae and dvae only try target_encode_categorical
                 command_args = {
                     **command_args,
                     "feature-map": cli_str(feature_mapping_variational),
                     "replace-nan-with": cli_str(replace_nan_with),
                 }
-            if command_args["feature-map"] == "discretize_continuous":
+            if command_args.get("feature-map", "") == "discretize_continuous":
                 command_args["uniform-prob"] = True
 
             if all_data:

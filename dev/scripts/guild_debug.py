@@ -7,7 +7,7 @@ if __name__ == "__main__":
             "main",
             # "train",
             "method=vanilla",
-            "fully-observed=no",
+            "fully-observed=yes",
             "feature-map=target_encode_categorical",
             "replace-nan-with=0",
             "--debug-sourcecode=.",
