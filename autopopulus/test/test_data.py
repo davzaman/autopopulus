@@ -1047,8 +1047,16 @@ class TestCommonDataModule(unittest.TestCase):
             np.testing.assert_array_equal(
                 data.splits["data"]["train"].columns, df.columns
             )
-            # there should be missing values
-            self.assertGreater(data.splits["data"]["train"].isna().sum().sum(), 0)
+            # there should be missing values in data but not ground truth
+            for split in ["train", "val", "test"]:
+                self.assertGreater(data.splits["data"][split].isna().sum().sum(), 0)
+                self.assertEqual(
+                    data.splits["ground_truth"][split].isna().sum().sum(), 0
+                )
+                # columns should not be changed at all
+                pd.testing.assert_index_equal(
+                    data.splits["data"][split].columns, df.columns
+                )
 
             with self.subTest("Onehot nans"):
                 onehot_df = onehot_multicategorical_column(
@@ -1074,18 +1082,25 @@ class TestCommonDataModule(unittest.TestCase):
                 )
                 data.columns = {"original": onehot_df.columns}
                 data.setup("fit")
-                # there should be missing values
-                self.assertGreater(data.splits["data"]["train"].isna().sum().sum(), 0)
-                # the onehot groups should all be nan if one is nan
-                for onehot_group in data.col_idxs_by_type["original"]["onehot"]:
-                    onehot_group_isna = (
-                        data.splits["data"]["train"].iloc[:, onehot_group].isna()
+                for split in ["train", "val", "test"]:
+                    # there should be missing values in data but none in ground truth
+                    self.assertEqual(
+                        data.splits["ground_truth"][split].isna().sum().sum(), 0
                     )
-                    self.assertTrue(
-                        (
-                            onehot_group_isna.all(axis=1)
-                            | (~onehot_group_isna.any(axis=1))
-                        ).all()
+                    self.assertGreater(data.splits["data"][split].isna().sum().sum(), 0)
+                    # the onehot groups should all be nan if one is nan
+                    for onehot_group in data.col_idxs_by_type["original"]["onehot"]:
+                        onehot_group_isna = (
+                            data.splits["data"][split].iloc[:, onehot_group].isna()
+                        )
+                        self.assertTrue(
+                            (
+                                onehot_group_isna.all(axis=1)
+                                | (~onehot_group_isna.any(axis=1))
+                            ).all()
+                        )
+                    pd.testing.assert_index_equal(
+                        data.splits["data"][split].columns, onehot_df.columns
                     )
 
         with self.subTest("_add_latent_features"):
