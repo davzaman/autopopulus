@@ -182,6 +182,7 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         lightning_config = (
             LightningConfigBuilder()
             .module(cls=AEDitto, *ae_args, **ae_kwargs)
+            .ddp_strategy(find_unused_parameters=False)
             .trainer(
                 **self._get_trainer_args(
                     data, trainer_overrides={"enable_checkpointing": True}
