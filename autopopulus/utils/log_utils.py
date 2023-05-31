@@ -37,6 +37,7 @@ IMPUTE_METRIC_TAG_FORMAT = (
     "{split}/{feature_space}/{filter_subgroup}/{reduction}/{name}"
 )
 PREDICT_METRIC_TAG_FORMAT = "{predictor}/{aggregate_type}/{name}"
+TIME_TAG_FORMAT = "{split}/epoch_duration(sec)"
 
 
 # Ref: https://stackoverflow.com/a/6794451/1888794
@@ -287,18 +288,17 @@ def copy_artifacts_from_tune(
 
     We don't want the per-rank tfevents, just the high level one.
     """
-    # if not exists(metric_path):
-    #     makedirs(metric_path)
     # Model path should already exist
-
     copy(  # copy model checkpoint
         join(best_result.checkpoint.path, "model"), model_path
     )
-    # NOTE: looks like metrics are captured anyway from normal logging.
+
     # copy metrics
-    # for root, dirs, files in walk(best_result.log_dir):
-    #     if root == str(best_result.log_dir):  # only look at high level (not per rank)
-    #         for file in files:  # only tfevent and json files
-    #             if search("tfevents|.*.json", file):
-    #                 copy(join(root, file), metric_path)
+    if not exists(metric_path):
+        makedirs(metric_path)
+    for root, dirs, files in walk(best_result.log_dir):
+        if root == str(best_result.log_dir):  # only look at high level (not per rank)
+            for file in files:  # only tfevent and json files
+                if search("tfevents|.*.json", file):
+                    copy(join(root, file), metric_path)
     rmtree(TUNE_LOG_DIR)  # delete tune files

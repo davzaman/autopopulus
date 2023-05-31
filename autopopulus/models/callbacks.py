@@ -1,14 +1,81 @@
 from os import makedirs
-from typing import List
+import time
+from typing import Dict, List, Optional
 from matplotlib import pyplot as plt
 import numpy as np
 import seaborn as sns
 from os.path import join
 from pytorch_lightning import Callback, LightningModule, Trainer
+from pytorch_lightning.trainer.states import RunningStage
 import torch
 import torch.nn as nn
 
+from autopopulus.utils.log_utils import TIME_TAG_FORMAT
+
 # This is modified to be a callback from https://lightning.ai/docs/pytorch/stable/notebooks/course_UvA-DL/03-initialization-and-optimization.html
+
+
+class EpochTimerCallback(Callback):
+    # modified from Timer
+    # https://lightning.ai/docs/pytorch/stable/_modules/lightning/pytorch/callbacks/timer.html#Timer
+    def __init__(self) -> None:
+        self._start_time: Dict[RunningStage, Optional[float]] = {
+            stage: None for stage in RunningStage
+        }
+        self.universal_log_settings = {
+            "on_step": False,
+            "on_epoch": True,
+            # for torchmetrics sync_dist won't affect metric logging at all
+            # this is just to get rid of the warning
+            "sync_dist": True,
+            "prog_bar": False,
+            "logger": True,
+            "rank_zero_only": True,
+        }
+
+    def start_time(self, stage: str = RunningStage.TRAINING) -> Optional[float]:
+        """Return the start time of a particular stage (in seconds)"""
+        stage = RunningStage(stage)
+        return self._start_time[stage]
+
+    def on_train_epoch_start(
+        self, trainer: Trainer, pl_module: LightningModule
+    ) -> None:
+        self._start_time[RunningStage.TRAINING] = time.monotonic()
+
+    def on_validation_epoch_start(
+        self, trainer: Trainer, pl_module: LightningModule
+    ) -> None:
+        self._start_time[RunningStage.VALIDATING] = time.monotonic()
+
+    def on_test_epoch_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
+        self._start_time[RunningStage.TESTING] = time.monotonic()
+
+    def on_train_epoch_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
+        end_time = time.monotonic()
+        pl_module.log(
+            TIME_TAG_FORMAT.format(split="train"),
+            end_time - self.start_time(RunningStage.TRAINING),
+            **self.universal_log_settings,
+        )
+
+    def on_validation_epoch_end(
+        self, trainer: Trainer, pl_module: LightningModule
+    ) -> None:
+        end_time = time.monotonic()
+        pl_module.log(
+            TIME_TAG_FORMAT.format(split="val"),
+            end_time - self.start_time(RunningStage.VALIDATING),
+            **self.universal_log_settings,
+        )
+
+    def on_test_epoch_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
+        end_time = time.monotonic()
+        pl_module.log(
+            TIME_TAG_FORMAT.format(split="test"),
+            end_time - self.start_time(RunningStage.TESTING),
+            **self.universal_log_settings,
+        )
 
 
 class VisualizeModelCallback(Callback):

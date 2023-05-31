@@ -41,7 +41,7 @@ from autopopulus.utils.log_utils import (
     copy_artifacts_from_tune,
     get_serialized_model_path,
 )
-from autopopulus.models.callbacks import VisualizeModelCallback
+from autopopulus.models.callbacks import EpochTimerCallback, VisualizeModelCallback
 from autopopulus.data import CommonDataModule
 from autopopulus.data.types import DataTypeTimeDim
 from autopopulus.data.constants import PATIENT_ID, TIME_LEVEL
@@ -373,6 +373,7 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
     ) -> List[Callback]:
         """To pass to pl.Trainer."""
         callbacks = []  # ModelSummary(max_depth=3),
+        callbacks.append(EpochTimerCallback())
         if early_stopping:
             callbacks.append(
                 EarlyStopping(
