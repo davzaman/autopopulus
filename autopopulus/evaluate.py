@@ -3,13 +3,22 @@ from torch.utils.data import DataLoader
 from torch.utils.data.dataset import Subset
 from numpy.random import default_rng
 from tqdm import tqdm
+from os.path import join
+import pickle as pk
 import argparse  # needed to guild knows to import flags
+from argparse import Namespace
 
 from autopopulus.utils.get_set_cli_args import init_cli_args, load_cli_args
-from autopopulus.utils.utils import resample_indices_only, seed_everything
+from autopopulus.utils.utils import (
+    rank_zero_print,
+    resample_indices_only,
+    seed_everything,
+)
 from autopopulus.models.ap import AEImputer
 from autopopulus.utils.log_utils import get_serialized_model_path
 from autopopulus.task_logic.ae_imputation import AE_METHOD_SETTINGS
+from autopopulus.task_logic.baseline_imputation import evaluate_baseline_imputation
+from autopopulus.task_logic.utils import ImputerT
 
 
 def main():
@@ -21,10 +30,46 @@ def main():
     load_cli_args()
     args = init_cli_args()
 
-    if not args.runtest or args.method not in AE_METHOD_SETTINGS:  # Do nothing
+    if not args.runtest:  # Do nothing
         return
 
     seed_everything(args.seed)
+
+    imputer_type = ImputerT.type(args.method)
+    if imputer_type == ImputerT.AE:
+        evaluate_autoencoder_imputer(args)
+    elif imputer_type == ImputerT.BASELINE:
+        evaluate_baseline_imputer(args)
+
+
+def evaluate_baseline_imputer(args: Namespace):
+    """Similar to AE except we expect the model has already been run on test and we don't need to load the  model and run it."""
+    # get model output on test
+    pickled_imputed_data_path = join("serialized_models", "imputed_data.pkl")
+    rank_zero_print("Loading pickled imputed data...")
+    with open(pickled_imputed_data_path, "rb") as file:
+        imputed_data, _ = pk.load(file)
+    # get test data
+    test_dataloader_path = get_serialized_model_path(
+        f"{args.data_type_time_dim.name}_test_dataloader", "pt"
+    )
+    rank_zero_print("Loading pickled test data...")
+    with open(test_dataloader_path, "rb") as file:
+        test_data = pk.load(file)
+
+    evaluate_baseline_imputation(
+        args,
+        split="test",
+        pred=imputed_data["test"],
+        input_data=test_data["data"],
+        true=test_data["ground_truth"],
+        nfeatures=test_data["nfeatures"],
+        semi_observed_training=test_data["semi_observed_training"],
+        bootstrap=args.bootstrap_eval_imputer,
+    )
+
+
+def evaluate_autoencoder_imputer(args: Namespace):
     test_dataloader = torch.load(
         get_serialized_model_path(
             f"{args.data_type_time_dim.name}_test_dataloader", "pt"
