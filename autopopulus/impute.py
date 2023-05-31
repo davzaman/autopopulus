@@ -1,33 +1,35 @@
-from os import makedirs
-from typing import Callable
-from argparse import Namespace
 import pickle as pk
-from os.path import join, dirname
-
+from argparse import Namespace
+from os import makedirs
+from os.path import dirname, join
+from typing import Callable
 
 #### Traceback ####
 from rich.traceback import install
 
-
 install(theme="solarized-dark")
 
-from sklearn.exceptions import DataConversionWarning
 import warnings
+
+from sklearn.exceptions import DataConversionWarning
 
 warnings.filterwarnings(action="ignore", category=DataConversionWarning)
 warnings.filterwarnings(action="ignore", category=FutureWarning)
 
 
-#### Local Module ####
+from autopopulus.data import CommonDataModule
+from autopopulus.data.types import DataT  # Filter warnings
+from autopopulus.datasets import DATA_LOADERS
+from autopopulus.task_logic import baseline_imputation
+from autopopulus.task_logic.ae_imputation import ae_imputation_logic
+from autopopulus.task_logic.utils import (
+    AE_METHOD_SETTINGS,
+    BASELINE_DATA_SETTINGS,
+    ImputerT,
+)
 from autopopulus.utils.get_set_cli_args import init_cli_args, load_cli_args
 from autopopulus.utils.log_utils import init_sys_logger
 from autopopulus.utils.utils import rank_zero_print, seed_everything, should_ampute
-from autopopulus.datasets import DATA_LOADERS
-from autopopulus.data import CommonDataModule
-from autopopulus.task_logic import baseline_static_imputation, baseline_imputation
-from autopopulus.task_logic.ae_imputation import AE_METHOD_SETTINGS, ae_imputation_logic
-from autopopulus.task_logic.utils import ImputerT
-from autopopulus.data.types import DataT  # Filter warnings
 
 
 def get_imputation_logic(args: Namespace) -> Callable[[Namespace, DataT], None]:
@@ -52,7 +54,7 @@ def main():
     data_settings = (
         AE_METHOD_SETTINGS[args.method].get("data", {})
         if args.method in AE_METHOD_SETTINGS
-        else baseline_static_imputation.BASELINE_DATA_SETTINGS
+        else BASELINE_DATA_SETTINGS
     )
     # # To turn off transforms for debugging
     # data_settings = {

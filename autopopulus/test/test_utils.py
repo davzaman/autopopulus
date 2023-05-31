@@ -1,30 +1,27 @@
 import unittest
-from unittest.mock import ANY, MagicMock, call, patch
+from unittest.mock import ANY, call, patch
 
-import pandas as pd
 import numpy as np
-from numpy.random import default_rng
+import pandas as pd
 from sklearn.impute import KNNImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import f1_score
 
 # validation for mocking _score and _search for _fit_and_score
-from sklearn.model_selection import _validation, _search
+from sklearn.model_selection import _search, _validation
 from sklearn.pipeline import FunctionTransformer
 
+from autopopulus.data.dataset_classes import CommonDataModule
 from autopopulus.models.evaluation import (
     bootstrap_confidence_interval,
     confidence_interval,
 )
+from autopopulus.models.prediction_models import PREDICTOR_MODEL_METADATA
 from autopopulus.models.sklearn_model_utils import TransformScorer, TunableEstimator
-from autopopulus.task_logic.baseline_static_imputation import (
-    BASELINE_IMPUTER_MODEL_PARAM_GRID,
-)
-from autopopulus.test.common_mock_data import X, y, seed, splits
-from autopopulus.data.dataset_classes import CommonDataModule
+from autopopulus.task_logic.utils import STATIC_BASELINE_IMPUTER_MODEL_PARAM_GRID
+from autopopulus.test.common_mock_data import X, seed, splits, y
 from autopopulus.test.utils import get_dataset_loader
 from autopopulus.utils.impute_metrics import MAAPEMetric, RMSEMetric, universal_metric
-from autopopulus.models.prediction_models import PREDICTOR_MODEL_METADATA
 
 
 class TestUtils(unittest.TestCase):
@@ -120,7 +117,7 @@ class TestTunableEstimator(unittest.TestCase):
 
         imputer = TunableEstimator(
             KNNImputer(),
-            BASELINE_IMPUTER_MODEL_PARAM_GRID["knn"],
+            STATIC_BASELINE_IMPUTER_MODEL_PARAM_GRID["knn"],
             # higher is not better because it's an error
             score_fn=TransformScorer(
                 universal_metric(MAAPEMetric()), higher_is_better=False

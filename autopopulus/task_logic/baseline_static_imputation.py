@@ -14,25 +14,13 @@ from sklearn.impute import IterativeImputer, KNNImputer
 ## Local Modules
 from autopopulus.data import CommonDataModule
 from autopopulus.data.transforms import SimpleImpute
-from autopopulus.utils.impute_metrics import MAAPEMetric, universal_metric
 from autopopulus.utils.log_utils import get_serialized_model_path
 from autopopulus.models.sklearn_model_utils import TransformScorer, TunableEstimator
-from autopopulus.task_logic.utils import ImputerT, get_tune_metric
-
-BASELINE_DATA_SETTINGS = {
-    "scale": True,
-    "feature_map": None,
-    "uniform_prob": False,
-}
-
-
-BASELINE_IMPUTER_MODEL_PARAM_GRID = {
-    "knn": {
-        "n_neighbors": [3, 5, 10],
-        "weights": ["uniform", "distance"],
-    },
-    "mice": {"max_iter": [10, 50], "n_nearest_features": [5, 10, None]},
-}
+from autopopulus.task_logic.utils import (
+    ImputerT,
+    get_tune_metric,
+    STATIC_BASELINE_IMPUTER_MODEL_PARAM_GRID,
+)
 
 
 def none(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
@@ -54,7 +42,7 @@ def simple(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
 def knn(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
     imputer = TunableEstimator(
         KNNImputer(),
-        BASELINE_IMPUTER_MODEL_PARAM_GRID["knn"],
+        STATIC_BASELINE_IMPUTER_MODEL_PARAM_GRID["knn"],
         score_fn=TransformScorer(
             get_tune_metric(ImputerT.BASELINE, data, "original"),
             higher_is_better=False,
@@ -82,7 +70,7 @@ def mice(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
     """Uses sklearn instead of miceforest package."""
     imputer = TunableEstimator(
         IterativeImputer(random_state=args.seed),
-        BASELINE_IMPUTER_MODEL_PARAM_GRID["mice"],
+        STATIC_BASELINE_IMPUTER_MODEL_PARAM_GRID["mice"],
         score_fn=TransformScorer(
             get_tune_metric(ImputerT.BASELINE, data, "original"),
             higher_is_better=False,

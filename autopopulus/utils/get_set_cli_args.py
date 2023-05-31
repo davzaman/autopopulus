@@ -1,7 +1,8 @@
-from argparse import ArgumentParser, Namespace
 import sys
-import yaml
+from argparse import ArgumentParser, Namespace
 from os.path import isfile
+
+import yaml
 
 from autopopulus.data.dataset_classes import CommonDataModule
 from autopopulus.datasets.ckd import CureCKDDataLoader
@@ -10,12 +11,12 @@ from autopopulus.models.ae import AEDitto
 from autopopulus.models.ap import AEImputer
 from autopopulus.models.prediction_models import Predictor
 from autopopulus.task_logic import (
-    baseline_static_imputation,
     baseline_longitudinal_imputation,
+    baseline_static_imputation,
 )
-from autopopulus.task_logic.ae_imputation import AE_METHOD_SETTINGS
-from autopopulus.utils.utils import get_module_function_names
+from autopopulus.task_logic.utils import AE_METHOD_SETTINGS
 from autopopulus.utils.cli_arg_utils import str2bool
+from autopopulus.utils.utils import get_module_function_names
 
 
 def load_cli_args(args_options_path: str = "options.yml"):

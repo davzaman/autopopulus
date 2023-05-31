@@ -111,9 +111,10 @@ class TunableEstimator(BaseEstimator, TransformerMixin):
         self.scorer = score_fn
         self.estimator = estimator
         # just run on defaults if no score_func (ground truth has nans)
-        self.estimator_params = (
-            {} if self.scorer._score_func is None else estimator_params
-        )
+        if isinstance(self.scorer, _BaseScorer) and self.scorer._score_func is None:
+            self.estimator_params = {}
+        else:
+            self.estimator_params = estimator_params
 
     def fit(self, X: Dict[str, DataFrame], y: Dict[str, DataFrame]):
         # Need to concat train and val for hold-out validation with sklearn

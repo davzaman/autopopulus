@@ -240,7 +240,9 @@ class TestAEImputer(unittest.TestCase):
                 datamodule = CommonDataModule(**missing_gt_settings)
                 self.aeimp.fit(datamodule)
                 for call in mock_log.call_args_list:
-                    self.assertTrue(re.search(r"\w+/original/all/NA/", call[0][0]))
+                    self.assertTrue(
+                        re.search(r"\w+/original/all/NA/|epoch_duration", call[0][0])
+                    )
 
     @patch("autopopulus.data.dataset_classes.train_test_split")
     def test_basic(self, mock_split):
