@@ -125,20 +125,12 @@ def ae_imputation_logic(
             **settings,
         )
         if args.tune_n_samples:
-            # TODO[HIGH]: What to do when full data and no metrics? Tune on loss? Tune on loss everytime?
             ae_imputer.tune(
                 args.experiment_name,
                 args.tune_n_samples,
                 args.total_cpus_on_machine,
                 args.total_gpus_on_machine,
                 args.n_gpus_per_trial,
-                tune_metric=IMPUTE_METRIC_TAG_FORMAT.format(
-                    name="MAAPE",
-                    feature_space="original",
-                    filter_subgroup="missingonly",
-                    reduction="CW",
-                    split="val",
-                ),
                 data=data,
             )
         else:

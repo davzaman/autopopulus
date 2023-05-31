@@ -28,6 +28,8 @@ from pytorch_lightning.profilers import Profiler
 from pytorch_lightning.strategies.strategy import Strategy
 from pytorch_lightning.loggers import Logger
 
+from autopopulus.task_logic.utils import ImputerT, get_tune_metric
+
 # from pl_bolts.callbacks import ModuleDataMonitor, BatchGradientVerificationCallback
 
 warnings.filterwarnings(action="ignore", category=LightningDeprecationWarning)
@@ -140,7 +142,6 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         total_cpus_on_machine: int,
         total_gpus_on_machine: int,
         n_gpus_per_trial: int,
-        tune_metric: str,
         data: CommonDataModule,
     ):
         """
@@ -149,6 +150,10 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         Ref: https://docs.ray.io/en/latest/tune/examples/tune-pytorch-lightning.html
         """
         data.setup("fit")
+        # this is matching get_args_from_data.
+        # TODO[LOW]: This should be changed to be more easily in sync with get_args_from_data
+        data_feature_space = "mapped" if "mapped" in data.groupby else "original"
+        tune_metric: str = get_tune_metric(ImputerT.AE, data, data_feature_space)
         #### Setup LightningTrainer ####
         run_config = RunConfig(
             name=experiment_name,

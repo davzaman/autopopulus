@@ -108,10 +108,12 @@ class TunableEstimator(BaseEstimator, TransformerMixin):
         score_fn: Union[_BaseScorer, TransformScorer],
     ) -> None:
         # make_scorer expects a y along with X which fails for imputation
-        # self.scorer = make_scorer(score_fn)
         self.scorer = score_fn
         self.estimator = estimator
-        self.estimator_params = estimator_params
+        # just run on defaults if no score_func (ground truth has nans)
+        self.estimator_params = (
+            {} if self.scorer._score_func is None else estimator_params
+        )
 
     def fit(self, X: Dict[str, DataFrame], y: Dict[str, DataFrame]):
         # Need to concat train and val for hold-out validation with sklearn

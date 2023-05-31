@@ -393,6 +393,7 @@ class AEDitto(LightningModule):
             IMPUTE_METRIC_TAG_FORMAT.format(
                 name="loss",
                 feature_space=self.hparams.data_feature_space,
+                # TODO[low]: technically when semi_observed_training this is the only thing that is logged and it's on observedonly space.
                 filter_subgroup="all",
                 reduction="NA",
                 split=split,

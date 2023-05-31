@@ -17,6 +17,7 @@ from autopopulus.data.transforms import SimpleImpute
 from autopopulus.utils.impute_metrics import MAAPEMetric, universal_metric
 from autopopulus.utils.log_utils import get_serialized_model_path
 from autopopulus.models.sklearn_model_utils import TransformScorer, TunableEstimator
+from autopopulus.task_logic.utils import ImputerT, get_tune_metric
 
 BASELINE_DATA_SETTINGS = {
     "scale": True,
@@ -51,14 +52,11 @@ def simple(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
 
 
 def knn(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
-    # TODO[HIGH]: What to do when ground truth has nans? no tuning at all?
     imputer = TunableEstimator(
         KNNImputer(),
         BASELINE_IMPUTER_MODEL_PARAM_GRID["knn"],
         score_fn=TransformScorer(
-            universal_metric(  # sync with tuning metric for ae
-                MAAPEMetric(columnwise=True, nfeatures=data.nfeatures["original"])
-            ),
+            get_tune_metric(ImputerT.BASELINE, data, "original"),
             higher_is_better=False,
             missingonly=True,
         ),
@@ -86,9 +84,7 @@ def mice(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
         IterativeImputer(random_state=args.seed),
         BASELINE_IMPUTER_MODEL_PARAM_GRID["mice"],
         score_fn=TransformScorer(
-            universal_metric(  # sync with tuning metric for ae
-                MAAPEMetric(columnwise=True, nfeatures=data.nfeatures["original"])
-            ),
+            get_tune_metric(ImputerT.BASELINE, data, "original"),
             higher_is_better=False,
             missingonly=True,
         ),
