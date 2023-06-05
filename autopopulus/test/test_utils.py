@@ -10,6 +10,7 @@ from sklearn.metrics import f1_score
 # validation for mocking _score and _search for _fit_and_score
 from sklearn.model_selection import _search, _validation
 from sklearn.pipeline import FunctionTransformer
+import torch
 
 from autopopulus.data.dataset_classes import CommonDataModule
 from autopopulus.models.evaluation import (
@@ -45,7 +46,12 @@ class TestTransformScorer(unittest.TestCase):
         input_data = true
         estimator = FunctionTransformer(lambda data: pred)
         # the tuning tests use MAAPE so we'll try RMSE here
-        scorer = TransformScorer(universal_metric(RMSEMetric()), higher_is_better=False)
+        scorer = TransformScorer(
+            universal_metric(
+                RMSEMetric(ctn_cols_idx=torch.tensor(range(true.shape[1])))
+            ),
+            higher_is_better=False,
+        )
         ew_rmse_true = ((diff**2) / len(true) / true.shape[1]) ** 0.5
         # multiply by -1 because sign will be -1 for the score (higher is not better)
         self.assertEqual(scorer(estimator, input_data, true), -1 * ew_rmse_true)
@@ -57,7 +63,11 @@ class TestTransformScorer(unittest.TestCase):
         input_data.iloc[0, 1] = np.nan
         # the tuning tests use MAAPE so we'll try RMSE here
         scorer = TransformScorer(
-            universal_metric(RMSEMetric()), higher_is_better=False, missingonly=True
+            universal_metric(
+                RMSEMetric(ctn_cols_idx=torch.tensor(range(true.shape[1])))
+            ),
+            higher_is_better=False,
+            missingonly=True,
         )
         with self.subTest("Error On Observed Value"):
             # mess up the index to make sure it's set properly later
@@ -88,7 +98,11 @@ class TestTransformScorer(unittest.TestCase):
         estimator = FunctionTransformer(lambda data: X_pred)
         # the tuning tests use MAAPE so we'll try RMSE here
         scorer = TransformScorer(
-            universal_metric(RMSEMetric()), higher_is_better=False, missingonly=True
+            universal_metric(
+                RMSEMetric(ctn_cols_idx=torch.tensor(range(X_true.shape[1])))
+            ),
+            higher_is_better=False,
+            missingonly=True,
         )
         # should complain that there's nans in the ground_truth
         with self.assertRaises(AssertionError):
@@ -120,7 +134,13 @@ class TestTunableEstimator(unittest.TestCase):
             STATIC_BASELINE_IMPUTER_MODEL_PARAM_GRID["knn"],
             # higher is not better because it's an error
             score_fn=TransformScorer(
-                universal_metric(MAAPEMetric()), higher_is_better=False
+                universal_metric(
+                    MAAPEMetric(
+                        # consider all cols ctn
+                        ctn_cols_idx=torch.tensor(range(X["nomissing"].shape[1]))
+                    )
+                ),
+                higher_is_better=False,
             ),
         )
 

@@ -63,7 +63,7 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
     def __init__(
         self,
         max_epochs: int = 100,
-        patience: int = 7,
+        patience: int = 3,
         logger: Optional[Logger] = None,
         tune_callback: Optional[Callback] = None,
         strategy: Strategy = "auto",
@@ -390,6 +390,7 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
                         filter_subgroup="all",
                         reduction="NA",
                         split="val",
+                        feature_type="mixed",
                     ),
                     patience=patience,
                 )
@@ -510,7 +511,7 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         p.add_argument(
             "--patience",
             type=int,
-            default=5,
+            default=3,
             help="Using early stopping when training the underlying autoencoder for Autopopulus, set the patience for early stopping.",
         )
         # Tuning

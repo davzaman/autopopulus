@@ -28,6 +28,7 @@ from torch.autograd import Variable
 from torch.nn.modules.dropout import Dropout
 from torch.nn.modules.loss import BCEWithLogitsLoss, MSELoss
 from torch.testing import assert_allclose
+from torchmetrics import MetricCollection
 
 from autopopulus.data import CommonDataModule
 from autopopulus.data.constants import PAD_VALUE
@@ -35,6 +36,7 @@ from autopopulus.data.transforms import list_to_tensor
 from autopopulus.models.ae import COL_IDXS_BY_TYPE_FORMAT, AEDitto
 from autopopulus.models.ap import AEImputer
 from autopopulus.models.dnn import ResetSeed
+from autopopulus.utils.impute_metrics import MAAPEMetric, universal_metric
 from models.torch_model_utils import (
     BatchSwapNoise,
     BinColumnThreshold,
@@ -109,7 +111,11 @@ def mock_training_step(self, batch, split):
         for high_level_metrics in split_level_metrics.values():
             for feature_space_metrics in high_level_metrics.values():
                 for metric in feature_space_metrics.values():
-                    assert metric.device == self.device
+                    if isinstance(metric, MetricCollection):
+                        for component in metric.values():
+                            assert component.device == self.device
+                    else:
+                        assert metric.device == self.device
     return self.shared_step(batch, "train")[0]
 
 
@@ -149,6 +155,7 @@ class TestAEImputer(unittest.TestCase):
                             filter_subgroup="all",
                             reduction="NA",
                             split=split,
+                            feature_type="mixed",
                         ),
                         ANY,
                         on_step=ANY,
@@ -161,24 +168,31 @@ class TestAEImputer(unittest.TestCase):
                 for split in ["train", "val"]:
                     for filter_subgroup in ["all", "missingonly"]:
                         for reduction in ["CW", "EW"]:
-                            for metric in ["RMSE", "MAAPE"]:
-                                mock_log.assert_any_call(
-                                    IMPUTE_METRIC_TAG_FORMAT.format(
-                                        name=metric,
-                                        feature_space="original",
-                                        filter_subgroup=filter_subgroup,
-                                        reduction=reduction,
-                                        split=split,
-                                    ),
-                                    ANY,
-                                    on_step=ANY,
-                                    on_epoch=ANY,
-                                    sync_dist=ANY,
-                                    prog_bar=ANY,
-                                    logger=ANY,
-                                    rank_zero_only=ANY,
-                                    # *[ANY for i in range(6)],
-                                )
+                            for ctn_metric in ["RMSE", "MAAPE"]:
+                                for cat_metric in ["CategoricalError"]:
+                                    for feature_type in [
+                                        "mixed",
+                                        "continuous",
+                                        "categorical",
+                                    ]:
+                                        mock_log.assert_any_call(
+                                            IMPUTE_METRIC_TAG_FORMAT.format(
+                                                name=f"{ctn_metric}{cat_metric}",
+                                                feature_space="original",
+                                                filter_subgroup=filter_subgroup,
+                                                reduction=reduction,
+                                                split=split,
+                                                feature_type=feature_type,
+                                            ),
+                                            ANY,
+                                            on_step=ANY,
+                                            on_epoch=ANY,
+                                            sync_dist=ANY,
+                                            prog_bar=ANY,
+                                            logger=ANY,
+                                            rank_zero_only=ANY,
+                                            # *[ANY for i in range(6)],
+                                        )
         with self.subTest("With Feature Map"):
             with patch("autopopulus.models.ae.LightningModule.log") as mock_log:
                 datamodule = CommonDataModule(
@@ -198,6 +212,7 @@ class TestAEImputer(unittest.TestCase):
                             filter_subgroup="all",
                             reduction="NA",
                             split=split,
+                            feature_type="mixed",
                         ),
                         ANY,
                         on_step=ANY,
@@ -210,28 +225,32 @@ class TestAEImputer(unittest.TestCase):
                 for split in ["train", "val"]:
                     for filter_subgroup in ["all", "missingonly"]:
                         for reduction in ["CW", "EW"]:
-                            feature_spaces = ["original", "mapped"]
-                            metrics = ["RMSE", "MAAPE", "Accuracy"]
-                            for feature_space in feature_spaces:
-                                # disc -> accuracy
-                                for metric in metrics:
-                                    mock_log.assert_any_call(
-                                        IMPUTE_METRIC_TAG_FORMAT.format(
-                                            name=metric,
-                                            feature_space=feature_space,
-                                            filter_subgroup=filter_subgroup,
-                                            reduction=reduction,
-                                            split=split,
-                                        ),
-                                        ANY,
-                                        on_step=ANY,
-                                        on_epoch=ANY,
-                                        sync_dist=ANY,
-                                        prog_bar=ANY,
-                                        logger=ANY,
-                                        rank_zero_only=ANY,
-                                        # *[ANY for i in range(6)],
-                                    )
+                            for feature_space in ["original", "mapped"]:
+                                for ctn_metric in ["RMSE", "MAAPE"]:
+                                    for cat_metric in ["CategoricalError"]:
+                                        for feature_type in [
+                                            "mixed",
+                                            "continuous",
+                                            "categorical",
+                                        ]:
+                                            mock_log.assert_any_call(
+                                                IMPUTE_METRIC_TAG_FORMAT.format(
+                                                    name=f"{ctn_metric}{cat_metric}",
+                                                    feature_space=feature_space,
+                                                    filter_subgroup=filter_subgroup,
+                                                    reduction=reduction,
+                                                    split=split,
+                                                    feature_type=feature_type,
+                                                ),
+                                                ANY,
+                                                on_step=ANY,
+                                                on_epoch=ANY,
+                                                sync_dist=ANY,
+                                                prog_bar=ANY,
+                                                logger=ANY,
+                                                rank_zero_only=ANY,
+                                                # *[ANY for i in range(6)],
+                                            )
         with self.subTest("semi_observed_training"):
             with patch("autopopulus.models.ae.LightningModule.log") as mock_log:
                 missing_gt_settings = self.data_settings.copy()
@@ -423,7 +442,22 @@ class TestAEImputer(unittest.TestCase):
                 for reduction, reduction_moduledict in subgroup_moduledict.items():
                     self.assertEqual(list(reduction_moduledict.keys()), ["original"])
                     for leaf_metrics in reduction_moduledict.values():
-                        self.assertEqual(list(leaf_metrics.keys()), ["RMSE", "MAAPE"])
+                        self.assertEqual(
+                            list(leaf_metrics.keys()),
+                            ["RMSECategoricalError", "MAAPECategoricalError"],
+                        )
+                        for feature_type_metrics in leaf_metrics.values():
+                            self.assertEqual(
+                                list(feature_type_metrics.keys()),
+                                [
+                                    "categorical",
+                                    "continuous",
+                                ],  # it will alphabetical order
+                            )
+                            for sub_component in feature_type_metrics.values():
+                                if reduction == "CW":
+                                    self.assertTrue(sub_component.columnwise)
+
         with self.subTest("semi_observed_training"):
             missing_gt_settings = self.data_settings.copy()
             # ground truth has missing values
@@ -473,10 +507,25 @@ class TestAEImputer(unittest.TestCase):
                         self.assertEqual(
                             list(reduction_moduledict.keys()), ["original", "mapped"]
                         )
-                        for leaf_metrics in reduction_moduledict.values():
+                        for feature_space, leaf_metrics in reduction_moduledict.items():
                             self.assertEqual(
-                                list(leaf_metrics.keys()), ["RMSE", "MAAPE", "Accuracy"]
+                                list(leaf_metrics.keys()),
+                                ["RMSECategoricalError", "MAAPECategoricalError"],
                             )
+                            for feature_type_metrics in leaf_metrics.values():
+                                self.assertEqual(
+                                    list(feature_type_metrics.keys()),
+                                    ["categorical", "continuous"],  # alphabetical
+                                )
+                                # There should be no continuous component in mapped space
+                                if feature_space == "mapped":
+                                    torch.testing.assert_allclose(
+                                        feature_type_metrics["continuous"].ctn_cols_idx,
+                                        tensor([]),
+                                    )
+                                for sub_component in feature_type_metrics.values():
+                                    if reduction == "CW":
+                                        self.assertTrue(sub_component.columnwise)
         with self.subTest("target_encode_categorical"):
             datamodule = CommonDataModule(
                 **self.data_settings,
@@ -517,10 +566,33 @@ class TestAEImputer(unittest.TestCase):
                             list(reduction_moduledict.keys()),
                             ["original", "mapped"],
                         )
-                        for leaf_metrics in reduction_moduledict.values():
-                            self.assertEqual(  # no accuracy bc target_encode
-                                list(leaf_metrics.keys()), ["RMSE", "MAAPE"]
+                        for feature_space, leaf_metrics in reduction_moduledict.items():
+                            self.assertEqual(
+                                list(leaf_metrics.keys()),
+                                ["RMSECategoricalError", "MAAPECategoricalError"],
                             )
+                            for feature_type_metrics in leaf_metrics.values():
+                                self.assertEqual(
+                                    list(feature_type_metrics.keys()),
+                                    ["categorical", "continuous"],  # alphabetical
+                                )
+                                # There should be no categorical component in mapped space
+                                if feature_space == "mapped":
+                                    torch.testing.assert_allclose(
+                                        feature_type_metrics[
+                                            "categorical"
+                                        ].bin_cols_idx,
+                                        tensor([]),
+                                    )
+                                    torch.testing.assert_allclose(
+                                        feature_type_metrics[
+                                            "categorical"
+                                        ].onehot_cols_idx,
+                                        tensor([]),
+                                    )
+                                for sub_component in feature_type_metrics.values():
+                                    if reduction == "CW":
+                                        self.assertTrue(sub_component.columnwise)
 
     def _test_set_col_idxs_by_type(
         self, model: AEDitto, feature_space_and_type_pairs: List[Tuple[str, str]]
@@ -1140,14 +1212,63 @@ class TestAEDitto(unittest.TestCase):
 
     def test_CtnCatLoss(self):
         with self.subTest("Inputs Not Equal"):
+            with self.subTest("Mixed Feature types"):
+                var = Variable(tensor(X["wrong"].values), requires_grad=True)
+                true_var = Variable(tensor(X["nomissing"].values), requires_grad=True)
+                loss_fn = CtnCatLoss(
+                    list_to_tensor(col_idxs_by_type["original"]["continuous"]),
+                    list_to_tensor(col_idxs_by_type["original"]["binary"]),
+                    list_to_tensor(col_idxs_by_type["original"]["onehot"]),
+                )
+                res = loss_fn(var, true_var).item()
+                # manually calculate what the loss should be with nn functional
+                bin_loss = nn.functional.binary_cross_entropy_with_logits(
+                    tensor(X["wrong"][columns["bin_cols"]].values).float(),
+                    tensor(X["nomissing"][columns["bin_cols"]].values).float(),
+                )
+                onehot_loss = 0
+                for onehot_col_group in columns["onehot_cols"]:
+                    onehot_loss += nn.functional.cross_entropy(
+                        tensor(X["wrong"][onehot_col_group].values).float(),
+                        tensor(X["nomissing"][onehot_col_group].values).float(),
+                    )
+                ctn_loss = nn.functional.mse_loss(
+                    tensor(X["wrong"][columns["ctn_cols"]].values).float(),
+                    tensor(X["nomissing"][columns["ctn_cols"]].values).float(),
+                )
+                self.assertEqual(res, bin_loss + onehot_loss + ctn_loss)
+
+            with self.subTest("No Continuous Features"):
+                loss_fn = CtnCatLoss(
+                    list_to_tensor([]),
+                    list_to_tensor(col_idxs_by_type["original"]["binary"]),
+                    list_to_tensor(col_idxs_by_type["original"]["onehot"]),
+                )
+                res = loss_fn(var, true_var).item()
+                self.assertEqual(res, bin_loss + onehot_loss)
+
+            with self.subTest("No Categorical Features"):
+                loss_fn = CtnCatLoss(
+                    list_to_tensor(col_idxs_by_type["original"]["continuous"]),
+                    list_to_tensor([]),
+                    list_to_tensor([]),
+                )
+                res = loss_fn(var, true_var).item()
+                self.assertEqual(res, ctn_loss)
+
+        with self.subTest("SubLoss Uses Metric"):
             var = Variable(tensor(X["wrong"].values), requires_grad=True)
             true_var = Variable(tensor(X["nomissing"].values), requires_grad=True)
-            loss = CtnCatLoss(
-                list_to_tensor(col_idxs_by_type["original"]["continuous"]),
+            ctn_cols_idx = list_to_tensor(col_idxs_by_type["original"]["continuous"])
+            loss_fn = CtnCatLoss(
+                ctn_cols_idx,
                 list_to_tensor(col_idxs_by_type["original"]["binary"]),
                 list_to_tensor(col_idxs_by_type["original"]["onehot"]),
+                loss_ctn=MAAPEMetric(ctn_cols_idx=ctn_cols_idx),
             )
-            res = loss(var, true_var).item()
+            ewmaape = universal_metric(MAAPEMetric(ctn_cols_idx))
+            res = loss_fn(var, true_var).item()
+            # manually calculate what the loss should be with nn functional
             loss = 0
             loss += nn.functional.binary_cross_entropy_with_logits(
                 tensor(X["wrong"][columns["bin_cols"]].values).float(),
@@ -1158,10 +1279,13 @@ class TestAEDitto(unittest.TestCase):
                     tensor(X["wrong"][onehot_col_group].values).float(),
                     tensor(X["nomissing"][onehot_col_group].values).float(),
                 )
-            loss += nn.functional.mse_loss(
-                tensor(X["wrong"][columns["ctn_cols"]].values).float(),
-                tensor(X["nomissing"][columns["ctn_cols"]].values).float(),
+            loss += ewmaape(
+                tensor(X["wrong"].values).float(), tensor(X["nomissing"].values).float()
             )
+            self.assertEqual(res, loss)
+
+            # run it again and make sure that the result is exactly the same (everything is reset)
+            res = loss_fn(var, true_var).item()
             self.assertEqual(res, loss)
 
 

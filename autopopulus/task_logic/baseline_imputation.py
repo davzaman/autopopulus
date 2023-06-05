@@ -5,6 +5,7 @@ import numpy as np
 import pickle as pk
 from os import makedirs
 from os.path import dirname
+from torchmetrics import MetricCollection
 from tqdm import tqdm
 from numpy.random import default_rng
 from pytorch_lightning.utilities import rank_zero_warn
@@ -12,6 +13,7 @@ from pytorch_lightning.utilities import rank_zero_warn
 # Local
 from autopopulus.utils.log_utils import (
     IMPUTE_METRIC_TAG_FORMAT,
+    MIXED_FEATURE_METRIC_FORMAT,
     BasicLogger,
     get_serialized_model_path,
 )
@@ -20,7 +22,12 @@ from autopopulus.task_logic import (
     baseline_longitudinal_imputation,
 )
 from autopopulus.data import CommonDataModule
-from autopopulus.utils.impute_metrics import MAAPEMetric, RMSEMetric, universal_metric
+from autopopulus.utils.impute_metrics import (
+    CategoricalErrorMetric,
+    MAAPEMetric,
+    RMSEMetric,
+    universal_metric,
+)
 from autopopulus.data.types import DataT
 from autopopulus.utils.utils import resample_indices_only
 
@@ -86,20 +93,35 @@ def save_test_data(args: Namespace, data: CommonDataModule):
         )
 
 
-def get_baseline_metrics(nfeatures: int) -> List[Dict[str, Union[str, Callable]]]:
+def get_baseline_metrics(col_idxs_by_type) -> List[Dict[str, Union[str, Callable]]]:
+    ctn_metric_names = [("RMSE", RMSEMetric), ("MAAPE", MAAPEMetric)]
+    cat_metric_names = [("CategoricalError", CategoricalErrorMetric)]
     return [
         {
-            "name": "RMSE",
-            "fn": universal_metric(RMSEMetric(columnwise=True, nfeatures=nfeatures)),
-            "reduction": "CW",
-        },
-        {
-            "name": "MAAPE",
-            "fn": universal_metric(MAAPEMetric(columnwise=True, nfeatures=nfeatures)),
-            "reduction": "CW",
-        },
-        {"name": "RMSE", "fn": universal_metric(RMSEMetric()), "reduction": "EW"},
-        {"name": "MAAPE", "fn": universal_metric(MAAPEMetric()), "reduction": "EW"},
+            "name": MIXED_FEATURE_METRIC_FORMAT.format(
+                ctn_name=ctn_name, cat_name=cat_name
+            ),
+            "fn": universal_metric(
+                MetricCollection(
+                    {
+                        "continuous": ctn_metric(
+                            ctn_col_idxs=col_idxs_by_type["original"]["continuous"],
+                            columnwise=reduction == "CW",
+                        ),
+                        "categorical": cat_metric(
+                            col_idxs_by_type["original"]["binary"],
+                            col_idxs_by_type["original"]["onehot"],
+                            columnwise=reduction == "CW",
+                        ),
+                    },
+                    compute_groups=False,
+                )
+            ),
+            "reduction": reduction,
+        }
+        for reduction in ["CW", "EW"]
+        for ctn_name, ctn_metric in ctn_metric_names
+        for cat_name, cat_metric in cat_metric_names
     ]
 
 
@@ -158,20 +180,42 @@ def log_baseline_imputation_performance(
     # START HERE
     for metric in metrics:
         for filter_subgroup in ["all", "missingonly"]:
-            if filter_subgroup == "missingonly":
+            if filter_subgroup == "missingonly" and where_data_are_missing.any():
                 val = metric["fn"](est, true, where_data_are_missing)
             else:
                 val = metric["fn"](est, true)
-            log.add_scalar(
-                val,
-                metric["name"],
-                global_step=global_step,
-                context={
-                    "step": "impute",
-                    "split": split,
-                    "feature_space": "original",
-                    "filter_subgroup": filter_subgroup,
-                    "reduction": metric["reduction"],
-                },
-                tb_name_format=IMPUTE_METRIC_TAG_FORMAT,
-            )
+            context = {
+                "step": "impute",
+                "split": split,
+                "feature_space": "original",
+                "filter_subgroup": filter_subgroup,
+                "reduction": metric["reduction"],
+            }
+            # metriccollection returns a dict
+            if isinstance(val, Dict):
+                combined = sum(val.values())
+                # log the summed components for the mixed feature types
+                log.add_scalar(
+                    combined,
+                    metric["name"],
+                    global_step=global_step,
+                    context={**context, **{"feature_type": "mixed"}},
+                    tb_name_format=IMPUTE_METRIC_TAG_FORMAT,
+                )
+                # separately log each component as its metric type
+                for feature_type, type_val in val.items():
+                    log.add_scalar(
+                        type_val,
+                        metric["name"],
+                        global_step=global_step,
+                        context={**context, **{"feature_type": feature_type}},
+                        tb_name_format=IMPUTE_METRIC_TAG_FORMAT,
+                    )
+            else:
+                log.add_scalar(
+                    val,
+                    metric["name"],
+                    global_step=global_step,
+                    context={**context, **{"feature_type": "mixed"}},
+                    tb_name_format=IMPUTE_METRIC_TAG_FORMAT,
+                )

@@ -10,7 +10,7 @@ from torchmetrics import Metric
 
 from autopopulus.utils.impute_metrics import (
     EPSILON,
-    AccuracyMetric,
+    CategoricalErrorMetric,
     MAAPEMetric,
     RMSEMetric,
     universal_metric,
@@ -78,10 +78,11 @@ class TestStaticMulticatContinuousMetrics(unittest.TestCase):
         batched_input_equals(self, metric, *inputs)
 
     def setup_metrics(self, df: pd.DataFrame) -> None:
-        self.maape_elwise = MAAPEMetric()
-        self.rmse_elwise = RMSEMetric()
-        self.rmse_colwise = RMSEMetric(columnwise=True, nfeatures=df.shape[1])
-        self.maape_colwise = MAAPEMetric(columnwise=True, nfeatures=df.shape[1])
+        ctn_cols_idx = list_to_tensor(range(df.shape[1]))
+        self.maape_elwise = MAAPEMetric(ctn_cols_idx=ctn_cols_idx)
+        self.rmse_elwise = RMSEMetric(ctn_cols_idx=ctn_cols_idx)
+        self.rmse_colwise = RMSEMetric(ctn_cols_idx=ctn_cols_idx, columnwise=True)
+        self.maape_colwise = MAAPEMetric(ctn_cols_idx=ctn_cols_idx, columnwise=True)
         self.torch_metrics = [
             self.rmse_colwise,
             self.rmse_elwise,
@@ -102,6 +103,27 @@ class TestStaticMulticatContinuousMetrics(unittest.TestCase):
             # the last digit is at most risk of being messed up/unreliable.
             and ((df.values > 1e10).sum() == 0)
         )
+
+    def test_no_continuous_features(self):
+        ctn_cols_idx = list_to_tensor([])
+        maape_elwise = MAAPEMetric(ctn_cols_idx=ctn_cols_idx)
+        rmse_elwise = RMSEMetric(ctn_cols_idx=ctn_cols_idx)
+        rmse_colwise = RMSEMetric(ctn_cols_idx=ctn_cols_idx, columnwise=True)
+        maape_colwise = MAAPEMetric(ctn_cols_idx=ctn_cols_idx, columnwise=True)
+        torch_metrics = [rmse_colwise, rmse_elwise, maape_elwise, maape_colwise]
+        metrics_list = torch_metrics + [
+            universal_metric(metric.clone()) for metric in torch_metrics
+        ]
+
+        N = 100
+        F = 10
+        tensor_df = torch.randn((N, F))
+        true_df = torch.randn((N, F))
+
+        # Error should be 0 since there's no columns to compute on even if it's EW
+        for metric in metrics_list:
+            self.assertAlmostEqual(0, metric(tensor_df, true_df).item(), places=WITHIN)
+            self.batched_input_equals(metric, tensor_df, true_df)
 
     @settings(
         suppress_health_check=[HealthCheck(3), HealthCheck.filter_too_much],
@@ -494,13 +516,13 @@ class TestStaticMulticatCategoricalMetrics(unittest.TestCase):
         batched_input_equals(self, metric, *inputs)
 
     def setup_metrics(self, df: pd.DataFrame) -> None:
-        self.accuracy_elwise = AccuracyMetric(
+        self.err_elwise = CategoricalErrorMetric(
             list_to_tensor(hypothesis["cat_cols_idx"]), []
         )
-        self.accuracy_colwise = AccuracyMetric(
+        self.err_colwise = CategoricalErrorMetric(
             list_to_tensor(hypothesis["cat_cols_idx"]), [], True
         )
-        self.torch_metrics = [self.accuracy_elwise, self.accuracy_colwise]
+        self.torch_metrics = [self.err_elwise, self.err_colwise]
 
     def hypothesis_assumptions(self, df: pd.DataFrame):
         assume(
@@ -508,6 +530,24 @@ class TestStaticMulticatCategoricalMetrics(unittest.TestCase):
             and (len(df) > 1)
             and (np.isinf(df).values.sum() == 0)
         )
+
+    def test_no_categorical_features(self):
+        err_colwise = CategoricalErrorMetric(
+            list_to_tensor([]), list_to_tensor([]), True
+        )
+        err_elwise = CategoricalErrorMetric(list_to_tensor([]), list_to_tensor([]))
+        torch_metrics = [err_elwise, err_colwise]
+
+        N = 100
+        F = 10
+        tensor_df = torch.randn((N, F))
+        true_df = torch.randn((N, F))
+
+        # Error should be 0 since there's no columns to compute on even if it's EW
+        for metric in torch_metrics:
+            self.assertAlmostEqual(0, metric(tensor_df, true_df).item(), places=WITHIN)
+            self.batched_input_equals(metric, tensor_df, true_df)
+            metric.reset()
 
     @settings(
         suppress_health_check=[HealthCheck(3), HealthCheck.filter_too_much],
@@ -523,7 +563,7 @@ class TestStaticMulticatCategoricalMetrics(unittest.TestCase):
         with self.subTest("All Equal"):
             for metric in self.torch_metrics:
                 self.assertAlmostEqual(
-                    1, metric(tensor_df, tensor_df).item(), places=WITHIN
+                    0, metric(tensor_df, tensor_df).item(), places=WITHIN
                 )
                 self.batched_input_equals(metric, tensor_df, tensor_df)
                 metric.reset()
@@ -537,20 +577,20 @@ class TestStaticMulticatCategoricalMetrics(unittest.TestCase):
             error_df.iloc[0, bin_col_idx] = 1 - df.iloc[0, bin_col_idx]
             error_df = torch.tensor(error_df.values)
             # these are all the same actually
-            with self.subTest("Colwise Accuracy"):
+            with self.subTest("Colwise Error"):
                 self.assertAlmostEqual(  # 1 error for 1 feature out of F
-                    (((N - 1) / N) + F - 1) / F,
-                    self.accuracy_colwise(error_df, tensor_df).item(),
+                    (1 / N) / F,
+                    self.err_colwise(error_df, tensor_df).item(),
                     places=WITHIN,
                 )
-                self.batched_input_equals(self.accuracy_colwise, error_df, tensor_df)
-            with self.subTest("Elwise Accuracy"):
+                self.batched_input_equals(self.err_colwise, error_df, tensor_df)
+            with self.subTest("Elwise Error"):
                 self.assertAlmostEqual(  # 1 error out of all the cells
-                    (N * F - 1) / (N * F),
-                    self.accuracy_elwise(error_df, tensor_df).item(),
+                    1 / (N * F),
+                    self.err_elwise(error_df, tensor_df).item(),
                     places=WITHIN,
                 )
-                self.batched_input_equals(self.accuracy_elwise, error_df, tensor_df)
+                self.batched_input_equals(self.err_elwise, error_df, tensor_df)
             for metric in self.torch_metrics:
                 metric.reset()
 
@@ -571,7 +611,7 @@ class TestStaticMulticatCategoricalMetrics(unittest.TestCase):
         with self.subTest("All Equal"):
             for metric in self.torch_metrics:
                 self.assertAlmostEqual(
-                    1,
+                    0,
                     metric(tensor_df, tensor_df, missing_indicators).item(),
                     places=WITHIN,
                 )
@@ -588,7 +628,7 @@ class TestStaticMulticatCategoricalMetrics(unittest.TestCase):
             error_df = torch.tensor(error_df.values)
             for metric in self.torch_metrics:
                 self.assertAlmostEqual(
-                    1,
+                    0,
                     metric(error_df, tensor_df, missing_indicators).item(),
                     places=WITHIN,
                 )
@@ -625,23 +665,22 @@ class TestStaticMulticatCategoricalMetrics(unittest.TestCase):
             self.assertAlmostEqual(
                 # nsamples in col with obs is N-1, and then 1 error
                 # nsamples is the other col is all N, but 2 errors
-                # (thats 2 cols) For the remaining cols acc is 1 (F - 2)
-                (((N - 1 - 1) / (N - 1)) + ((N - 2) / N) + (F - 2)) / F,
-                self.accuracy_colwise(error_df, tensor_df, missing_indicators).item(),
+                # (thats 2 cols) For the remaining cols err is 0 (F - 2)
+                ((1 / (N - 1)) + (2 / N)) / F,
+                self.err_colwise(error_df, tensor_df, missing_indicators).item(),
                 places=WITHIN,
             )
             self.batched_input_equals(
-                self.accuracy_colwise, error_df, tensor_df, missing_indicators
+                self.err_colwise, error_df, tensor_df, missing_indicators
             )
             self.assertAlmostEqual(
                 # 1 wrong and ignored in first col, 2 wrong in second, and the remaining F-2 cols have all right
-                ((N - 2) + (N - 2) + N * (F - 2))
-                / (N * F - 1),  # 1 ignored so 1 cell less
-                self.accuracy_elwise(error_df, tensor_df, missing_indicators).item(),
+                (1 + 2) / (N * F - 1),  # 1 ignored so 1 cell less
+                self.err_elwise(error_df, tensor_df, missing_indicators).item(),
                 places=WITHIN,
             )
             self.batched_input_equals(
-                self.accuracy_elwise, error_df, tensor_df, missing_indicators
+                self.err_elwise, error_df, tensor_df, missing_indicators
             )
             for metric in self.torch_metrics:
                 metric.reset()
@@ -689,9 +728,9 @@ class TestStaticMulticatCategoricalMetrics(unittest.TestCase):
         with self.subTest("No Missing"):
             missing_indicators = torch.zeros_like(tensor_df).to(bool)
             for metric in self.torch_metrics:
-                # because there are no missing values at all the errors for missingonly should be 0, therefore accuracy 1
+                # because there are no missing values at all the errors for missingonly should be 0
                 self.assertAlmostEqual(
-                    1,
+                    0,
                     metric(error_df, tensor_df, missing_indicators).item(),
                     places=WITHIN,
                 )
@@ -707,21 +746,21 @@ class TestStaticMulticatCategoricalMetrics(unittest.TestCase):
             self.assertAlmostEqual(
                 # nsamples is the missing col is all N, but 2 errors
                 # For the remaining F - 1, we don't care bc they're observed
-                ((N - 2) / N) / 1,
-                self.accuracy_colwise(error_df, tensor_df, missing_indicators).item(),
+                2 / N,
+                self.err_colwise(error_df, tensor_df, missing_indicators).item(),
                 places=WITHIN,
             )
             self.batched_input_equals(
-                self.accuracy_colwise, error_df, tensor_df, missing_indicators
+                self.err_colwise, error_df, tensor_df, missing_indicators
             )
             self.assertAlmostEqual(
                 # 2 wrong in missing ocl, and the remaining F-1 cols have all right
-                (N - 2) / N,  # all but 1 col ignored, only N missing samples
-                self.accuracy_elwise(error_df, tensor_df, missing_indicators).item(),
+                2 / N,  # all but 1 col ignored, only N missing samples
+                self.err_elwise(error_df, tensor_df, missing_indicators).item(),
                 places=WITHIN,
             )
             self.batched_input_equals(
-                self.accuracy_elwise, error_df, tensor_df, missing_indicators
+                self.err_elwise, error_df, tensor_df, missing_indicators
             )
             for metric in self.torch_metrics:
                 metric.reset()
@@ -732,16 +771,16 @@ class TestStaticOnehotCategoricalMetrics(unittest.TestCase):
         batched_input_equals(self, metric, *inputs)
 
     def setup_metrics(self, df: pd.DataFrame) -> None:
-        self.accuracy_colwise = AccuracyMetric(
+        self.err_colwise = CategoricalErrorMetric(
             list_to_tensor(hypothesis["onehot"]["bin_cols_idx"]),
             list_to_tensor(hypothesis["onehot"]["onehot_cols_idx"]),
             True,
         )
-        self.accuracy_elwise = AccuracyMetric(
+        self.err_elwise = CategoricalErrorMetric(
             list_to_tensor(hypothesis["onehot"]["bin_cols_idx"]),
             list_to_tensor(hypothesis["onehot"]["onehot_cols_idx"]),
         )
-        self.torch_metrics = [self.accuracy_elwise, self.accuracy_colwise]
+        self.torch_metrics = [self.err_elwise, self.err_colwise]
 
     def setup_data(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.replace({np.nan: 400, np.inf: 500})
@@ -773,6 +812,24 @@ class TestStaticOnehotCategoricalMetrics(unittest.TestCase):
         ]
         return error_df
 
+    def test_no_categorical_features(self):
+        err_colwise = CategoricalErrorMetric(
+            list_to_tensor([]), list_to_tensor([]), True
+        )
+        err_elwise = CategoricalErrorMetric(list_to_tensor([]), list_to_tensor([]))
+        torch_metrics = [err_elwise, err_colwise]
+
+        N = 100
+        F = 10
+        tensor_df = torch.randn((N, F))
+        true_df = torch.randn((N, F))
+
+        # Error should be 0 since there's no columns to compute on even if it's EW
+        for metric in torch_metrics:
+            self.assertAlmostEqual(0, metric(tensor_df, true_df).item(), places=WITHIN)
+            self.batched_input_equals(metric, tensor_df, true_df)
+            metric.reset()
+
     @settings(
         suppress_health_check=[HealthCheck(3), HealthCheck.filter_too_much],
         deadline=None,
@@ -792,7 +849,7 @@ class TestStaticOnehotCategoricalMetrics(unittest.TestCase):
         with self.subTest("All Equal"):
             for metric in self.torch_metrics:
                 self.assertAlmostEqual(
-                    1,
+                    0,
                     metric(tensor_df, tensor_df).item(),
                     places=WITHIN,
                 )
@@ -809,17 +866,17 @@ class TestStaticOnehotCategoricalMetrics(unittest.TestCase):
 
             # these are all the same
             self.assertAlmostEqual(  # 1 error for 1 feature out of F
-                (((N - 1) / N) + F - 1) / F,
-                self.accuracy_colwise(error_df, tensor_df).item(),
+                (1 / N) / F,
+                self.err_colwise(error_df, tensor_df).item(),
                 places=WITHIN,
             )
-            self.batched_input_equals(self.accuracy_colwise, error_df, tensor_df)
+            self.batched_input_equals(self.err_colwise, error_df, tensor_df)
             self.assertAlmostEqual(  # one error out of all the cells
-                (N * F - 1) / (N * F),
-                self.accuracy_elwise(error_df, tensor_df).item(),
+                1 / (N * F),
+                self.err_elwise(error_df, tensor_df).item(),
                 places=WITHIN,
             )
-            self.batched_input_equals(self.accuracy_elwise, error_df, tensor_df)
+            self.batched_input_equals(self.err_elwise, error_df, tensor_df)
             for metric in self.torch_metrics:
                 metric.reset()
 
@@ -844,7 +901,7 @@ class TestStaticOnehotCategoricalMetrics(unittest.TestCase):
         with self.subTest("All Equal"):
             for metric in self.torch_metrics:
                 self.assertAlmostEqual(
-                    1,
+                    0,
                     metric(tensor_df, tensor_df, missing_indicators).item(),
                     places=WITHIN,
                 )
@@ -861,7 +918,7 @@ class TestStaticOnehotCategoricalMetrics(unittest.TestCase):
             error_df = torch.tensor(error_df.values)
             for metric in self.torch_metrics:
                 self.assertAlmostEqual(
-                    1,
+                    0,
                     metric(error_df, tensor_df, missing_indicators).item(),
                     places=WITHIN,
                 )
@@ -889,23 +946,22 @@ class TestStaticOnehotCategoricalMetrics(unittest.TestCase):
             self.assertAlmostEqual(
                 # nsamples in col with obs is N-1, and then 1 error
                 # nsamples is the other col is all N, but 2 errors
-                # (thats 2 cols) For the remaining cols acc is 1 (F - 2)
-                (((N - 1 - 1) / (N - 1)) + ((N - 2) / N) + (F - 2)) / F,
-                self.accuracy_colwise(error_df, tensor_df, missing_indicators).item(),
+                # (thats 2 cols) For the remaining cols err is 0 (F - 2)
+                ((1 / (N - 1)) + (2 / N)) / F,
+                self.err_colwise(error_df, tensor_df, missing_indicators).item(),
                 places=WITHIN,
             )
             self.batched_input_equals(
-                self.accuracy_colwise, error_df, tensor_df, missing_indicators
+                self.err_colwise, error_df, tensor_df, missing_indicators
             )
             self.assertAlmostEqual(
                 # 1 wrong and ignored in first col, 2 wrong in second, and the remaining F-2 cols have all right
-                ((N - 2) + (N - 2) + N * (F - 2))
-                / (N * F - 1),  # 1 ignored so 1 cell less
-                self.accuracy_elwise(error_df, tensor_df, missing_indicators).item(),
+                (1 + 2) / (N * F - 1),  # 1 ignored so 1 cell less
+                self.err_elwise(error_df, tensor_df, missing_indicators).item(),
                 places=WITHIN,
             )
             self.batched_input_equals(
-                self.accuracy_elwise, error_df, tensor_df, missing_indicators
+                self.err_elwise, error_df, tensor_df, missing_indicators
             )
             for metric in self.torch_metrics:
                 metric.reset()
@@ -941,9 +997,9 @@ class TestStaticOnehotCategoricalMetrics(unittest.TestCase):
         with self.subTest("No missing"):
             missing_indicators = torch.zeros_like(tensor_df).to(bool)
             for metric in self.torch_metrics:
-                # because there are no missing values at all the errors for missingonly should be 0, therefore accuracy 1
+                # because there are no missing values at all the errors for missingonly should be 0
                 self.assertAlmostEqual(
-                    1,
+                    0,
                     metric(error_df, tensor_df, missing_indicators).item(),
                     places=WITHIN,
                 )
@@ -959,23 +1015,21 @@ class TestStaticOnehotCategoricalMetrics(unittest.TestCase):
             self.assertAlmostEqual(
                 # nsamples is the missing col is all N, but 2 errors
                 # For the remaining F - 1, they're all observed so we don't care
-                ((N - 2) / N) / 1,
-                self.accuracy_colwise(error_df, tensor_df, missing_indicators).item(),
+                2 / N,
+                self.err_colwise(error_df, tensor_df, missing_indicators).item(),
                 places=WITHIN,
             )
             self.batched_input_equals(
-                self.accuracy_colwise, error_df, tensor_df, missing_indicators
+                self.err_colwise, error_df, tensor_df, missing_indicators
             )
             self.assertAlmostEqual(
                 # 2 wrong in missing ocl, and the remaining F-1 cols have all right
-                (N - 2) / N,  # all but 1 col ignored, only N missing samples
-                # ((N * F - 1) - 1)
-                # / (N * F - 1),  # error in 1 non-masked cells when theres 1 cell less
-                self.accuracy_elwise(error_df, tensor_df, missing_indicators).item(),
+                2 / N,  # all but 1 col ignored, only N missing samples
+                self.err_elwise(error_df, tensor_df, missing_indicators).item(),
                 places=WITHIN,
             )
             self.batched_input_equals(
-                self.accuracy_elwise, error_df, tensor_df, missing_indicators
+                self.err_elwise, error_df, tensor_df, missing_indicators
             )
             for metric in self.torch_metrics:
                 metric.reset()

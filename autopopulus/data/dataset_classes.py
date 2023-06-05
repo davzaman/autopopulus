@@ -353,7 +353,7 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         data_type_time_dim=DataTypeTimeDim.STATIC,
         scale: bool = False,
         ampute: bool = False,
-        feature_map: Optional[str] = None,
+        feature_map: Optional[str] = "onehot_categorical",
         uniform_prob: bool = False,
         separate_ground_truth_transform: bool = False,
         test_size: Optional[float] = None,
@@ -1113,7 +1113,7 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         else:  # apply transform beforehand on the entire split
             split_data = {}
             data_feature_spaces = ["original"]
-            if self.feature_map is not None:
+            if self.feature_map != "onehot_categorical":
                 data_feature_spaces.append("mapped")
             for data_feature_space in data_feature_spaces:  # ["original", "mapped"]
                 split_data[data_feature_space] = {}

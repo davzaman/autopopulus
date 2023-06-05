@@ -34,10 +34,11 @@ PREDICT:
 aggregate_type: mean/cilower/ciupper/none
 """
 IMPUTE_METRIC_TAG_FORMAT = (
-    "{split}/{feature_space}/{filter_subgroup}/{reduction}/{name}"
+    "{split}/{feature_space}/{filter_subgroup}/{reduction}/{feature_type}/{name}"
 )
 PREDICT_METRIC_TAG_FORMAT = "{predictor}/{aggregate_type}/{name}"
 TIME_TAG_FORMAT = "{split}/epoch_duration(sec)"
+MIXED_FEATURE_METRIC_FORMAT = "{ctn_name}{cat_name}"
 
 
 # Ref: https://stackoverflow.com/a/6794451/1888794

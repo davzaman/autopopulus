@@ -3,7 +3,7 @@ from math import ceil
 import sys
 from typing import Callable, List, Dict, Any, Optional, Tuple, Union
 from pandas import DataFrame, Index
-from torchmetrics import Metric
+from torchmetrics import Metric, MetricCollection
 from numpy import array
 
 #### Pytorch ####
@@ -40,10 +40,17 @@ from autopopulus.data.transforms import (
     list_to_tensor,
     simple_impute_tensor,
 )
-from autopopulus.utils.impute_metrics import AccuracyMetric, MAAPEMetric, RMSEMetric
+from autopopulus.utils.impute_metrics import (
+    CategoricalErrorMetric,
+    MAAPEMetric,
+    RMSEMetric,
+)
 from autopopulus.utils.cli_arg_utils import YAMLStringListToList, StringOrInt, str2bool
 from autopopulus.utils.utils import rank_zero_print
-from autopopulus.utils.log_utils import IMPUTE_METRIC_TAG_FORMAT
+from autopopulus.utils.log_utils import (
+    IMPUTE_METRIC_TAG_FORMAT,
+    MIXED_FEATURE_METRIC_FORMAT,
+)
 from autopopulus.data.types import DataTypeTimeDim
 
 HiddenAndCellState = Tuple[Tensor, Tensor]
@@ -397,6 +404,7 @@ class AEDitto(LightningModule):
                 filter_subgroup="all",
                 reduction="NA",
                 split=split,
+                feature_type="mixed",
             ),
             outputs["loss"],
             on_step=False,
@@ -461,11 +469,34 @@ class AEDitto(LightningModule):
                         else:
                             metric_val = metric(imputed_data, ground_truth)
 
-                        self.log(
-                            IMPUTE_METRIC_TAG_FORMAT.format(name=name, **context),
-                            metric_val,
-                            **universal_log_settings,
-                        )
+                        # metriccollection returns a dict
+                        if isinstance(metric_val, Dict):
+                            combined = sum(metric_val.values())
+                            # log the summed components for the mixed feature types
+                            self.log(
+                                IMPUTE_METRIC_TAG_FORMAT.format(
+                                    name=name, feature_type="mixed", **context
+                                ),
+                                combined,
+                                **universal_log_settings,
+                            )
+                            # separately log each component as its metric type
+                            for feature_type, val in metric_val.items():
+                                self.log(
+                                    IMPUTE_METRIC_TAG_FORMAT.format(
+                                        name=name, feature_type=feature_type, **context
+                                    ),
+                                    val,
+                                    **universal_log_settings,
+                                )
+                        else:
+                            self.log(
+                                IMPUTE_METRIC_TAG_FORMAT.format(
+                                    name=name, feature_type="NA", **context
+                                ),
+                                metric_val,
+                                **universal_log_settings,
+                            )
 
     #######################
     #   Initialization    #
@@ -474,7 +505,7 @@ class AEDitto(LightningModule):
         """
         https://torchmetrics.readthedocs.io/en/stable/pages/overview.html#metrics-and-devices
         https://lightning.ai/forums/t/lightningmodule-init-vs-setup-method/147
-        * torchmetrics and models themselves need to be initialized inside __init__ and inside moduledict/list if i want the internal states to be placed on the correct device
+        * torchmetrics and models themselves need to be initialized inside __init__ and inside moduledict/list if i want the internal states to be placed on the correct device  (i.e. for a module to be recognize as a child module it must be created on  __init__)
         * with plightning, metric.reset() is called at the end of an epoch for me
         * I need a separate metric per dataset split (https://torchmetrics.readthedocs.io/en/latest/pages/lightning.html#logging-torchmetrics)
         """
@@ -497,8 +528,16 @@ class AEDitto(LightningModule):
             self.metrics = metrics
 
     def get_reduction_metrics(self) -> nn.ModuleDict:
-        """RMSE, MAAPE, (?Accuracy) x {original, mapped} x {cw, ew}"""
+        """({RMSE, MAAPE} x {CatError}) x {original, mapped} x {cw, ew}"""
+        # these should all be errors
         ctn_metric_names = [("RMSE", RMSEMetric), ("MAAPE", MAAPEMetric)]
+        cat_metric_names = [("CategoricalError", CategoricalErrorMetric)]
+        assert all(
+            [
+                not metric_name_fn_pair[1].higher_is_better
+                for metric_name_fn_pair in ctn_metric_names + cat_metric_names
+            ]
+        ), "Metric components must all be errors, not scores."
         # we need separate metrics for each feature map
         # since they depend on the number of features (which differs bc mapping)
         # we also need them for CW so the update between mapped and original doesn't overlap
@@ -507,55 +546,52 @@ class AEDitto(LightningModule):
             if self.hparams.data_feature_space == "mapped"
             else ["original"]
         )
-
-        # Add continuous metrics
-        cwmetrics = nn.ModuleDict(
+        # again, i can't even have ANY normal dicts here, it all has to be nn.moduledict/list, even wrappers
+        # reduction -> moduledict(feature_space -> moduledict(mixed metric name-> collection[feature_type -> func]))
+        return nn.ModuleDict(
             {
-                feature_space: nn.ModuleDict(
+                reduction: nn.ModuleDict(
                     {
-                        name: metric(
-                            columnwise=True,
-                            nfeatures=self.hparams.nfeatures[feature_space],
+                        feature_space: nn.ModuleDict(
+                            {
+                                # https://torchmetrics.readthedocs.io/en/stable/pages/overview.html#metriccollection
+                                # mixed metric name
+                                # combines all ctn metrics with cat ones
+                                MIXED_FEATURE_METRIC_FORMAT.format(
+                                    ctn_name=ctn_name, cat_name=cat_name
+                                ): MetricCollection(
+                                    {
+                                        "continuous": ctn_metric(
+                                            ctn_cols_idx=self.get_col_idxs_by_type(
+                                                data_feature_space=feature_space,
+                                                feature_type="continuous",
+                                            ),
+                                            columnwise=reduction == "CW",
+                                        ),
+                                        "categorical": cat_metric(
+                                            self.get_col_idxs_by_type(
+                                                data_feature_space=feature_space,
+                                                feature_type="binary",
+                                            ),
+                                            self.get_col_idxs_by_type(
+                                                data_feature_space=feature_space,
+                                                feature_type="onehot",
+                                            ),
+                                            columnwise=reduction == "CW",
+                                        ),
+                                    },
+                                    compute_groups=False,
+                                )
+                                for ctn_name, ctn_metric in ctn_metric_names
+                                for cat_name, cat_metric in cat_metric_names
+                            }
                         )
-                        for name, metric in ctn_metric_names
+                        for feature_space in feature_spaces
                     }
                 )
-                for feature_space in feature_spaces
+                for reduction in ["CW", "EW"]
             }
         )
-        ewmetrics = nn.ModuleDict(
-            {
-                feature_space: nn.ModuleDict(
-                    {name: metric() for name, metric in ctn_metric_names}
-                )
-                for feature_space in feature_spaces
-            }
-        )
-        # Add accuracy for number of bins correctly imputed if everything is discretized
-        # we don't care about element-wise categorical Accuracy
-        if self.hparams.feature_map == "discretize_continuous":
-            for feature_space in feature_spaces:
-                args = (
-                    self.get_col_idxs_by_type(
-                        data_feature_space=feature_space,
-                        feature_type="binary",
-                    ),
-                    self.get_col_idxs_by_type(
-                        data_feature_space=feature_space,
-                        feature_type="onehot",
-                    ),
-                )
-                cwmetrics[feature_space].update(
-                    nn.ModuleDict({"Accuracy": AccuracyMetric(*args, columnwise=True)})
-                )
-                ewmetrics[feature_space].update(
-                    nn.ModuleDict({"Accuracy": AccuracyMetric(*args)})
-                )
-
-        # again, i can't even have ANY normal dicts here, it all has to be nn.moduledict/list, even wrappers
-        # EW: reduction -> moduledict(name -> fn)
-        # CW: reduction -> moduledict(feature_space -> moduledict(name -> fun))
-        return nn.ModuleDict({"CW": cwmetrics, "EW": ewmetrics})
 
     def set_col_idxs_by_type_as_buffers(
         self, col_idxs_by_type: Dict[str, Dict[str, List]]
@@ -675,6 +711,12 @@ class AEDitto(LightningModule):
         Pick loss from options.
         All losses expect logits, do not sigmoid/softmax in the architecture.
         """
+        self.maape_loss = MAAPEMetric(
+            ctn_cols_idx=self.get_col_idxs_by_type(
+                data_feature_space=self.hparams.data_feature_space,
+                feature_type="continuous",
+            )
+        )
         loss_choices = {
             "BCE": nn.BCEWithLogitsLoss(),
             "MSE": nn.MSELoss(),
@@ -705,7 +747,7 @@ class AEDitto(LightningModule):
                     data_feature_space=self.hparams.data_feature_space,
                     feature_type="onehot",
                 ),
-                loss_ctn=MAAPEMetric(),
+                loss_ctn=self.maape_loss,
             ),
         }
         assert (

@@ -25,7 +25,7 @@ If the metrics change they might have to be checked again.
 
 class MAAPEMetric(Metric):
     """
-    MAAPE.
+    MAAPE. Range [0, pi/2) (unscaled), [0, 1) (scaled).
     EW: sum(sum(arctan(abs((true - pred) / true))))/(nrows * ncols)
     CW: mean(mean(arctan(abs((true - pred) / true))))
     Not the same when there's missingness indicators.
@@ -36,24 +36,24 @@ class MAAPEMetric(Metric):
     https://gist.github.com/bshishov/5dc237f59f019b26145648e2124ca1c9
     """
 
+    # This is true since we use EPSILON (no 0 denominator)
     is_differentiable: bool = True
     higher_is_better: bool = False
     full_state_update: bool = False
 
     def __init__(
         self,
+        ctn_cols_idx: torch.tensor,
         epsilon: float = EPSILON,
         scale_to_01: bool = True,
         columnwise: bool = False,
-        nfeatures: Optional[int] = None,
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
-        assert (
-            not columnwise or nfeatures is not None
-        ), "If columnwise, nfeatures cannot be None."
-        self.columnwise = columnwise
+        self.register_buffer("ctn_cols_idx", ctn_cols_idx)
+        nfeatures = len(ctn_cols_idx)
         shape = (nfeatures,) if columnwise else (1,)
+        self.columnwise = columnwise
         self.epsilon = epsilon
         self.scale_to_01 = scale_to_01
         self.add_state(
@@ -86,13 +86,19 @@ class MAAPEMetric(Metric):
             )
         )
 
-        row_maape = torch.arctan(torch.abs((target - preds) / (target + self.epsilon)))
+        slice_dim = len(preds.shape) - 1
+        ctn_preds = preds.index_select(slice_dim, self.ctn_cols_idx)
+        ctn_target = target.index_select(slice_dim, self.ctn_cols_idx)
+
+        row_maape = torch.arctan(
+            torch.abs((ctn_target - ctn_preds) / (ctn_target + self.epsilon))
+        )
         if missing_indicators is not None:
             row_maape *= missing_indicators
             count = self.sum_fn(missing_indicators)
         else:
             count = torch.tensor(  # num rows if columnwise
-                target.size()[0] if self.columnwise else target.numel(),
+                ctn_target.size()[0] if self.columnwise else ctn_target.numel(),
                 device=self.device,
             )
 
@@ -126,7 +132,7 @@ class MAAPEMetric(Metric):
 
 class RMSEMetric(Metric):
     """
-    RMSE.
+    RMSE. Range [0, inf)
     Element-wise is computationally different from column-wise (order of sqrt and sum matters).
         EW: sqrt(sum(sum((true - pred)**2)) / (nrows * ncols))
         CW: mean(sqrt(mean((true - pred)**2)))
@@ -141,12 +147,11 @@ class RMSEMetric(Metric):
     full_state_update: bool = False
 
     def __init__(
-        self, columnwise: bool = False, nfeatures: Optional[int] = None, **kwargs: Any
+        self, ctn_cols_idx: torch.Tensor, columnwise: bool = False, **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
-        assert (
-            not columnwise or nfeatures is not None
-        ), "If columnwise, nfeatures cannot be None."
+        self.register_buffer("ctn_cols_idx", ctn_cols_idx)
+        nfeatures = len(ctn_cols_idx)
         shape = (nfeatures,) if columnwise else (1,)
         self.columnwise = columnwise
         self.add_state(
@@ -179,13 +184,17 @@ class RMSEMetric(Metric):
             )
         )
 
-        squared_error = torch.pow(preds - target, 2)
+        slice_dim = len(preds.shape) - 1
+        ctn_preds = preds.index_select(slice_dim, self.ctn_cols_idx)
+        ctn_target = target.index_select(slice_dim, self.ctn_cols_idx)
+
+        squared_error = torch.pow(ctn_preds - ctn_target, 2)
         if missing_indicators is not None:
             squared_error *= missing_indicators
             count = self.sum_fn(missing_indicators)
         else:
             count = torch.tensor(  # num rows if columnwise
-                target.size()[0] if self.columnwise else target.numel(),
+                ctn_target.size()[0] if self.columnwise else ctn_target.numel(),
                 device=self.device,
             )
 
@@ -216,16 +225,16 @@ class RMSEMetric(Metric):
         return rmse
 
 
-class AccuracyMetric(Metric):
+class CategoricalErrorMetric(Metric):
     """
-    Categorical accuracy.
+    Categorical error. Range [0, 1]
     CW != EW when there's a mask.
     https://github.com/Lightning-AI/metrics/blob/master/src/torchmetrics/classification/accuracy.py
     https://github.com/allenai/allennlp/blob/main/allennlp/training/metrics/categorical_accuracy.py
     """
 
     is_differentiable: bool = False
-    higher_is_better: bool = True
+    higher_is_better: bool = False
     full_state_update: bool = False
 
     def __init__(
@@ -243,10 +252,10 @@ class AccuracyMetric(Metric):
         ), "If columnwise, nfeatures cannot be None."
         self.columnwise = columnwise
         shape = (nfeatures,) if columnwise else (1,)
-        self.bin_cols_idx = bin_cols_idx
-        self.onehot_cols_idx = onehot_cols_idx
+        self.register_buffer("bin_cols_idx", bin_cols_idx)
+        self.register_buffer("onehot_cols_idx", onehot_cols_idx)
         self.add_state(
-            "num_correct", torch.full(shape, torch.tensor(0)), dist_reduce_fx="sum"
+            "num_wrong", torch.full(shape, torch.tensor(0)), dist_reduce_fx="sum"
         )
         self.add_state(
             "total", default=torch.full(shape, torch.tensor(0)), dist_reduce_fx="sum"
@@ -262,6 +271,7 @@ class AccuracyMetric(Metric):
         target: torch.Tensor,
         missing_indicators: Optional[torch.BoolTensor] = None,
     ):
+        # TODO: either create helper function or parent class that does this check before calling update for all of my metrics.
         assert preds.shape == target.shape
         assert not (
             any(
@@ -276,7 +286,7 @@ class AccuracyMetric(Metric):
         predicted_cats = get_categories(preds, self.bin_cols_idx, self.onehot_cols_idx)
         target_cats = get_categories(target, self.bin_cols_idx, self.onehot_cols_idx)
 
-        correct = predicted_cats.eq(target_cats).to(int)
+        correct = predicted_cats.ne(target_cats).to(int)
         if missing_indicators is not None:
             missing_indicators = get_categories(
                 missing_indicators, self.bin_cols_idx, self.onehot_cols_idx
@@ -289,11 +299,11 @@ class AccuracyMetric(Metric):
                 target_cats.size()[0] if self.columnwise else target_cats.numel(),
                 device=self.device,
             )
-        self.num_correct += self.sum_fn(correct)
+        self.num_wrong += self.sum_fn(correct)
         self.total += count
 
     def compute(self) -> float:
-        acc = self.num_correct / self.total
+        err = self.num_wrong / self.total
         """
         Fill with 1 (no error) where numerator and denominator are 0.
             With missing_indicator, the total (denominator) might be 0.
@@ -303,17 +313,17 @@ class AccuracyMetric(Metric):
         This also works for EW when no data is missing.
         """
         assert (
-            self.num_correct[self.total == 0] == 0
+            self.num_wrong[self.total == 0] == 0
         ).all(), "Calculated sum error where there are no indicated values."
         num_acc_items = self.total != 0
-        # no items to calc accuracy over (due to indicators)
+        # no items to calc err over (due to indicators)
         if not torch.sum(num_acc_items):
-            return torch.tensor(1.0, device=self.num_correct.device)
+            return torch.tensor(0.0, device=self.num_wrong.device)
 
         if self.columnwise:  # mean, ignoring the unincluded cols
             # sum the rmse for the cols we care about / # cols we care about
-            return torch.sum(acc[num_acc_items]) / torch.sum(num_acc_items)
-        return acc
+            return torch.sum(err[num_acc_items]) / torch.sum(num_acc_items)
+        return err
 
 
 def universal_metric(metric: Metric) -> Callable:
@@ -338,13 +348,16 @@ def get_categories(
     """
     For binary and onehot groups get the column name of the bin with the maximum score.
     """
-    to_stack = [data[:, bin_col_idxs].T]
+    slice_dim = len(data.shape) - 1
+    to_stack = [data.index_select(slice_dim, bin_col_idxs).T]
     if len(onehot_cols_idx) > 0:
         if data.dtype == torch.bool or data.dtype == bool:  # if data is the mask
             # This assumes the mask will be the same for all bins under the same var
-            fn = lambda idxs: data[:, idxs].all(axis=1)
+            fn = lambda idxs: data.index_select(slice_dim, idxs).all(axis=slice_dim)
         else:  # data is actual data not a mask
-            fn = lambda idxs: torch.argmax(data[:, idxs], axis=1)
+            fn = lambda idxs: torch.argmax(
+                data.index_select(slice_dim, idxs), axis=slice_dim
+            )
 
         # if this is empty the stack will complain
         to_stack.append(

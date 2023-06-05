@@ -117,6 +117,7 @@ def tune_model_optuna(
         filter_subgroup="missingonly",
         reduction="CW",
         split="val",
+        feature_type="mixed",
     )
 
     ae_imputer = AEImputer.from_argparse_args(

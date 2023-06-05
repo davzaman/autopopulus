@@ -2,6 +2,8 @@ from logging import error
 from enum import Enum
 from typing import Any, Callable, Dict, List, Union
 
+from torch import tensor
+
 from autopopulus.data.dataset_classes import CommonDataModule
 from autopopulus.utils.impute_metrics import MAAPEMetric, universal_metric
 from autopopulus.utils.log_utils import IMPUTE_METRIC_TAG_FORMAT
@@ -141,6 +143,7 @@ def get_tune_metric(
                 filter_subgroup="all",
                 reduction="NA",
                 split="val",
+                feature_type="mixed",
             )
         else:
             return IMPUTE_METRIC_TAG_FORMAT.format(
@@ -149,6 +152,7 @@ def get_tune_metric(
                 filter_subgroup="missingonly",
                 reduction="CW",
                 split="val",
+                feature_type="mixed",
             )
     elif imputer == ImputerT.BASELINE:
         if (
@@ -157,5 +161,10 @@ def get_tune_metric(
             return None
         else:
             return universal_metric(  # sync with tuning metric for ae
-                MAAPEMetric(columnwise=True, nfeatures=data.nfeatures["original"])
+                MAAPEMetric(
+                    ctn_cols_idx=tensor(
+                        data.col_idxs_by_type["original"]["continuous"]
+                    ),
+                    columnwise=True,
+                )
             )

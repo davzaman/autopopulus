@@ -49,7 +49,7 @@ chosen_methods = ["baseline", "ae", "variational"]
 experiment_tracker = "guild"
 datasets = ["cure_ckd"]
 # if use_queues nonzero, will use queues, specify the number of queues (parralellism).
-guild_use_queues: int = 0
+guild_use_queues: int = 1
 # fully_observed=no uses entire dataset
 all_data = False
 # fully_observed=yes will ampute and impute a missingness scenario

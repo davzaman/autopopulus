@@ -1,6 +1,8 @@
 from typing import List, Optional, Union
 import torch
 import torch.nn as nn
+from torch.nn.modules.loss import _Loss
+from torchmetrics import Metric
 
 from autopopulus.data.constants import PAD_VALUE
 from autopopulus.utils.utils import rank_zero_print
@@ -45,52 +47,84 @@ class CtnCatLoss(nn.Module):
         ctn_cols_idx: torch.LongTensor,
         bin_cols_idx: torch.LongTensor,
         onehot_cols_idx: torch.LongTensor,
-        loss_bin=nn.BCEWithLogitsLoss(),
-        loss_onehot=nn.CrossEntropyLoss(),
-        loss_ctn=nn.MSELoss(),
+        loss_bin: Union[_Loss, Metric] = nn.BCEWithLogitsLoss(),
+        loss_onehot: Union[_Loss, Metric] = nn.CrossEntropyLoss(),
+        loss_ctn: Union[_Loss, Metric] = nn.MSELoss(),
     ):
         super().__init__()
-        self.ctn_cols_idx = ctn_cols_idx
-        self.bin_cols_idx = bin_cols_idx
-        self.onehot_cols_idx = onehot_cols_idx
+        # we need to register these as buffers in the loss module as well for it to move to the correct device.
+        # these should't be updated at all in this loss so we don't have to worry about resetting
+        self.register_buffer("ctn_cols_idx", ctn_cols_idx)
+        self.register_buffer("bin_cols_idx", bin_cols_idx)
+        self.register_buffer("onehot_cols_idx", onehot_cols_idx)
         self.loss_bin = loss_bin
         self.loss_onehot = loss_onehot
         self.loss_ctn = loss_ctn
+        self.assert_losses_differentiable_if_metric()
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor):
+        # If metric apply data directly (interally should filter), but if loss we need to filter the data first
+        # Loss for a component where there are no features of that type will be 0
         # slicing is differentiable: https://stackoverflow.com/questions/51361407/is-column-selection-in-pytorch-differentiable/51366171
-        if len(pred.shape) == 2:  # static
-            loss_onehot = 0
+        # Select in dim 1 (static)  == [:, select], or dim 2 (longitudinal) == [:, :, select]
+        slice_dim = len(pred.shape) - 1
+        loss_onehot = 0
+        if isinstance(self.loss_onehot, Metric):
+            loss_onehot += self.loss_onehot(pred, target)
+        else:
             for onehot_group in self.onehot_cols_idx:
                 # ignore pads of -1
                 onehot_group = onehot_group[onehot_group != PAD_VALUE]
                 loss_onehot += self.loss_onehot(
-                    pred[:, onehot_group],
-                    torch.argmax(target[:, onehot_group], dim=1),
-                )
-            loss_bin = self.loss_bin(
-                pred[:, self.bin_cols_idx], target[:, self.bin_cols_idx]
-            )
-            loss_ctn = self.loss_ctn(
-                pred[:, self.ctn_cols_idx], target[:, self.ctn_cols_idx]
-            )
-        elif len(pred.shape) == 3:  # longitudinal
-            loss_onehot = 0
-            for onehot_group in self.onehot_cols_idx:
-                # ignore pads of -1
-                onehot_group = onehot_group[onehot_group != PAD_VALUE]
-                loss_onehot += self.loss_onehot(
-                    pred[:, :, onehot_group],
+                    pred.index_select(slice_dim, onehot_group),
                     # Last dim: whether static/longitudinal the last dim is features
-                    torch.argmax(target[:, :, onehot_group], dim=2),
+                    torch.argmax(
+                        target.index_select(slice_dim, onehot_group), dim=slice_dim
+                    ),
                 )
-            loss_bin = self.loss_bin(
-                pred[:, :, self.bin_cols_idx], target[:, :, self.bin_cols_idx]
-            )
-            loss_ctn = self.loss_ctn(
-                pred[:, :, self.ctn_cols_idx], target[:, :, self.ctn_cols_idx]
-            )
+        if isinstance(self.loss_bin, Metric):
+            loss_bin = self.loss_bin(pred, target)
+        else:
+            if self.bin_cols_idx.numel() == 0:
+                loss_bin = 0
+            else:
+                loss_bin = self.loss_bin(
+                    pred.index_select(slice_dim, self.bin_cols_idx),
+                    target.index_select(slice_dim, self.bin_cols_idx),
+                )
+        if isinstance(self.loss_ctn, Metric):
+            loss_ctn = self.loss_ctn(pred, target)
+        else:
+            if self.ctn_cols_idx.numel() == 0:
+                loss_ctn = 0
+            else:
+                loss_ctn = self.loss_ctn(
+                    pred.index_select(slice_dim, self.ctn_cols_idx),
+                    target.index_select(slice_dim, self.ctn_cols_idx),
+                )
+        self.reset_if_metric()
         return loss_onehot + loss_bin + loss_ctn
+
+    def assert_losses_differentiable_if_metric(self):
+        """If the loss is a metric it must be differentiable."""
+        assert not isinstance(self.loss_bin, Metric) or self.loss_bin.is_differentiable
+        assert (
+            not isinstance(self.loss_onehot, Metric)
+            or self.loss_onehot.is_differentiable
+        )
+        assert not isinstance(self.loss_ctn, Metric) or self.loss_ctn.is_differentiable
+
+    def reset_if_metric(self):
+        """
+        If i'm using a torchmetric for loss it needs to be reset each batch.
+        Technically the loss should not have state.
+        """
+        if isinstance(self.loss_bin, Metric):
+            self.loss_bin.reset()
+        if isinstance(self.loss_onehot, Metric):
+            self.loss_onehot.reset()
+        if isinstance(self.loss_ctn, Metric):
+            self.loss_ctn.reset()
 
 
 class ReconstructionKLDivergenceLoss(nn.Module):
