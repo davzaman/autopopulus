@@ -10,16 +10,16 @@ from cloudpickle import dump
 # Required for IterativeImputer, as it's experimental
 from sklearn.experimental import enable_iterative_imputer  # noqa
 from sklearn.impute import IterativeImputer, KNNImputer
+from sklearn.linear_model import LogisticRegression
 
 ## Local Modules
 from autopopulus.data import CommonDataModule
-from autopopulus.data.transforms import SimpleImpute
+from autopopulus.models.sklearn_model_utils import MixedFeatureImputer
 from autopopulus.utils.log_utils import get_serialized_model_path
 from autopopulus.models.sklearn_model_utils import TransformScorer, TunableEstimator
 from autopopulus.task_logic.utils import (
     ImputerT,
     get_tune_metric,
-    STATIC_BASELINE_IMPUTER_MODEL_PARAM_GRID,
 )
 
 
@@ -29,7 +29,10 @@ def none(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
 
 def simple(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
     # nothing to tune
-    imputer = SimpleImpute(data.dataset_loader.continuous_cols)
+    imputer = MixedFeatureImputer(
+        ctn_cols=data.dataset_loader.continuous_cols,
+        onehot_groupby=data.groupby["original"]["categorical_onehots"],
+    )
     imputer.fit(data.splits["data"]["train"])
     with open(get_serialized_model_path("simple"), "wb") as f:
         dump(imputer, f)
@@ -41,8 +44,14 @@ def simple(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
 
 def knn(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
     imputer = TunableEstimator(
-        KNNImputer(),
-        STATIC_BASELINE_IMPUTER_MODEL_PARAM_GRID["knn"],
+        MixedFeatureImputer(
+            data.dataset_loader.continuous_cols,
+            onehot_groupby=data.groupby["original"]["categorical_onehots"],
+            numeric_transformer=KNNImputer(),
+            categorical_transformer=KNNImputer(
+                n_neighbors=1,  # any more than that and it'll take the average
+            ),
+        ),
         score_fn=TransformScorer(
             get_tune_metric(ImputerT.BASELINE, data, "original"),
             higher_is_better=False,
@@ -69,8 +78,16 @@ def knn(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
 def mice(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
     """Uses sklearn instead of miceforest package."""
     imputer = TunableEstimator(
-        IterativeImputer(random_state=args.seed),
-        STATIC_BASELINE_IMPUTER_MODEL_PARAM_GRID["mice"],
+        MixedFeatureImputer(
+            data.dataset_loader.continuous_cols,
+            onehot_groupby=data.groupby["original"]["categorical_onehots"],
+            numeric_transformer=IterativeImputer(random_state=args.seed),
+            categorical_transformer=IterativeImputer(
+                estimator=LogisticRegression(),
+                initial_strategy="most_frequent",
+                random_state=args.seed,
+            ),
+        ),
         score_fn=TransformScorer(
             get_tune_metric(ImputerT.BASELINE, data, "original"),
             higher_is_better=False,

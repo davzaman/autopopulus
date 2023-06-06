@@ -2,14 +2,11 @@ from functools import reduce
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import re
-from category_encoders import TargetEncoder
 import numpy as np
 import pandas as pd
 from torch import Tensor, nan_to_num
 
 from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.impute import SimpleImputer
-from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
 import torch
 from torch.nn.utils.rnn import unpad_sequence, pad_sequence
@@ -63,47 +60,11 @@ def list_to_tensor(
 ###################
 # MAIN TRANSFORMS #
 ###################
-class SimpleImpute(TransformerMixin, BaseEstimator):
-    """Mean impute continuous data, mode impute categorical data."""
-
-    def __init__(self, ctn_cols: List[str]):
-        self.ctn_cols = ctn_cols
-
-    def fit(self, X: pd.DataFrame, y: Optional[pd.Series] = None) -> "SimpleImpute":
-        self.columns = list(X.columns)
-        # categorical columns is everything but continuous columns
-        self.cat_cols = [col for col in self.columns if col not in self.ctn_cols]
-
-        numeric_transformer = Pipeline(
-            steps=[("imputer", SimpleImputer(strategy="mean"))]
-        )
-        categorical_transformer = Pipeline(
-            steps=[("imputer", SimpleImputer(strategy="most_frequent"))]
-        )
-        self.transformers = ColumnTransformer(
-            transformers=[
-                ("num", numeric_transformer, self.ctn_cols),
-                ("cat", categorical_transformer, self.cat_cols),
-            ],
-            remainder="passthrough",
-            verbose_feature_names_out=False,
-        )
-        self.transformers.fit(X, y)
-
-        return self
-
-    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
-        out_of_order_cols = self.transformers.get_feature_names_out(self.columns)
-        return pd.DataFrame(
-            self.transformers.transform(X), columns=out_of_order_cols, index=X.index
-        )[self.columns]
-
-
 def simple_impute_tensor(
     data: Tensor,
     where_data_are_observed: Tensor,
-    ctn_col_idxs: Tensor,
-    bin_col_idxs: Tensor,
+    ctn_cols_idx: Tensor,
+    bin_cols_idx: Tensor,
     onehot_group_idxs: Tensor,
     return_learned_stats: bool = False,  # for testing
 ) -> Tensor:
@@ -111,13 +72,13 @@ def simple_impute_tensor(
     # TODO: what to do if none missing
     X = data.clone()  # if we dont copy, batch["original"]["data"] will change too
     means = []
-    for ctn_col in ctn_col_idxs:
+    for ctn_col in ctn_cols_idx:
         mean = X[:, ctn_col].nanmean()
         X[:, ctn_col] = nan_to_num(X[:, ctn_col], mean)
         means.append(mean)
 
     modes = []
-    for bin_col in bin_col_idxs:
+    for bin_col in bin_cols_idx:
         # filter the rows with missing bin_col values and compute the mode
         mode = X[where_data_are_observed[:, bin_col]][:, bin_col].mode().values
         X[:, bin_col] = nan_to_num(X[:, bin_col], mode)
@@ -160,24 +121,28 @@ class CombineOnehots(TransformerMixin, BaseEstimator):
     Assumed onehots are prefixed with its name: prefix_value.
     """
 
-    def __init__(self, onehot_groupby: Dict[int, str], columns: List[str]):
+    def __init__(self, onehot_groupby: Dict[int, str], original_columns: List[str]):
         # need the column names not indices since we're working with pd
         per_prefix_count = {}
+        self.original_columns = original_columns
+        self.onehot_groupby = onehot_groupby
         self.category_order = {}
         for idx, prefix in onehot_groupby.items():
             # the idx needs to be from 0 for each prefix
-            self.category_order[columns[idx]] = per_prefix_count.setdefault(prefix, 0)
+            self.category_order[original_columns[idx]] = per_prefix_count.setdefault(
+                prefix, 0
+            )
             per_prefix_count[prefix] += 1
-        self.onehot_groupby = {
-            columns[idx]: prefix for idx, prefix in onehot_groupby.items()
+        self.onehot_groupby_prefix: Dict[str, str] = {
+            original_columns[idx]: prefix for idx, prefix in onehot_groupby.items()
         }
 
-    def fit(self, X: pd.DataFrame, y: pd.Series) -> "CombineOnehots":
+    def fit(self, X: pd.DataFrame, y: Optional[pd.Series] = None) -> "CombineOnehots":
         """Set things we'll need for CommonDataModule so we can test separately."""
-        groups = X.groupby(self.onehot_groupby, axis=1).groups
+        groups = X.groupby(self.onehot_groupby_prefix, axis=1).groups
         onehot_prefixes = groups.keys()
         # drop old cols
-        shifted_down_cols = X.drop(self.onehot_groupby.keys(), axis=1).columns
+        shifted_down_cols = X.drop(self.onehot_groupby_prefix.keys(), axis=1).columns
         N = len(shifted_down_cols)
         # the combined col will be added at the end so we can guess the indices
         # map index -> prefix name by tacking onto the end of the shifted down cols after dropping the onehots
@@ -190,9 +155,9 @@ class CombineOnehots(TransformerMixin, BaseEstimator):
 
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
         """."""
-        if self.onehot_groupby:
+        if self.onehot_groupby_prefix:
             combined_onehots = (
-                X.groupby(self.onehot_groupby, axis=1)
+                X.groupby(self.onehot_groupby_prefix, axis=1)
                 .idxmax(
                     1, numeric_only=True
                 )  # replace value with the numerical order/encoding of the max
@@ -204,10 +169,46 @@ class CombineOnehots(TransformerMixin, BaseEstimator):
             )
             # combine with the rest of the data and then drop old onehot cols
             new_df = pd.concat([X, combined_onehots], axis=1).drop(
-                self.onehot_groupby.keys(), axis=1
+                self.onehot_groupby_prefix.keys(), axis=1
             )
             return new_df
         return X
+
+    def get_feature_names_out(
+        self, input_features: Optional[List[str]] = None
+    ) -> List[str]:
+        # TODO: write tests
+        return [col for col in input_features if col not in self.category_order] + list(
+            self.combined_onehot_groupby.values()
+        )
+
+    def inverse_transform(self, X: pd.DataFrame) -> pd.DataFrame:
+        return pd.concat(
+            # one hot encode all the combined columns
+            [
+                # onehot explode, remembering where there were nans
+                pd.get_dummies(X.iloc[:, combined_onehot_idx], dummy_na=True)
+                # put the original column names back in, in order for each group (by prefix)
+                .rename(
+                    {
+                        ordinal_val: cat_name
+                        for cat_name, ordinal_val in self.category_order.items()
+                        if cat_name.startswith(prefix)
+                    },
+                    axis=1,
+                )
+                # explode nans for all onehot categories
+                .where(lambda df: df[np.nan] == 0, np.nan)
+                # drop nan indicator column
+                .drop(np.nan, axis=1)
+                for combined_onehot_idx, prefix in self.combined_onehot_groupby.items()
+            ]
+            # combine all onehot-encoded columns with the other not onehot features
+            + [X.drop(list(self.combined_onehot_groupby.values()), axis=1)],
+            axis=1,
+        ).reindex(  # fill 0s for missing cats, put everything back in original order
+            self.original_columns, fill_value=0, axis=1
+        )
 
 
 class UniformProbabilityAcrossNans(TransformerMixin, BaseEstimator):
@@ -351,11 +352,17 @@ class ColTransformPandas(TransformerMixin, BaseEstimator):
     """
 
     def __init__(
-        self, orig_cols: List[str], enforce_numpy: bool = False, *args, **kwargs
+        self,
+        orig_cols: List[str],
+        enforce_numpy: bool = False,
+        reorder_cols: bool = False,
+        *args,
+        **kwargs,
     ) -> None:
         super().__init__()
         self.orig_cols = orig_cols
         self.enforce_numpy = enforce_numpy  # TODO: might not be necessary
+        self.reorder_cols = reorder_cols
         self.column_tsfm = ColumnTransformer(
             *args, remainder="passthrough", verbose_feature_names_out=False, **kwargs
         )
@@ -375,9 +382,11 @@ class ColTransformPandas(TransformerMixin, BaseEstimator):
         else:
             Xt = self.column_tsfm.transform(X)
         # without original cols it's going to have meaningless feature names like x7
-        out_of_order_cols = self.column_tsfm.get_feature_names_out(self.orig_cols)
+        out_of_order_cols = self.column_tsfm.get_feature_names_out(X.columns)
         df = pd.DataFrame(Xt, columns=out_of_order_cols, index=X.index)
-        return df[self.orig_cols]
+        if self.reorder_cols:
+            return df[self.orig_cols]
+        return df
 
 
 ##############################

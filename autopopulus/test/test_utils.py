@@ -1,5 +1,7 @@
 import unittest
 from unittest.mock import ANY, call, patch
+from hypothesis import HealthCheck, assume, given, settings
+from hypothesis.extra.pandas import data_frames
 
 import numpy as np
 import pandas as pd
@@ -18,10 +20,14 @@ from autopopulus.models.evaluation import (
     confidence_interval,
 )
 from autopopulus.models.prediction_models import PREDICTOR_MODEL_METADATA
-from autopopulus.models.sklearn_model_utils import TransformScorer, TunableEstimator
+from autopopulus.models.sklearn_model_utils import (
+    MixedFeatureImputer,
+    TransformScorer,
+    TunableEstimator,
+)
 from autopopulus.task_logic.utils import STATIC_BASELINE_IMPUTER_MODEL_PARAM_GRID
-from autopopulus.test.common_mock_data import X, seed, splits, y
-from autopopulus.test.utils import get_dataset_loader
+from autopopulus.test.common_mock_data import X, seed, splits, y, hypothesis
+from autopopulus.test.utils import build_onehot_from_hypothesis, get_dataset_loader
 from autopopulus.utils.impute_metrics import MAAPEMetric, RMSEMetric, universal_metric
 
 
@@ -31,6 +37,106 @@ class TestUtils(unittest.TestCase):
         data = [45, 55, 67, 45, 68, 79, 98, 87, 84, 82]
         np.testing.assert_allclose(
             confidence_interval(data, 0.98), 16.22075, rtol=0.001
+        )
+
+
+class TestMixedFeatureImputer(unittest.TestCase):
+    @settings(suppress_health_check=[HealthCheck(3)], deadline=None)
+    @given(data_frames(columns=hypothesis["columns"]))
+    def test_multicat(self, df):
+        with self.subTest("No Onehot"):
+            imputer = MixedFeatureImputer(
+                ctn_cols=hypothesis["ctn_cols"],
+                onehot_groupby={},
+                numeric_transformer=FunctionTransformer(
+                    lambda x: x.fillna(-1000),
+                    feature_names_out=lambda a, b: b,
+                ),
+                categorical_transformer=FunctionTransformer(
+                    lambda x: x.fillna(-2000), feature_names_out=lambda a, b: b
+                ),
+            )
+            imputer.fit(df)
+
+            true_transformed = df.copy()
+            # ctn cols filled with -1000
+            true_transformed[hypothesis["ctn_cols"]] = true_transformed[
+                hypothesis["ctn_cols"]
+            ].fillna(-1000)
+            # remaining cat cols filled with -2000
+            true_transformed = true_transformed.fillna(-2000)
+            df_transformed = imputer.transform(df)
+            pd.testing.assert_frame_equal(
+                df_transformed, true_transformed, check_dtype=False
+            )
+        with self.subTest("No Continuous"):
+            imputer = MixedFeatureImputer(
+                ctn_cols=[],
+                onehot_groupby={},
+                numeric_transformer=FunctionTransformer(
+                    lambda X: X.fillna(-1000),
+                    feature_names_out=lambda a, b: b,
+                ),
+                categorical_transformer=FunctionTransformer(
+                    lambda X: X.fillna(-2000),
+                    feature_names_out=lambda a, b: b,
+                ),
+            )
+            imputer.fit(df)
+            true_transformed = df.copy()
+            # everything considered cat,filled with -2000
+            true_transformed = true_transformed.fillna(-2000)
+            df_transformed = imputer.transform(df)
+            pd.testing.assert_frame_equal(
+                df_transformed, true_transformed, check_dtype=False
+            )
+
+    @settings(
+        suppress_health_check=[HealthCheck(3), HealthCheck.filter_too_much],
+        deadline=None,
+    )
+    @given(data_frames(columns=hypothesis["columns"]))
+    def test_onehot(self, df):
+        assume(  # Ensure all categories/cols present for testing
+            np.array_equal(
+                df.nunique()[hypothesis["onehot_prefixes"]].values, np.array([4, 3])
+            )
+        )
+        onehot_df = build_onehot_from_hypothesis(df, hypothesis["onehot_prefixes"])
+        imputer = MixedFeatureImputer(
+            ctn_cols=hypothesis["ctn_cols"],
+            onehot_groupby={
+                idx: prefix
+                for prefix, idxs in zip(
+                    hypothesis["onehot_prefixes"],
+                    hypothesis["onehot"]["onehot_cols_idx"],
+                )
+                for idx in idxs
+            },
+            numeric_transformer=FunctionTransformer(
+                lambda x: x.fillna(-1000),
+                feature_names_out=lambda a, b: b,
+            ),
+            # fill with 1 to be a valid category when onehot
+            categorical_transformer=FunctionTransformer(
+                lambda x: x.fillna(1), feature_names_out=lambda a, b: b
+            ),
+        )
+        imputer.fit(onehot_df)
+
+        true_transformed = df.copy()
+        # ctn cols filled with -1000
+        true_transformed[hypothesis["ctn_cols"]] = true_transformed[
+            hypothesis["ctn_cols"]
+        ].fillna(-1000)
+        # remaining cat cols filled with 1
+        true_transformed = true_transformed.fillna(1)
+        true_transformed = build_onehot_from_hypothesis(
+            true_transformed, hypothesis["onehot_prefixes"]
+        )
+        df_transformed = imputer.transform(onehot_df)
+        pd.testing.assert_frame_equal(
+            df_transformed, true_transformed, check_dtype=False
         )
 
 
@@ -131,7 +237,7 @@ class TestTunableEstimator(unittest.TestCase):
 
         imputer = TunableEstimator(
             KNNImputer(),
-            STATIC_BASELINE_IMPUTER_MODEL_PARAM_GRID["knn"],
+            estimator_params=STATIC_BASELINE_IMPUTER_MODEL_PARAM_GRID[KNNImputer],
             # higher is not better because it's an error
             score_fn=TransformScorer(
                 universal_metric(
@@ -205,7 +311,7 @@ class TestTunableEstimator(unittest.TestCase):
 
         imputer = TunableEstimator(
             LogisticRegression(),
-            PREDICTOR_MODEL_METADATA["lr"]["tune_kwargs"],
+            estimator_params=PREDICTOR_MODEL_METADATA["lr"]["tune_kwargs"],
             score_fn=f1_score,
         )
 

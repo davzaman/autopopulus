@@ -5,10 +5,12 @@ import numpy as np
 import pickle as pk
 from os import makedirs
 from os.path import dirname
+from pyparsing import col
 from torchmetrics import MetricCollection
 from tqdm import tqdm
 from numpy.random import default_rng
 from pytorch_lightning.utilities import rank_zero_warn
+from autopopulus.data.transforms import list_to_tensor
 
 # Local
 from autopopulus.utils.log_utils import (
@@ -63,7 +65,7 @@ def baseline_imputation_logic(
             pred=imputed_data_per_split[split],
             input_data=data.splits["data"][split],
             true=data.splits["ground_truth"][split],
-            nfeatures=data.nfeatures["original"],
+            col_idxs_by_type=data.col_idxs_by_type["original"],
             semi_observed_training=data.ground_truth_has_nans,
         )
 
@@ -86,7 +88,7 @@ def save_test_data(args: Namespace, data: CommonDataModule):
             {
                 "data": data.splits["data"]["test"],
                 "ground_truth": data.splits["ground_truth"]["test"],
-                "nfeatures": data.nfeatures["original"],
+                "col_idxs_by_type": data.col_idxs_by_type["original"],
                 "semi_observed_training": data.ground_truth_has_nans,
             },
             file,
@@ -105,12 +107,12 @@ def get_baseline_metrics(col_idxs_by_type) -> List[Dict[str, Union[str, Callable
                 MetricCollection(
                     {
                         "continuous": ctn_metric(
-                            ctn_col_idxs=col_idxs_by_type["original"]["continuous"],
+                            ctn_cols_idx=list_to_tensor(col_idxs_by_type["continuous"]),
                             columnwise=reduction == "CW",
                         ),
                         "categorical": cat_metric(
-                            col_idxs_by_type["original"]["binary"],
-                            col_idxs_by_type["original"]["onehot"],
+                            list_to_tensor(col_idxs_by_type["binary"]),
+                            list_to_tensor(col_idxs_by_type["onehot"]),
                             columnwise=reduction == "CW",
                         ),
                     },
@@ -131,7 +133,7 @@ def evaluate_baseline_imputation(
     pred: DataT,
     input_data: DataT,
     true: DataT,
-    nfeatures: int,
+    col_idxs_by_type: Dict[str, List[str]],
     semi_observed_training: bool,
     bootstrap: bool = False,
 ):
@@ -144,7 +146,9 @@ def evaluate_baseline_imputation(
     log: BasicLogger = BasicLogger(
         args=args, experiment_name=args.experiment_name, verbose=args.verbose
     )
-    metrics: List[Dict[str, Union[str, Callable]]] = get_baseline_metrics(nfeatures)
+    metrics: List[Dict[str, Union[str, Callable]]] = get_baseline_metrics(
+        col_idxs_by_type
+    )
 
     where_data_are_missing = np.isnan(input_data)
     if bootstrap:
@@ -180,7 +184,7 @@ def log_baseline_imputation_performance(
     # START HERE
     for metric in metrics:
         for filter_subgroup in ["all", "missingonly"]:
-            if filter_subgroup == "missingonly" and where_data_are_missing.any():
+            if filter_subgroup == "missingonly" and where_data_are_missing.any().any():
                 val = metric["fn"](est, true, where_data_are_missing)
             else:
                 val = metric["fn"](est, true)

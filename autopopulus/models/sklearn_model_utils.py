@@ -3,10 +3,13 @@ import re
 
 from timeit import default_timer as timer
 from lightning_utilities import apply_to_collection
+from sklearn.impute import SimpleImputer
+from sklearn.impute._base import _BaseImputer
+from sklearn.pipeline import FunctionTransformer, Pipeline
 from tqdm import tqdm
 from numpy import isnan, ndarray
 from numpy.random import default_rng
-from pandas import DataFrame, concat
+from pandas import DataFrame, Series, concat
 
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.model_selection import GridSearchCV, PredefinedSplit
@@ -15,9 +18,89 @@ from sklearn.multiclass import available_if
 from sklearn.utils import resample
 from sklearn.utils.validation import check_is_fitted
 from sklearn.metrics._scorer import _cached_call, _BaseScorer
+from autopopulus.data.transforms import ColTransformPandas, CombineOnehots
+from autopopulus.task_logic.utils import STATIC_BASELINE_IMPUTER_MODEL_PARAM_GRID
 
 from autopopulus.utils.utils import rank_zero_print
-from data.types import DataT
+
+
+class MixedFeatureImputer(TransformerMixin, BaseEstimator):
+    """Mean impute continuous data, mode impute categorical data."""
+
+    # TODO: Write tests
+
+    def __init__(
+        self,
+        ctn_cols: List[str],
+        onehot_groupby: Dict[int, str],
+        numeric_transformer: _BaseImputer = SimpleImputer(strategy="mean"),
+        categorical_transformer: _BaseImputer = SimpleImputer(strategy="most_frequent"),
+    ):
+        self.numeric_transformer = numeric_transformer
+        self.categorical_transformer = categorical_transformer
+        self.onehot_groupby = onehot_groupby
+        self.ctn_cols = ctn_cols
+
+    def fit(self, X: DataFrame, y: Optional[Series] = None) -> "MixedFeatureImputer":
+        self.columns = list(X.columns)
+        # categorical columns is everything but continuous columns
+        self.cat_cols = [col for col in self.columns if col not in self.ctn_cols]
+
+        self.transformers = Pipeline(
+            steps=[
+                (
+                    "combine_onehot",
+                    CombineOnehots(self.onehot_groupby, self.columns),
+                ),
+                (
+                    "impute",
+                    ColTransformPandas(
+                        orig_cols=self.columns,
+                        reorder_cols=False,
+                        transformers=[
+                            ("num", self.numeric_transformer, self.ctn_cols),
+                            (
+                                "cat",
+                                self.categorical_transformer,
+                                lambda X: [
+                                    col for col in X.columns if col not in self.ctn_cols
+                                ],
+                            ),
+                        ],
+                    ),
+                ),
+                # normally i'd invert the combine onehots here
+                # but it's not possible because Pipeline copies everythign over
+                # so the unfitted reference would be copied over (unuseful)
+            ]
+        )
+        self.transformers.fit(X, y)
+
+        return self
+
+    def transform(self, X: DataFrame) -> DataFrame:
+        Xt = self.transformers.transform(X)
+        combine_onehot_step = self.transformers.named_steps["combine_onehot"]
+        revert_transformer = FunctionTransformer(combine_onehot_step.inverse_transform)
+        return revert_transformer.fit_transform(Xt, 0)
+
+    def get_param_grid(self) -> Dict[str, List[Any]]:
+        numeric_tune_kwargs = STATIC_BASELINE_IMPUTER_MODEL_PARAM_GRID[
+            self.numeric_transformer.__class__
+        ]
+        categorical_tune_kwargs = STATIC_BASELINE_IMPUTER_MODEL_PARAM_GRID[
+            self.categorical_transformer.__class__
+        ]
+        return {
+            **{
+                f"numeric_transformer__{param_name}": param_values
+                for param_name, param_values in numeric_tune_kwargs.items()
+            },
+            **{
+                f"categorical_transformer__{param_name}": param_values
+                for param_name, param_values in categorical_tune_kwargs.items()
+            },
+        }
 
 
 def _estimator_has(attr):
@@ -103,9 +186,9 @@ class TunableEstimator(BaseEstimator, TransformerMixin):
     def __init__(
         self,
         estimator: BaseEstimator,
-        estimator_params: Dict[str, Any],
         # BaseScorer for predict estimator, transform scorer for impute estimator
         score_fn: Union[_BaseScorer, TransformScorer],
+        estimator_params: Dict[str, Any] = {},
     ) -> None:
         # make_scorer expects a y along with X which fails for imputation
         self.scorer = score_fn
@@ -113,6 +196,8 @@ class TunableEstimator(BaseEstimator, TransformerMixin):
         # just run on defaults if no score_func (ground truth has nans)
         if isinstance(self.scorer, _BaseScorer) and self.scorer._score_func is None:
             self.estimator_params = {}
+        elif hasattr(estimator, "get_param_grid"):
+            self.estimator_params = self.estimator.get_param_grid()
         else:
             self.estimator_params = estimator_params
 
@@ -179,9 +264,9 @@ class BootstrapEstimator(BaseEstimator):
             num_bootstrap_samples > 0 or bootstrap_method is None
         ), "Need to specify num_bootstrap_samples if you'd like to bootstrap evaluate."
         assert (
-            bootstrap_method in self.kosher_bootstrap_methods,
-            f"The bootstrap method can only be one of the following: {self.kosher_bootstrap_methods}",
-        )
+            bootstrap_method in self.kosher_bootstrap_methods
+        ), f"The bootstrap method can only be one of the following: {self.kosher_bootstrap_methods}"
+
         assert hasattr(
             estimator, "evaluate"
         ), "Estimator should have an `evaluate()` method that returns Dict[str, float], a mapping of metric name to value."

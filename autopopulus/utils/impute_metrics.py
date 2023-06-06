@@ -94,8 +94,11 @@ class MAAPEMetric(Metric):
             torch.abs((ctn_target - ctn_preds) / (ctn_target + self.epsilon))
         )
         if missing_indicators is not None:
-            row_maape *= missing_indicators
-            count = self.sum_fn(missing_indicators)
+            ctn_missing_indicators = missing_indicators.index_select(
+                slice_dim, self.ctn_cols_idx
+            )
+            row_maape *= ctn_missing_indicators
+            count = self.sum_fn(ctn_missing_indicators)
         else:
             count = torch.tensor(  # num rows if columnwise
                 ctn_target.size()[0] if self.columnwise else ctn_target.numel(),
@@ -190,8 +193,11 @@ class RMSEMetric(Metric):
 
         squared_error = torch.pow(ctn_preds - ctn_target, 2)
         if missing_indicators is not None:
-            squared_error *= missing_indicators
-            count = self.sum_fn(missing_indicators)
+            ctn_missing_indicators = missing_indicators.index_select(
+                slice_dim, self.ctn_cols_idx
+            )
+            squared_error *= ctn_missing_indicators
+            count = self.sum_fn(ctn_missing_indicators)
         else:
             count = torch.tensor(  # num rows if columnwise
                 ctn_target.size()[0] if self.columnwise else ctn_target.numel(),
@@ -283,14 +289,12 @@ class CategoricalErrorMetric(Metric):
             )
         )
 
-        predicted_cats = get_categories(preds, self.bin_cols_idx, self.onehot_cols_idx)
-        target_cats = get_categories(target, self.bin_cols_idx, self.onehot_cols_idx)
+        predicted_cats = self.get_categories(preds)
+        target_cats = self.get_categories(target)
 
         correct = predicted_cats.ne(target_cats).to(int)
         if missing_indicators is not None:
-            missing_indicators = get_categories(
-                missing_indicators, self.bin_cols_idx, self.onehot_cols_idx
-            )
+            missing_indicators = self.get_categories(missing_indicators)
             correct *= missing_indicators
             count = self.sum_fn(missing_indicators)
         else:
@@ -325,6 +329,33 @@ class CategoricalErrorMetric(Metric):
             return torch.sum(err[num_acc_items]) / torch.sum(num_acc_items)
         return err
 
+    def get_categories(self, data: torch.Tensor) -> torch.Tensor:
+        """
+        For binary and onehot groups get the column name of the bin with the maximum score.
+        """
+        slice_dim = len(data.shape) - 1
+        to_stack = [data.index_select(slice_dim, self.bin_cols_idx).T]
+        if len(self.onehot_cols_idx) > 0:
+            if data.dtype == torch.bool or data.dtype == bool:  # if data is the mask
+                # This assumes the mask will be the same for all bins under the same var
+                fn = lambda idxs: data.index_select(slice_dim, idxs).all(axis=slice_dim)
+            else:  # data is actual data not a mask
+                fn = lambda idxs: torch.argmax(
+                    data.index_select(slice_dim, idxs), axis=slice_dim
+                )
+
+            # if this is empty the stack will complain
+            to_stack.append(
+                torch.stack(
+                    [
+                        fn(onehot_group[onehot_group != PAD_VALUE])
+                        for onehot_group in self.onehot_cols_idx
+                    ]
+                )
+            )
+        # everything will concatenate on rows
+        return torch.cat(to_stack, axis=0).T  # flip back so it's N x F
+
 
 def universal_metric(metric: Metric) -> Callable:
     """Functional version of the torchmetric so I can use it on sklearn models."""
@@ -340,36 +371,6 @@ def universal_metric(metric: Metric) -> Callable:
         return value
 
     return apply_metric
-
-
-def get_categories(
-    data: torch.Tensor, bin_col_idxs: torch.Tensor, onehot_cols_idx: torch.Tensor
-) -> torch.Tensor:
-    """
-    For binary and onehot groups get the column name of the bin with the maximum score.
-    """
-    slice_dim = len(data.shape) - 1
-    to_stack = [data.index_select(slice_dim, bin_col_idxs).T]
-    if len(onehot_cols_idx) > 0:
-        if data.dtype == torch.bool or data.dtype == bool:  # if data is the mask
-            # This assumes the mask will be the same for all bins under the same var
-            fn = lambda idxs: data.index_select(slice_dim, idxs).all(axis=slice_dim)
-        else:  # data is actual data not a mask
-            fn = lambda idxs: torch.argmax(
-                data.index_select(slice_dim, idxs), axis=slice_dim
-            )
-
-        # if this is empty the stack will complain
-        to_stack.append(
-            torch.stack(
-                [
-                    fn(onehot_group[onehot_group != PAD_VALUE])
-                    for onehot_group in onehot_cols_idx
-                ]
-            )
-        )
-    # everything will concatenate on rows
-    return torch.cat(to_stack, axis=0).T  # flip back so it's N x F
 
 
 @deprecated

@@ -63,7 +63,7 @@ def evaluate_baseline_imputer(args: Namespace):
         pred=imputed_data["test"],
         input_data=test_data["data"],
         true=test_data["ground_truth"],
-        nfeatures=test_data["nfeatures"],
+        col_idxs_by_type=test_data["col_idxs_by_type"],
         semi_observed_training=test_data["semi_observed_training"],
         bootstrap=args.bootstrap_eval_imputer,
     )

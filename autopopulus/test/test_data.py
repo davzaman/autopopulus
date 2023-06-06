@@ -403,7 +403,7 @@ class TestCommonDataModule(unittest.TestCase):
                         ].__self__.named_steps["combine_onehots"]
 
                         self.assertDictEqual(
-                            combine_onehots_obj.onehot_groupby,
+                            combine_onehots_obj.onehot_groupby_prefix,
                             dict(
                                 zip(
                                     hypothesis["onehot"]["onehot_cols"],

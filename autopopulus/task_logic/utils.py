@@ -1,6 +1,9 @@
+from abc import ABCMeta
 from logging import error
 from enum import Enum
 from typing import Any, Callable, Dict, List, Union
+from sklearn.experimental import enable_iterative_imputer  # noqa
+from sklearn.impute import IterativeImputer, KNNImputer, SimpleImputer
 
 from torch import tensor
 
@@ -9,16 +12,17 @@ from autopopulus.utils.impute_metrics import MAAPEMetric, universal_metric
 from autopopulus.utils.log_utils import IMPUTE_METRIC_TAG_FORMAT
 
 # This should reflect everything in baseline_static_imputation
+STATIC_BASELINE_METHODS = ["knn", "mice", "simple", "none"]
 # Even if it cannot be tuned, so that I have a list of reference of what counts as baseline.
 # TODO[LOW]: add one for longitudinal
-STATIC_BASELINE_IMPUTER_MODEL_PARAM_GRID: Dict[str, Dict[str, List[Any]]] = {
-    "knn": {
+STATIC_BASELINE_IMPUTER_MODEL_PARAM_GRID: Dict[ABCMeta, Dict[str, List[Any]]] = {
+    KNNImputer: {
         "n_neighbors": [3, 5, 10],
         "weights": ["uniform", "distance"],
     },
-    "mice": {"max_iter": [10, 50], "n_nearest_features": [5, 10, None]},
-    "simple": {},
-    "none": {},
+    IterativeImputer: {"max_iter": [10, 50], "n_nearest_features": [5, 10, None]},
+    SimpleImputer: {},
+    None: {},
 }
 
 BASELINE_DATA_SETTINGS: Dict[str, Any] = {
@@ -127,7 +131,7 @@ class ImputerT(Enum):
 
     @staticmethod
     def is_baseline(method: str) -> bool:
-        return method in STATIC_BASELINE_IMPUTER_MODEL_PARAM_GRID
+        return method in STATIC_BASELINE_METHODS
 
 
 def get_tune_metric(

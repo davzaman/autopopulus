@@ -494,6 +494,9 @@ class TestTransforms(unittest.TestCase):
             combine.fit(df, y)
             self.assertEqual(combine.combined_onehot_groupby, {})
             self.assertEqual(combine.nfeatures, len(df.columns))
+            np.testing.assert_equal(
+                combine.get_feature_names_out(df.columns), df.columns.values
+            )
             transformed = combine.transform(df)[df.columns]
             pd.testing.assert_frame_equal(
                 transformed.astype(float), df, check_dtype=False
@@ -503,17 +506,28 @@ class TestTransforms(unittest.TestCase):
 
         # Test groupby and nfeatures is right after fit
         combine.fit(df, y)
+        combined_names = list(combined_groupby.values())
         self.assertEqual(combine.combined_onehot_groupby, combined_groupby)
+        # the combined onehots go at the end
         self.assertEqual(combine.nfeatures, len(true_df.columns))
+        (
+            combine.get_feature_names_out(df.columns)[: -len(combined_names)],
+            combined_names,
+        )
 
-        # reorder columns to match
-        transformed = combine.transform(df)[true_df.columns]
+        transformed = combine.transform(df)
         # the combined cols will be dtype obj since the values are pulled from the column name and we don't know if the intention is to be str/float
         # but with the columns i specified they're numbers
-        pd.testing.assert_frame_equal(
-            transformed.astype(float), true_df, check_dtype=False
+        pd.testing.assert_frame_equal(  # reorder columns to match
+            transformed[true_df.columns].astype(float), true_df, check_dtype=False
         )
-        return transformed
+
+        with self.subTest("Inverse Transform"):
+            # inverting should give the original input
+            uncombined = combine.inverse_transform(transformed)
+            pd.testing.assert_frame_equal(uncombined, df, check_dtype=False)
+
+        return transformed[true_df.columns]
 
     def _test_uniform_prob(
         self,

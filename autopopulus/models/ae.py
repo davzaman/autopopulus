@@ -369,11 +369,11 @@ class AEDitto(LightningModule):
             fn = simple_impute_tensor
             kwargs = {
                 "where_data_are_observed": where_data_are_observed,
-                "ctn_col_idxs": self.get_col_idxs_by_type(
+                "ctn_cols_idx": self.get_col_idxs_by_type(
                     data_feature_space=self.hparams.data_feature_space,
                     feature_type="continuous",
                 ),
-                "bin_col_idxs": self.get_col_idxs_by_type(
+                "bin_cols_idx": self.get_col_idxs_by_type(
                     data_feature_space=self.hparams.data_feature_space,
                     feature_type="binary",
                 ),

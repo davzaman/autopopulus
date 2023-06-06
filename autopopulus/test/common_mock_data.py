@@ -40,6 +40,19 @@ hypothesis = {
         "category_names": [["0 - 1", "1 - 2"], ["0 - 0.5", "0.5 - 1", "1 - 1.5"]],
     },
     "onehot": {
+        "columns": [
+            "bin1",
+            "mult1_0.0",
+            "mult1_1.0",
+            "mult1_2.0",
+            "mult1_3.0",
+            "ctn1",
+            "mult2_0.0",
+            "mult2_1.0",
+            "mult2_2.0",
+            "ctn2",
+            "bin2",
+        ],
         "ctn_cols": ["ctn1", "ctn2"],
         "cat_cols": [
             "bin1",

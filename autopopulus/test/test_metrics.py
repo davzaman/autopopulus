@@ -517,10 +517,10 @@ class TestStaticMulticatCategoricalMetrics(unittest.TestCase):
 
     def setup_metrics(self, df: pd.DataFrame) -> None:
         self.err_elwise = CategoricalErrorMetric(
-            list_to_tensor(hypothesis["cat_cols_idx"]), []
+            list_to_tensor(hypothesis["cat_cols_idx"]), list_to_tensor([])
         )
         self.err_colwise = CategoricalErrorMetric(
-            list_to_tensor(hypothesis["cat_cols_idx"]), [], True
+            list_to_tensor(hypothesis["cat_cols_idx"]), list_to_tensor([]), True
         )
         self.torch_metrics = [self.err_elwise, self.err_colwise]
 
