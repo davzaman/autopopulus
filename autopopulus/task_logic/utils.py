@@ -139,7 +139,7 @@ def get_tune_metric(
 ) -> Union[str, Callable]:
     """This must be called after data.setup"""
     if imputer == ImputerT.AE:  # tuner expects string
-        if data.ground_truth_has_nans:
+        if data.semi_observed_training:
             return IMPUTE_METRIC_TAG_FORMAT.format(
                 name="loss",
                 # loss in only in mapped space (if mapping)
@@ -160,7 +160,7 @@ def get_tune_metric(
             )
     elif imputer == ImputerT.BASELINE:
         if (
-            data.ground_truth_has_nans
+            data.semi_observed_training
         ):  # either heuristic or defaults, we go with defaults
             return None
         else:

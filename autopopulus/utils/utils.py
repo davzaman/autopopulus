@@ -1,4 +1,5 @@
 from argparse import ArgumentParser, Namespace
+import contextlib
 import inspect
 import os
 from inspect import getmembers, isfunction
@@ -13,18 +14,23 @@ from rich import (
 )  # https://rich.readthedocs.io/en/stable/markup.html#console-markup
 
 
-def should_ampute(args: Namespace) -> bool:
-    return (
-        ("percent_missing" in args and args.percent_missing)
-        and ("amputation_patterns" in args and args.amputation_patterns)
-        and args.method != "none"
-    )
-
-
 # Printing with rich but only in rank zero
 @rank_zero_only
 def rank_zero_print(*args: Any, **kwargs: Any):
     return print(*args, **kwargs)
+
+
+@contextlib.contextmanager
+def temp_setattr(instance, **kwargs):
+    # Ref: https://stackoverflow.com/a/38532086/1888794
+    previous_values = {k: getattr(instance, k) for k in kwargs}
+    for k, v in kwargs.items():
+        setattr(instance, k, v)
+    try:
+        yield
+    finally:
+        for k, v in previous_values.items():
+            setattr(instance, k, v)
 
 
 def seed_everything(seed: int):

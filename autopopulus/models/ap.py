@@ -295,7 +295,8 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
             "data_feature_space": "mapped" if "mapped" in data.groupby else "original",
             # We still need this if we're loading the ae from a file and not calling fit
             "col_idxs_by_type": data.col_idxs_by_type,
-            "semi_observed_training": data.ground_truth_has_nans,
+            "semi_observed_training": data.semi_observed_training,
+            "evaluate_on_remaining_semi_observed": data.evaluate_on_remaining_semi_observed,
         }
 
     def _get_trainer_args(

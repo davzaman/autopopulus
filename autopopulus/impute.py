@@ -29,7 +29,7 @@ from autopopulus.task_logic.utils import (
 )
 from autopopulus.utils.get_set_cli_args import init_cli_args, load_cli_args
 from autopopulus.utils.log_utils import init_sys_logger
-from autopopulus.utils.utils import rank_zero_print, seed_everything, should_ampute
+from autopopulus.utils.utils import rank_zero_print, seed_everything
 
 
 def get_imputation_logic(args: Namespace) -> Callable[[Namespace, DataT], None]:
@@ -64,10 +64,7 @@ def main():
     # }
 
     data = CommonDataModule.from_argparse_args(
-        args,
-        dataset_loader=data_loader,
-        ampute=should_ampute(args),
-        **data_settings,
+        args, dataset_loader=data_loader, **data_settings
     )
 
     imputed_data = get_imputation_logic(args)(args, data)

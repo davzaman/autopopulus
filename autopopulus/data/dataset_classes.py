@@ -352,7 +352,6 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         fully_observed: bool = False,
         data_type_time_dim=DataTypeTimeDim.STATIC,
         scale: bool = False,
-        ampute: bool = False,
         feature_map: Optional[str] = "onehot_categorical",
         uniform_prob: bool = False,
         separate_ground_truth_transform: bool = False,
@@ -360,6 +359,7 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         val_size: Optional[float] = None,
         percent_missing: Optional[float] = None,
         amputation_patterns: Optional[List[Dict[str, Any]]] = None,
+        evaluate_on_remaining_semi_observed: bool = False,
         seed: Optional[int] = None,
         limit_data: Optional[int] = None,  # Debugging purposes
     ):
@@ -379,15 +379,19 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         self.fully_observed = fully_observed
         self.data_type_time_dim = data_type_time_dim
         self.scale = scale
-        self.ampute = ampute
         self.feature_map = feature_map
         self.uniform_prob = uniform_prob
         self.separate_ground_truth_transform = separate_ground_truth_transform
         self.percent_missing = percent_missing
         self.amputation_patterns = amputation_patterns
-        self._validate_inputs()
-
+        self.evaluate_on_remaining_semi_observed = evaluate_on_remaining_semi_observed
+        self.ampute = (
+            self.fully_observed
+            and self.percent_missing is not None
+            and self.amputation_patterns is not None
+        )
         self.limit_data = limit_data
+        self._validate_inputs()
 
     def setup(self, stage: Optional[str] = None):
         """
@@ -415,14 +419,24 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
             # get the columns info before sklearn/other preprocessing steps strip them away
             self._set_auxilliary_column_info(X)
 
-            if self.fully_observed:
-                # keep rows NOT missing a value for any feature
-                fully_observed_mask = X.notna().all(axis=1)
-                X = X[fully_observed_mask]
-                y = y[fully_observed_mask]
-
             ground_truth = X.copy()
-            self.ground_truth_has_nans = ground_truth.isna().any().any()
+            # optional separate test set
+            X_test, y_test, ground_truth_test = None, None, None
+            if self.fully_observed:
+                # rows NOT missing a value for any feature
+                where_fully_observed = X.notna().all(axis=1)
+                if self.evaluate_on_remaining_semi_observed:
+                    # save remaining semi observed subset before filtering down
+                    X_test = X[~where_fully_observed]
+                    y_test = y[~where_fully_observed]
+                    ground_truth_test = ground_truth[~where_fully_observed]
+                X = X[where_fully_observed]
+                y = y[where_fully_observed]
+                ground_truth = ground_truth[where_fully_observed]
+                # test is possibly semi-observed but not training since its fully observed
+                self.semi_observed_training = False
+            else:
+                self.semi_observed_training = ground_truth.isna().any().any()
 
             # Don't ampute if we're doing a purely F.O. experiment.
             if self.ampute:
@@ -437,12 +451,12 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
                 # drop the added latent features.
                 X = X.drop(X.filter(regex=r"latent_p\d+_.+").columns, axis=1)
 
-            # expand nans where its onehot to make sure the whole group is nan
-            # before assigned to splits
+            # expand nans for onehots, ensure whole group is nan before splitting data
+            # this works if amputing or not or evaluating on remaining data when F.O.
             X = explode_nans(X, self.col_idxs_by_type["original"].get("onehot", []))
 
             # split by pt id
-            self._split_dataset(ground_truth, X, y)
+            self._split_dataset(ground_truth, X, y, ground_truth_test, X_test, y_test)
             self._set_post_split_transforms()
 
     def train_dataloader(self):
@@ -476,12 +490,10 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
             assert (
                 self.feature_map == "discretize_continuous"
             ), "Did not indicate to discretize but indicated uniform probability. You need discretization to impose a uniform probability."
-        # need auxiliary info for amputation, (more if mar)
-        if self.ampute:
+        if self.evaluate_on_remaining_semi_observed:
             assert (
-                self.percent_missing is not None
-                and self.amputation_patterns is not None
-            ), "Failed to provide settings for amputation."
+                self.fully_observed
+            ), "Can only evaluate on remaining semi-observed if we request to filter to fully observed subset."
 
     def _add_latent_features(
         self, data: DataFrame
@@ -656,6 +668,9 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         ground_truth: DataFrame,
         X: DataFrame,
         y: Union[Series, ndarray],
+        ground_truth_test: Optional[DataFrame] = None,
+        X_test: Optional[DataFrame] = None,
+        y_test: Optional[Union[Series, ndarray]] = None,
     ):
         """
         Splits dataset into train/test/val via data index (pt id).
@@ -673,6 +688,18 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         }
         """
         splits = self._get_dataset_splits(X, y)
+
+        if self.evaluate_on_remaining_semi_observed:
+            assert (
+                (ground_truth_test is not None)
+                and (X_test is not None)
+                and (y_test is not None)
+            ), "Asked to evaluate on remaining semi-observed portion of datset, but nothing was passed in to dataset split."
+            assert list(splits.keys()) == [
+                "train",
+                "val",
+            ], "_get_dataset_splits should only return train and val if test set is already provided (remaining semi-observed portion of dataset.)"
+
         self.splits: Dict[str, Tensor] = {
             "data": {},
             "ground_truth": {},
@@ -686,6 +713,11 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
             #     ~X.loc[split_ids].isna().astype(bool)
             # )
             self.splits["label"][split_name] = y[split_ids]
+
+        if self.evaluate_on_remaining_semi_observed:
+            self.splits["ground_truth"]["test"] = ground_truth_test
+            self.splits["data"]["test"] = X_test
+            self.splits["label"]["test"] = y_test
 
     def _get_dataset_splits(
         self,
@@ -708,6 +740,12 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
             stratify=labels,
             random_state=self.seed,
         )
+        if self.evaluate_on_remaining_semi_observed:
+            # don't split again we already have test, trainval is just train and test is val
+            train_ids = train_val_ids
+            val_ids = test_ids
+            return {"train": train_ids, "val": val_ids}
+
         train_ids, val_ids = train_test_split(
             train_val_ids,
             test_size=self.val_size,
@@ -1256,6 +1294,12 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
             type=int,
             default=None,
             help="Debugging: limits the dataset to a certain size. Must be >= batch-size.",
+        )
+        p.add_argument(
+            "--evaluate-on-remaining-semi-observed",
+            type=str2bool,
+            default=False,
+            help="Whether to split the fully observed subset into train and val and use the remaining semi-observed data as test. When set to true on testing we force semi_observed_training to true.",
         )
 
         #### AMPUTE ####

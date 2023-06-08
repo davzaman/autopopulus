@@ -114,27 +114,18 @@ class TestCommonDataModule(unittest.TestCase):
                 dataset_loader=dataset_loader,
                 fully_observed=False,
                 scale=False,
-                ampute=False,
                 feature_map=None,
                 uniform_prob=True,
             )
 
-        # ampute with missing necessary components
         with self.assertRaises(AssertionError):
-            new_settings = self.standard.copy()
-            new_settings["percent_missing"] = None
-            CommonDataModule(**new_settings, dataset_loader=dataset_loader, ampute=True)
-
-        with self.assertRaises(AssertionError):
-            new_settings = self.standard.copy()
-            new_settings["amputation_patterns"] = None
-            CommonDataModule(**new_settings, dataset_loader=dataset_loader, ampute=True)
-
-        with self.assertRaises(AssertionError):
-            new_settings = self.standard.copy()
-            dataset_loader = get_dataset_loader(X["X"], y)
-            dataset_loader.missing_cols = None
-            CommonDataModule(**new_settings, dataset_loader=dataset_loader, ampute=True)
+            # no fully_observed but eval_on_remaining
+            CommonDataModule(
+                **self.standard,
+                dataset_loader=dataset_loader,
+                fully_observed=False,
+                evaluate_on_remaining_semi_observed=True,
+            )
 
         with self.assertRaises(TypeError):
             # Need to pass a dataloader
@@ -1035,7 +1026,7 @@ class TestCommonDataModule(unittest.TestCase):
         with self.subTest("ampute"):
             data = CommonDataModule(
                 dataset_loader=SimpleDatasetLoader(*datasetloader_args),
-                ampute=True,
+                fully_observed=True,
                 amputation_patterns=[
                     {"incomplete_vars": ["ctn1"], "mechanism": "MNAR(G)"}
                 ],
@@ -1071,7 +1062,7 @@ class TestCommonDataModule(unittest.TestCase):
                 )
                 data = CommonDataModule(
                     dataset_loader=dataset_loader,
-                    ampute=True,
+                    fully_observed=True,
                     amputation_patterns=[
                         {
                             "incomplete_vars": [onehot_df.columns[3]],
@@ -1215,6 +1206,93 @@ class TestCommonDataModule(unittest.TestCase):
                             data.amputation_patterns,
                             [{"mechanism": "MNAR(G)", "weights": [1, 0, 0, 0, 0]}],
                         )
+
+    @settings(suppress_health_check=[HealthCheck(3)], deadline=None)
+    @given(data_frames(columns=hypothesis["columns"]))
+    def test_evaluate_on_remaining_semi_observed(self, df_test):
+        assume(  # each row should have at least 1 NaN to be semi-observed
+            df_test.isna().any(axis=1).all()
+            and not df_test.isna().all(axis=1).any()  # no 1 col should be all nan
+            and not df_test.isna().all(axis=0).any()  # no 1 row should be all nan
+        )
+        rng = default_rng(seed)
+        # Fully observed
+        df_train_val = pd.DataFrame(
+            rng.random((50, df_test.shape[1])), columns=df_test.columns
+        )
+        # every idx is even in train_val, odd for eval
+        df_train_val.index = df_train_val.index * 2
+        df_test.index = df_test.index * 2 + 1
+
+        y_train_val = pd.Series(
+            rng.integers(0, 2, len(df_train_val)), index=df_train_val.index
+        )  # random binary outcome
+        y_test = pd.Series(
+            rng.integers(0, 2, len(df_test)), index=df_test.index
+        )  # random binary outcome
+
+        # combine them and randomly shuffle them
+        X = pd.concat([df_train_val, df_test], axis=0).sample(frac=1, random_state=seed)
+        y = pd.concat([y_train_val, y_test], axis=0).sample(frac=1, random_state=seed)
+        pd.testing.assert_index_equal(X.index, y.index)
+
+        datasetloader_args = (
+            X,
+            y,
+            hypothesis["ctn_cols"],
+            hypothesis["cat_cols"],
+        )
+
+        with self.subTest("No Ampute"):
+            data = CommonDataModule(
+                dataset_loader=SimpleDatasetLoader(*datasetloader_args),
+                **self.standard,
+                fully_observed=True,
+                evaluate_on_remaining_semi_observed=True,
+            )
+            data.setup("fit")
+            for split in ["train", "val"]:
+                for data_role in ["data", "ground_truth", "label"]:
+                    # should have even indices
+                    self.assertTrue(
+                        (data.splits[data_role][split].index % 2 == 0).all()
+                    )
+                # no ampute so both data and ground_truth has no nans for train and val
+                self.assertEqual(data.splits["data"][split].isna().sum().sum(), 0)
+                self.assertEqual(
+                    data.splits["ground_truth"][split].isna().sum().sum(), 0
+                )
+            for data_role in ["data", "ground_truth", "label"]:
+                # should have odd indices
+                self.assertTrue((data.splits[data_role]["test"].index % 2 == 1).all())
+
+        with self.subTest("Ampute"):
+            data = CommonDataModule(
+                dataset_loader=SimpleDatasetLoader(*datasetloader_args),
+                **self.standard,
+                fully_observed=True,
+                evaluate_on_remaining_semi_observed=True,
+                amputation_patterns=[
+                    {"incomplete_vars": ["ctn1"], "mechanism": "MNAR(G)"}
+                ],
+            )
+
+            data.setup("fit")
+            for split in ["train", "val"]:
+                for data_role in ["data", "ground_truth", "label"]:
+                    # should have even indices
+                    self.assertTrue(
+                        (data.splits[data_role][split].index % 2 == 0).all()
+                    )
+                # data should have nans due to ampute
+                self.assertGreater(data.splits["data"][split].isna().sum().sum(), 0)
+                # ground truth should still not have nans
+                self.assertEqual(
+                    data.splits["ground_truth"][split].isna().sum().sum(), 0
+                )
+            for data_role in ["data", "ground_truth", "label"]:
+                # should have odd indices
+                self.assertTrue((data.splits[data_role]["test"].index % 2 == 1).all())
 
 
 if __name__ == "__main__":

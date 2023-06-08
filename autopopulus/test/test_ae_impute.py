@@ -466,6 +466,27 @@ class TestAEImputer(unittest.TestCase):
             self.aeimp.fit(datamodule)
             self.assertTrue(self.aeimp.ae.hparams.semi_observed_training)
 
+        with self.subTest("semi_observed_training"):
+            missing_gt_settings = self.data_settings.copy()
+            # ground truth has missing values
+            missing_gt_settings["dataset_loader"] = get_dataset_loader(X["X"], y)
+            datamodule = CommonDataModule(**missing_gt_settings, fully_observed=True)
+            self.aeimp.fit(datamodule)
+            self.assertFalse(self.aeimp.ae.hparams.semi_observed_training)
+
+        with self.subTest("evaluate_on_remaining_semi_observed"):
+            missing_gt_settings = self.data_settings.copy()
+            # ground truth has missing values
+            missing_gt_settings["dataset_loader"] = get_dataset_loader(X["X"], y)
+            datamodule = CommonDataModule(
+                **missing_gt_settings,
+                fully_observed=True,
+                evaluate_on_remaining_semi_observed=True,
+            )
+            self.aeimp.fit(datamodule)
+            self.assertFalse(self.aeimp.ae.hparams.semi_observed_training)
+            self.assertTrue(self.aeimp.ae.hparams.evaluate_on_remaining_semi_observed)
+
         with self.subTest("discretize_continuous"):
             mock_disc_cuts.return_value = discretization["cuts"]
             mock_disc_data(mock_MDL, X["disc"], y)

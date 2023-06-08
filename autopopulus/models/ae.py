@@ -46,7 +46,7 @@ from autopopulus.utils.impute_metrics import (
     RMSEMetric,
 )
 from autopopulus.utils.cli_arg_utils import YAMLStringListToList, StringOrInt, str2bool
-from autopopulus.utils.utils import rank_zero_print
+from autopopulus.utils.utils import rank_zero_print, temp_setattr
 from autopopulus.utils.log_utils import (
     IMPUTE_METRIC_TAG_FORMAT,
     MIXED_FEATURE_METRIC_FORMAT,
@@ -128,6 +128,7 @@ class AEDitto(LightningModule):
             ]
         ] = None,
         semi_observed_training: bool = False,  # if the ground truth has nans
+        evaluate_on_remaining_semi_observed: bool = False,
         replace_nan_with: Optional[Union[int, str]] = None,  # warm start
         batchnorm: bool = False,
         variational: bool = False,
@@ -273,6 +274,11 @@ class AEDitto(LightningModule):
         return loss
 
     def test_step(self, batch, batch_idx):
+        if self.hparams.evaluate_on_remaining_semi_observed:
+            with temp_setattr(self.hparams, semi_observed_training=True):
+                loss, outputs = self.shared_step(batch, "test")
+                self.shared_logging_step_end(outputs, batch, "test")
+                return loss
         loss, outputs = self.shared_step(batch, "test")
         self.shared_logging_step_end(outputs, batch, "test")
         return loss
@@ -309,6 +315,7 @@ class AEDitto(LightningModule):
             data * mask: normalize by # all features, but preserves shape.
             data[mask]: normalize by only # observed features, but will flatten.
             """
+            # TODO: do i need to check the if? if it's fully observed it'll be the same thing since where_ground_truth_are_observed is all of the elements.
             if self.hparams.semi_observed_training:
                 where_ground_truth_are_observed = ~(isnan(ground_truth)).bool()
                 # eval_pred = reconstruct_batch[where_ground_truth_are_observed]

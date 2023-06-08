@@ -66,7 +66,7 @@ def baseline_imputation_logic(
             input_data=data.splits["data"][split],
             true=data.splits["ground_truth"][split],
             col_idxs_by_type=data.col_idxs_by_type["original"],
-            semi_observed_training=data.ground_truth_has_nans,
+            semi_observed_training=data.semi_observed_training,
         )
 
     return imputed_data_per_split
@@ -89,7 +89,11 @@ def save_test_data(args: Namespace, data: CommonDataModule):
                 "data": data.splits["data"]["test"],
                 "ground_truth": data.splits["ground_truth"]["test"],
                 "col_idxs_by_type": data.col_idxs_by_type["original"],
-                "semi_observed_training": data.ground_truth_has_nans,
+                "semi_observed_training": (
+                    True
+                    if data.evaluate_on_remaining_semi_observed
+                    else data.semi_observed_training
+                ),
             },
             file,
         )
@@ -140,7 +144,7 @@ def evaluate_baseline_imputation(
     """This mirrors AEDitto.metric_logging_step."""
     if args.method == "none":  # no performance to log
         return
-    if semi_observed_training:  # if data.ground_truth_has_nans
+    if semi_observed_training:  # if data.semi_observed_training
         return
 
     log: BasicLogger = BasicLogger(
