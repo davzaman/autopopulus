@@ -175,11 +175,22 @@ class TransformScorer(_BaseScorer):
             else (X_true, X_pred, where_data_are_missing)
         )
         if sample_weight is not None:
-            return self._sign * self._score_func(
-                *arg_order, sample_weight=sample_weight, **self._kwargs
+            return self._sign * self.get_combined_score_if_metric_collection(
+                self._score_func(
+                    *arg_order, sample_weight=sample_weight, **self._kwargs
+                )
             )
         else:
-            return self._sign * self._score_func(*arg_order, **self._kwargs)
+            return self._sign * self.get_combined_score_if_metric_collection(
+                self._score_func(*arg_order, **self._kwargs)
+            )
+
+    def get_combined_score_if_metric_collection(
+        self, score: Union[Dict[str, float], float]
+    ) -> float:
+        if isinstance(score, Dict):
+            return sum(score.values())
+        return score
 
 
 class TunableEstimator(BaseEstimator, TransformerMixin):

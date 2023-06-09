@@ -6,9 +6,15 @@ from sklearn.experimental import enable_iterative_imputer  # noqa
 from sklearn.impute import IterativeImputer, KNNImputer, SimpleImputer
 
 from torch import tensor
+from torchmetrics import MetricCollection
 
 from autopopulus.data.dataset_classes import CommonDataModule
-from autopopulus.utils.impute_metrics import MAAPEMetric, universal_metric
+from autopopulus.data.transforms import list_to_tensor
+from autopopulus.utils.impute_metrics import (
+    CategoricalErrorMetric,
+    MAAPEMetric,
+    universal_metric,
+)
 from autopopulus.utils.log_utils import IMPUTE_METRIC_TAG_FORMAT
 
 # This should reflect everything in baseline_static_imputation
@@ -151,7 +157,7 @@ def get_tune_metric(
             )
         else:
             return IMPUTE_METRIC_TAG_FORMAT.format(
-                name="MAAPE",
+                name="MAAPECategoricalError",
                 feature_space="original",
                 filter_subgroup="missingonly",
                 reduction="CW",
@@ -165,10 +171,20 @@ def get_tune_metric(
             return None
         else:
             return universal_metric(  # sync with tuning metric for ae
-                MAAPEMetric(
-                    ctn_cols_idx=tensor(
-                        data.col_idxs_by_type["original"]["continuous"]
-                    ),
-                    columnwise=True,
+                MetricCollection(
+                    {
+                        "continuous": MAAPEMetric(
+                            ctn_cols_idx=list_to_tensor(
+                                data.col_idxs_by_type["original"]["continuous"]
+                            ),
+                            columnwise=True,
+                        ),
+                        "categorical": CategoricalErrorMetric(
+                            list_to_tensor(data.col_idxs_by_type["original"]["binary"]),
+                            list_to_tensor(data.col_idxs_by_type["original"]["onehot"]),
+                            columnwise=True,
+                        ),
+                    },
+                    compute_groups=False,
                 )
             )
