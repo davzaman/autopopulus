@@ -10,7 +10,7 @@ from cloudpickle import dump
 # Required for IterativeImputer, as it's experimental
 from sklearn.experimental import enable_iterative_imputer  # noqa
 from sklearn.impute import IterativeImputer, KNNImputer
-from sklearn.linear_model import LogisticRegression
+from sklearn.tree import DecisionTreeClassifier
 
 ## Local Modules
 from autopopulus.data import CommonDataModule
@@ -83,7 +83,7 @@ def mice(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
             onehot_groupby=data.groupby["original"]["categorical_onehots"],
             numeric_transformer=IterativeImputer(random_state=args.seed),
             categorical_transformer=IterativeImputer(
-                estimator=LogisticRegression(),
+                estimator=DecisionTreeClassifier(),  # works for bin and multicat
                 initial_strategy="most_frequent",
                 random_state=args.seed,
             ),
