@@ -599,6 +599,26 @@ class TestTransforms(unittest.TestCase):
         self.assertEqual(discretize_transformer.nfeatures, true_df.shape[1])
 
         transformed = discretize_transformer.transform(df)
+        # discretize should not introduce nans
+        self.assertEqual(transformed.isna().sum().sum(), df.isna().sum().sum())
+
+        # "" but especially when it has to transform values it hasn't seen
+        with self.subTest("Unseen Values"):
+            unseen_df = df.copy()
+            ctn_col = df.columns[ctn_cols_idxs[-1]]
+            rand_row = np.random.randint(0, len(unseen_df))
+            # Upper bound
+            unseen_df.loc[rand_row, ctn_col] = 5000000
+            self.assertEqual(
+                discretize_transformer.transform(unseen_df).isna().sum().sum(),
+                unseen_df.isna().sum().sum(),
+            )
+            # Lower bound
+            unseen_df.loc[rand_row, ctn_col] = -5000000
+            self.assertEqual(
+                discretize_transformer.transform(unseen_df).isna().sum().sum(),
+                unseen_df.isna().sum().sum(),
+            )
 
         if true_df is not None:
             pd.testing.assert_frame_equal(transformed, true_df, check_dtype=False)
