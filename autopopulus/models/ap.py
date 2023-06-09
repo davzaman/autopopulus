@@ -336,7 +336,7 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
             trainer_args["strategy"] = (
                 "ddp_find_unused_parameters_false"
                 if trainer_args["devices"] > 1
-                else None
+                else "auto"
             )
             trainer_args["accelerator"] = "gpu" if trainer_args["devices"] else "cpu"
         else:

@@ -4,7 +4,7 @@ from numpy import ndarray
 from pandas import DataFrame
 from pytorch_lightning.utilities import rank_zero_warn
 from pytorch_lightning.utilities.rank_zero import rank_zero_only
-from pytorch_lightning.profiler import AdvancedProfiler
+from pytorch_lightning.profilers.advanced import AdvancedProfiler
 
 ## Local Modules
 from autopopulus.data import CommonDataModule

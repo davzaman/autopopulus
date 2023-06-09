@@ -82,6 +82,11 @@ mamba activate $env_name
 mamba env update -n $env_name -f $env_file
 ```
 
+I might have to downgrade torch because of old CUDA. 
+[Installation Instructions](https://pytorch.org/get-started/previous-versions/)
+`mamba install pytorch==1.12.1 torchvision==0.13.1 torchaudio==0.12.1 cudatoolkit=10.2 -c pytorch`
+
+
 You might see `AttributeError: module 'typing' has no attribute '_ClassVar'`, in which case [`pip uninstall dataclasses`](https://github.com/ray-project/tune-sklearn/issues/181#issuecomment-782598003).
 
 
