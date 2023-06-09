@@ -791,6 +791,7 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
                                     self.col_idxs_by_type["original"]["continuous"],
                                 )
                             ],
+                            reorder_cols=True,
                         ),
                     ),
                 )
