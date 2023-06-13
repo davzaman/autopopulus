@@ -146,26 +146,16 @@ if __name__ == "__main__":
         expanded_info,
     )
 
+    time_data = expand_col(
+        {
+            "column": "metric",
+            "filter": expanded_info["operation"].isin(["impute", "evaluate"])
+            & expanded_info["metric"].str.contains("duration"),
+            "expanded_columns": ["split", "metric_name"],
+        },
+        expanded_info,
+    )
+
     impute_data.to_pickle("guild_impute_results.pkl")
     predict_data.to_pickle("guild_predict_results.pkl")
-
-
-def get_best_performance_per_mechanism(
-    impute_data: pd.DataFrame,
-    metric: str = "test/original/all/CW/mixed/MAAPE_CategoricalError",
-):
-    # TODO: filter by percent missing?
-    best_runs = impute_data.iloc[
-        impute_data[
-            (impute_data["split"] == "test")
-            & ~(impute_data["model"].isin(["mice", "simple"]))
-        ]
-        .groupby(["mechanism", "percent-missing", "metric"])["val"]
-        .idxmax()
-    ]
-    best_for_metric = best_runs[best_runs["metric"] == metric]
-    for run_id in best_for_metric["run"].map(lambda run: run.id):
-        # load up the model with the same params from tuning...
-        # TODO: do i have that saved somewhere? do I need to log it/serialize it?
-        # maybe add hparams-from-proto flag?
-        command = f"guild run --proto {run_id} tune-n-samples=0 evaluate-on-remaining-semi-observed=yes"
+    time_data.to_pickle("guild_time_results.pkl")

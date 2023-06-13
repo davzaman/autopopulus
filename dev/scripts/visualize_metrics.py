@@ -193,4 +193,89 @@ fig.update_layout(
 fig
 
 # %%
+time_data = pd.read_pickle(
+    "/home/davina/Private/repos/autopopulus/guild_time_results.pkl"
+)
+time_data = time_data.set_index(EXPERIMENT_GRID_VARS)[
+    ["val", "step", "metric_name", "split"]
+]
+
+# %%
+stats = (
+    time_data.groupby(EXPERIMENT_GRID_VARS + ["split"], dropna=False)["val"]
+    .agg(["mean", "sem"])
+    .assign(
+        ci96_hi=lambda stats: stats["mean"] + 1.96 * stats["sem"],
+        ci95_low=lambda stats: stats["mean"] - 1.96 * stats["sem"],
+    )
+)
+display(stats)
+
+
+# %%
+flat_stats = stats.reset_index()
+flat_stats["erry"] = flat_stats["ci96_hi"] - flat_stats["mean"]
+flat_stats["erryminus"] = flat_stats["mean"] - flat_stats["ci95_low"]
+fig = px.scatter(
+    format_names(flat_stats),
+    x=PRETTY_NAMES["method"]["name"],
+    y="mean",
+    error_y="erry",
+    error_y_minus="erryminus",
+    symbol=PRETTY_NAMES["score_to_probability_func"]["name"],
+    color=PRETTY_NAMES["feature-map"]["name"],
+    # https://plotly.com/python/marker-style/#custom-marker-symbols
+    symbol_sequence=["circle", "x-open"],
+    facet_col=PRETTY_NAMES["mechanism"]["name"],
+    facet_col_spacing=0.06,
+    # facet_row="metric_name",
+    # facet_row_spacing=0.04,
+    size=PRETTY_NAMES["percent-missing"]["name"],
+    size_max=5,
+    # title="Prediction Performance",
+    # x_title="Imputation Method",
+    labels={"mean": "Mean", "Method": "Imputation Method"},
+    category_orders={
+        info["name"]: info["order"] for info in PRETTY_NAMES.values() if "order" in info
+    },
+)
+# Get rid of metric=
+fig.for_each_annotation(lambda a: a.update(text=a.text.split("=")[-1]))
+fig.update_yaxes(matches=None, showticklabels=True)
+fig.update_xaxes(tickangle=45)
+
+fig.add_trace(
+    go.Scatter(
+        x=[np.nan],
+        y=[np.nan],
+        legendgroup="A",
+        mode="markers",
+        marker=dict(size=5, color="black"),
+        name="33% Missing",
+    ),
+    row=1,
+    col=1,
+)
+fig.add_trace(
+    go.Scatter(
+        x=[np.nan],
+        y=[np.nan],
+        legendgroup="A",
+        mode="markers",
+        marker=dict(size=10, color="black"),
+        name="66% Missing",
+    ),
+    row=1,
+    col=1,
+)
+fig.update_layout(legend_itemsizing="trace")
+# fig.update_layout(legend=dict(font=dict(size=10)), legend_title=dict(text="", font=dict(size=12)))
+compress_legend(fig)
+fig.update_layout(
+    title_x=0.5,
+    legend_title=dict(text=""),
+    legend=dict(yanchor="top", y=-0.5, xanchor="center", x=0.5, orientation="h"),
+)
+fig
+
 # %%
