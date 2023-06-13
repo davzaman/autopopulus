@@ -15,7 +15,10 @@ from autopopulus.utils.impute_metrics import (
     MAAPEMetric,
     universal_metric,
 )
-from autopopulus.utils.log_utils import IMPUTE_METRIC_TAG_FORMAT
+from autopopulus.utils.log_utils import (
+    IMPUTE_METRIC_TAG_FORMAT,
+    MIXED_FEATURE_METRIC_FORMAT,
+)
 
 # This should reflect everything in baseline_static_imputation
 STATIC_BASELINE_METHODS = ["knn", "mice", "simple", "none"]
@@ -157,7 +160,9 @@ def get_tune_metric(
             )
         else:
             return IMPUTE_METRIC_TAG_FORMAT.format(
-                name="MAAPECategoricalError",
+                name=MIXED_FEATURE_METRIC_FORMAT.format(
+                    ctn_name="MAAPE", cat_name="CategoricalError"
+                ),
                 feature_space="original",
                 filter_subgroup="missingonly",
                 reduction="CW",

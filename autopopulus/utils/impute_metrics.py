@@ -29,7 +29,6 @@ class MAAPEMetric(Metric):
     EW: sum(sum(arctan(abs((true - pred) / true))))/(nrows * ncols)
     CW: mean(mean(arctan(abs((true - pred) / true))))
     Not the same when there's missingness indicators.
-    This might be useless as the feature-map inversion cannot be done on the gpu especially since we need to reorder stuff as pandas df.
     https://torchmetrics.readthedocs.io/en/stable/pages/implement.html
     https://github.com/Lightning-AI/metrics/tree/master/src/torchmetrics/regression.mape.py
     https://github.com/allenai/allennlp/tree/main/allennlp/training/metrics
@@ -139,7 +138,6 @@ class RMSEMetric(Metric):
     Element-wise is computationally different from column-wise (order of sqrt and sum matters).
         EW: sqrt(sum(sum((true - pred)**2)) / (nrows * ncols))
         CW: mean(sqrt(mean((true - pred)**2)))
-    This might be useless as the feature-map inversion cannot be done on the gpu especially since we need to reorder stuff as pandas df.
     https://torchmetrics.readthedocs.io/en/stable/pages/implement.html
     https://github.com/Lightning-AI/metrics/blob/master/src/torchmetrics/regression/mse.py
     https://github.com/allenai/allennlp/tree/main/allennlp/training/metrics

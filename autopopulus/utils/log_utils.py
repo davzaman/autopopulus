@@ -38,7 +38,7 @@ IMPUTE_METRIC_TAG_FORMAT = (
 )
 PREDICT_METRIC_TAG_FORMAT = "{predictor}/{aggregate_type}/{name}"
 TIME_TAG_FORMAT = "{split}/epoch_duration_sec"
-MIXED_FEATURE_METRIC_FORMAT = "{ctn_name}{cat_name}"
+MIXED_FEATURE_METRIC_FORMAT = "{ctn_name}_{cat_name}"
 
 
 # Ref: https://stackoverflow.com/a/6794451/1888794

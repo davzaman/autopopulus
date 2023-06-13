@@ -60,6 +60,7 @@ from autopopulus.test.utils import (
 )
 from autopopulus.utils.log_utils import (
     IMPUTE_METRIC_TAG_FORMAT,
+    MIXED_FEATURE_METRIC_FORMAT,
     get_serialized_model_path,
 )
 from autopopulus.data.dataset_classes import SimpleDatasetLoader
@@ -177,7 +178,10 @@ class TestAEImputer(unittest.TestCase):
                                     ]:
                                         mock_log.assert_any_call(
                                             IMPUTE_METRIC_TAG_FORMAT.format(
-                                                name=f"{ctn_metric}{cat_metric}",
+                                                name=MIXED_FEATURE_METRIC_FORMAT.format(
+                                                    ctn_name=ctn_metric,
+                                                    cat_name=cat_metric,
+                                                ),
                                                 feature_space="original",
                                                 filter_subgroup=filter_subgroup,
                                                 reduction=reduction,
@@ -235,7 +239,10 @@ class TestAEImputer(unittest.TestCase):
                                         ]:
                                             mock_log.assert_any_call(
                                                 IMPUTE_METRIC_TAG_FORMAT.format(
-                                                    name=f"{ctn_metric}{cat_metric}",
+                                                    name=MIXED_FEATURE_METRIC_FORMAT.format(
+                                                        ctn_name=ctn_metric,
+                                                        cat_name=cat_metric,
+                                                    ),
                                                     feature_space=feature_space,
                                                     filter_subgroup=filter_subgroup,
                                                     reduction=reduction,
@@ -444,7 +451,7 @@ class TestAEImputer(unittest.TestCase):
                     for leaf_metrics in reduction_moduledict.values():
                         self.assertEqual(
                             list(leaf_metrics.keys()),
-                            ["RMSECategoricalError", "MAAPECategoricalError"],
+                            ["RMSE_CategoricalError", "MAAPE_CategoricalError"],
                         )
                         for feature_type_metrics in leaf_metrics.values():
                             self.assertEqual(
@@ -466,6 +473,8 @@ class TestAEImputer(unittest.TestCase):
             self.aeimp.fit(datamodule)
             self.assertTrue(self.aeimp.ae.hparams.semi_observed_training)
 
+        fully_obs_ind = X["X"].index[X["X"].notna().all(axis=1)]
+        mock_split.return_value = (fully_obs_ind, fully_obs_ind)
         with self.subTest("semi_observed_training"):
             missing_gt_settings = self.data_settings.copy()
             # ground truth has missing values
@@ -486,6 +495,8 @@ class TestAEImputer(unittest.TestCase):
             self.aeimp.fit(datamodule)
             self.assertFalse(self.aeimp.ae.hparams.semi_observed_training)
             self.assertTrue(self.aeimp.ae.hparams.evaluate_on_remaining_semi_observed)
+        # Revert
+        mock_split.return_value = (X["nomissing"].index, X["nomissing"].index)
 
         with self.subTest("discretize_continuous"):
             mock_disc_cuts.return_value = discretization["cuts"]
@@ -531,7 +542,7 @@ class TestAEImputer(unittest.TestCase):
                         for feature_space, leaf_metrics in reduction_moduledict.items():
                             self.assertEqual(
                                 list(leaf_metrics.keys()),
-                                ["RMSECategoricalError", "MAAPECategoricalError"],
+                                ["RMSE_CategoricalError", "MAAPE_CategoricalError"],
                             )
                             for feature_type_metrics in leaf_metrics.values():
                                 self.assertEqual(
@@ -590,7 +601,7 @@ class TestAEImputer(unittest.TestCase):
                         for feature_space, leaf_metrics in reduction_moduledict.items():
                             self.assertEqual(
                                 list(leaf_metrics.keys()),
-                                ["RMSECategoricalError", "MAAPECategoricalError"],
+                                ["RMSE_CategoricalError", "MAAPE_CategoricalError"],
                             )
                             for feature_type_metrics in leaf_metrics.values():
                                 self.assertEqual(

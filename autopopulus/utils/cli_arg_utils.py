@@ -68,7 +68,10 @@ def StringToEnum(enum: Enum):
 
 
 def string_json_to_python(obj_string: str) -> Dict:
-    return loads(obj_string.replace("'", '"'))
+    try:
+        return loads(obj_string.replace("'", '"'))
+    except:
+        print(obj_string)
 
 
 def YAMLStringListToList(convert: type = str, choices: Optional[List[str]] = None):
@@ -82,7 +85,6 @@ def YAMLStringListToList(convert: type = str, choices: Optional[List[str]] = Non
             values: str,
             option_string: Optional[str] = None,
         ):
-
             if convert == dict:  # Internal dict will be a string
                 values = string_json_to_python(values)
                 setattr(namespace, self.dest, values)
