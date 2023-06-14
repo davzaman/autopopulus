@@ -19,6 +19,7 @@ from autopopulus.data.dataset_classes import CommonDataModule
 from autopopulus.models.ap import AEImputer
 from autopopulus.utils.log_utils import (
     IMPUTE_METRIC_TAG_FORMAT,
+    SERIALIZED_MODEL_FORMAT,
     AutoencoderLogger,
     BasicLogger,
     copy_log_from_tune,
@@ -51,7 +52,11 @@ def create_autoencoder(
 
         # Load up (now we can do from local because we copied over)
         best_checkpoint = get_serialized_model_path(
-            f"AEDitto_{data.data_type_time_dim.name}", "pt", best_trial_num
+            SERIALIZED_MODEL_FORMAT.format(
+                data_type_time_dim=data.data_type_time_dim.name
+            ),
+            "pt",
+            best_trial_num,
         )
         ae_imputer = AEImputer.from_checkpoint(
             args, ae_from_checkpoint=best_checkpoint, **best_model_config

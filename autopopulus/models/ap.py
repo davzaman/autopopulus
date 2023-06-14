@@ -38,6 +38,7 @@ warnings.filterwarnings(action="ignore", category=LightningDeprecationWarning)
 from autopopulus.models.ae import AEDitto
 from autopopulus.utils.log_utils import (
     IMPUTE_METRIC_TAG_FORMAT,
+    SERIALIZED_MODEL_FORMAT,
     TUNE_LOG_DIR,
     AutoencoderLogger,
     copy_artifacts_from_tune,
@@ -122,18 +123,33 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         """Trains the autoencoder for imputation."""
         data.setup("fit")
 
+        # create AEDitto using info from data and then use trainer to fit
         args, kwargs = self._get_model_args(data)
         self.ae = AEDitto(*args, **kwargs)
+        self._fit(data)
+        return self
 
+    def refit(self, data: CommonDataModule):
+        """Re-trains already created autoencoder for imputation."""
+        data.setup("fit")
+        self._fit(data)
+        return self
+
+    def _fit(self, data: CommonDataModule):
+        """Use trainer to fit a LightningModule and save artifacts."""
+        assert hasattr(self, "ae")  # Assumes AEDitto is instantiated.
         self.trainer = pl.Trainer(**self._get_trainer_args(data))
         self.trainer.fit(self.ae, datamodule=data)
         self.trainer.save_checkpoint(
             get_serialized_model_path(
-                f"AEDitto_{self.data_type_time_dim.name}", "pt", self.trial_num
+                SERIALIZED_MODEL_FORMAT.format(
+                    data_type_time_dim=self.data_type_time_dim.name
+                ),
+                "pt",
+                self.trial_num,
             ),
         )
         self._save_test_data(data)
-        return self
 
     def tune(
         self,
@@ -412,7 +428,11 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         best_model: pl.LightningModule = checkpoint.get_model(AEDitto)
         self.ae = best_model
         model_log_path = get_serialized_model_path(
-            f"AEDitto_{self.data_type_time_dim.name}", "pt", self.trial_num
+            SERIALIZED_MODEL_FORMAT.format(
+                data_type_time_dim=self.data_type_time_dim.name
+            ),
+            "pt",
+            self.trial_num,
         )
         copy_artifacts_from_tune(
             best_result, model_path=model_log_path, metric_path=self.logger.save_dir
@@ -482,6 +502,7 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
     def load_autoencoder(serialized_model_path: str) -> None:
         """Loads the underlying autoencoder state dict from path."""
         # Ref: https://pytorch.org/tutorials/beginner/saving_loading_models.html#saving-loading-model-for-inference
+        # https://lightning.ai/docs/pytorch/stable/common/checkpointing_basic.html#contents-of-a-checkpoint
         autoencoder = AEDitto.load_from_checkpoint(serialized_model_path)
         # put into eval mode for inference
         autoencoder.eval()
