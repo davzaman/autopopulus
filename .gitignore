@@ -16,6 +16,7 @@ serialized_models/
 profiling-results/
 STATIC/
 model_viz/
+guild_runs/
 # serialized models
 *.pt
 # tflow

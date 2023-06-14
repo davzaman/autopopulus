@@ -1,8 +1,11 @@
 import re
+from os import makedirs
+from os.path import dirname, join
 from typing import Any, Dict
+
 import guild.ipy as guild
-from guild import timerange
 import pandas as pd
+from guild import timerange
 
 from autopopulus.utils.cli_arg_utils import string_json_to_python
 from autopopulus.utils.log_utils import (
@@ -156,6 +159,8 @@ if __name__ == "__main__":
         expanded_info,
     )
 
-    impute_data.to_pickle("guild_impute_results.pkl")
-    predict_data.to_pickle("guild_predict_results.pkl")
-    time_data.to_pickle("guild_time_results.pkl")
+    output_dir = "guild_runs"
+    makedirs(output_dir, exist_ok=True)
+    impute_data.to_pickle(join(output_dir, "guild_impute_results.pkl"))
+    predict_data.to_pickle(join(output_dir, "guild_predict_results.pkl"))
+    time_data.to_pickle(join(output_dir, "guild_time_results.pkl"))
