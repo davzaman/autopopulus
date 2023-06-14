@@ -65,7 +65,7 @@ def evaluate_baseline_imputer(args: Namespace):
         true=test_data["ground_truth"],
         col_idxs_by_type=test_data["col_idxs_by_type"],
         semi_observed_training=test_data["semi_observed_training"],
-        bootstrap=args.bootstrap_eval_imputer,
+        bootstrap=args.bootstrap_evaluate_imputer,
     )
 
 
@@ -80,7 +80,7 @@ def evaluate_autoencoder_imputer(args: Namespace):
         get_serialized_model_path(f"AEDitto_{args.data_type_time_dim.name}", "pt"),
     )
 
-    if args.bootstrap_eval_imputer:
+    if args.bootstrap_evaluate_imputer:
         test_dataset = test_dataloader.dataset
         gen = default_rng(args.seed)
         for b in tqdm(range(args.num_bootstraps)):

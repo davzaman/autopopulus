@@ -681,10 +681,12 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         Where the mapping could be discretized, target encoded, or onehot encoded.
         The self.splits dictionary will then look like:
         {
-            "data": {"train": ..., "val": ..., "test": ...},
-            "ground_truth": {"train": ..., "val": ..., "test": ...},
-            # "non_missing_mask": {"train": ..., "val": ..., "test": ...},
-            "label": {"train": ..., "val": ..., "test": ...},
+            "data": {
+                "original": {"train": vals, "val": vals, "test": vals},
+                "mapped": {...}
+            },
+            "ground_truth": {...},
+            "label": {...},
         }
         """
         splits = self._get_dataset_splits(X, y)
@@ -709,9 +711,6 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         for split_name, split_ids in splits.items():
             self.splits["ground_truth"][split_name] = ground_truth.loc[split_ids]
             self.splits["data"][split_name] = X.loc[split_ids]
-            # self.splits["non_missing_mask"][split_name] = (
-            #     ~X.loc[split_ids].isna().astype(bool)
-            # )
             self.splits["label"][split_name] = y[split_ids]
 
         if self.evaluate_on_remaining_semi_observed:
@@ -726,6 +725,10 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
     ) -> Dict[str, ndarray]:
         """
         Splitting via df index with label stratification using sklearn.
+        If dataset_loader already has split_ids specified, use them.
+        If evaluating on remaining semi_observed, we already have a test set,
+            only split into train and val.
+        Otherwise split intro train/val/test according to (curried) proportions.
         """
         # Use pre-specified splits if user has them
         if hasattr(self.dataset_loader, "split_ids"):
@@ -759,11 +762,10 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         """
         Setup sklearn pipeline for transforms to run after splitting data.
         Assumes groupby is set for categorical onehots and binary vars.
-        There are separate pipelines for data and ground_truth.
+        There can be separate pipelines for data and ground_truth.
         If feature_map, we will keep a separate transform function that only applies the non-mapping steps.
         If discretizing update the groupby (so all bins for the same var can be grouped later), and save the bins fitted/learned by discretizer.
 
-        # TODO write tests and asserts for these?
         NOTE: FEATURE MAPPINGS SHOULD
             1. preserve nans.
             2. not introduce any new nans.
@@ -776,7 +778,6 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         ) -> List[TransformerMixin]:
             steps = []
             if scale:
-                # Scale continuous features. Can produce negative numbers.
                 steps.append(
                     (
                         "scale_continuous",

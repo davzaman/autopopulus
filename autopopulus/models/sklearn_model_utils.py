@@ -27,8 +27,6 @@ from autopopulus.utils.utils import rank_zero_print
 class MixedFeatureImputer(TransformerMixin, BaseEstimator):
     """Mean impute continuous data, mode impute categorical data."""
 
-    # TODO: Write tests
-
     def __init__(
         self,
         ctn_cols: List[str],
@@ -56,12 +54,14 @@ class MixedFeatureImputer(TransformerMixin, BaseEstimator):
                     "impute",
                     ColTransformPandas(
                         orig_cols=self.columns,
+                        # will be reordered on transform when inverting combine onehots
                         reorder_cols=False,
                         transformers=[
                             ("num", self.numeric_transformer, self.ctn_cols),
                             (
                                 "cat",
                                 self.categorical_transformer,
+                                # onehot is combined so we take the difference again
                                 lambda X: [
                                     col for col in X.columns if col not in self.ctn_cols
                                 ],
