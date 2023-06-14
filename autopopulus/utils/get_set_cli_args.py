@@ -117,6 +117,12 @@ def init_cli_args() -> Namespace:
         help="Path to serialized model to load ae from checkpoint instead of training a new one.",
     )
     p.add_argument(
+        "--ae-hparams-from-checkpoint",
+        type=str,
+        default=None,
+        help="Path to params.json file serialized by Ray-Tune to load of up best tuned hparams choices dictionary.",
+    )
+    p.add_argument(
         "--method",
         type=str,
         # required=True,
@@ -128,7 +134,7 @@ def init_cli_args() -> Namespace:
     )
     p.add_argument(
         "--bootstrap-evaluate-imputer",
-        type=bool,
+        type=str2bool,
         default=False,
         help="Do bootstrap sampling to produce a distribution of metrics on the test set for autoencoder imputers.",
     )

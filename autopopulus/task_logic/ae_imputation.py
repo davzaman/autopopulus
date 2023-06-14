@@ -1,4 +1,5 @@
 from argparse import Namespace
+import json
 from typing import Dict
 from numpy import ndarray
 from pandas import DataFrame
@@ -27,7 +28,6 @@ def ae_imputation_logic(
 ) -> Dict[str, Dict[str, DataFrame]]:
     """Output: top-level lookup: static/long. second-level: train/val/test."""
     # combine two dicts python 3.5+
-    settings = AE_METHOD_SETTINGS[args.method]["train"]
 
     if args.ae_from_checkpoint:
         if args.tune_n_samples:
@@ -39,11 +39,21 @@ def ae_imputation_logic(
         ae_imputer = AEImputer.from_checkpoint(args)
         data.setup("fit")
     else:
+        settings = AE_METHOD_SETTINGS[args.method]["train"]
+        if args.ae_hparams_from_checkpoint:
+            with open(args.ae_hparams_from_checkpoint, "r") as f:
+                other_hparams = json.load(f)
+            # This is currently based on how Ray-Tune structures the params.json file
+            # Ref `dev/scripts/eval_best_on_semi_obs.py`
+            other_hparams = other_hparams["lightning_config"]["_module_init_config"]
+        else:
+            other_hparams = {}
         ae_imputer = AEImputer.from_argparse_args(
             args,
             logger=AutoencoderLogger(args),
             tune_callback=None,
             **settings,
+            **other_hparams,
         )
         if args.tune_n_samples:
             ae_imputer.tune(

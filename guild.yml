@@ -1,7 +1,7 @@
 ######################
 #     OPERATIONS     #
 ######################
-- config: high-level-flags
+- config: shared-attrs
   flags:
     method:
       required: yes
@@ -31,6 +31,15 @@
     bootstrap-evaluate-imputer:
       required: no
       type: string
+    evaluate-on-remaining-semi-observed:
+      required: no
+      type: string
+    ae-hparams-from-checkpoint:
+      required: no
+      type: string
+    tune-n-samples:
+      required: no
+      type: int
 
 # what to do when you run `guild run`
 - operations:
@@ -45,11 +54,11 @@
         config: options.yml
       flags:
         $include:
-          - high-level-flags
+          - shared-attrs
       steps:
-        - run: impute method=${method} experiment-name=${experiment-name}  fully-observed=${fully-observed} feature-map=${feature-map} percent-missing=${percent-missing} amputation-patterns=${amputation-patterns} replace-nan-with=${replace-nan-with} dataset=${dataset} bootstrap-evaluate-imputer=${bootstrap-evaluate-imputer}
-        - run: evaluate method=${method} experiment-name=${experiment-name} fully-observed=${fully-observed} feature-map=${feature-map} percent-missing=${percent-missing} amputation-patterns=${amputation-patterns} replace-nan-with=${replace-nan-with} dataset=${dataset} bootstrap-evaluate-imputer=${bootstrap-evaluate-imputer}
-        - run: predict method=${method} experiment-name=${experiment-name}  fully-observed=${fully-observed} feature-map=${feature-map} percent-missing=${percent-missing} amputation-patterns=${amputation-patterns} replace-nan-with=${replace-nan-with} dataset=${dataset}
+        - run: impute method=${method} experiment-name=${experiment-name}  fully-observed=${fully-observed} feature-map=${feature-map} percent-missing=${percent-missing} amputation-patterns=${amputation-patterns} replace-nan-with=${replace-nan-with} dataset=${dataset} bootstrap-evaluate-imputer=${bootstrap-evaluate-imputer} evaluate-on-remaining-semi-observed=${evaluate-on-remaining-semi-observed} ae-hparams-from-checkpoint=${ae-hparams-from-checkpoint} tune-n-samples=${tune-n-samples}
+        - run: evaluate method=${method} experiment-name=${experiment-name} fully-observed=${fully-observed} feature-map=${feature-map} percent-missing=${percent-missing} amputation-patterns=${amputation-patterns} replace-nan-with=${replace-nan-with} dataset=${dataset} bootstrap-evaluate-imputer=${bootstrap-evaluate-imputer} evaluate-on-remaining-semi-observed=${evaluate-on-remaining-semi-observed} ae-hparams-from-checkpoint=${ae-hparams-from-checkpoint} tune-n-samples=${tune-n-samples}
+        - run: predict method=${method} experiment-name=${experiment-name}  fully-observed=${fully-observed} feature-map=${feature-map} percent-missing=${percent-missing} amputation-patterns=${amputation-patterns} replace-nan-with=${replace-nan-with} dataset=${dataset} evaluate-on-remaining-semi-observed=${evaluate-on-remaining-semi-observed} ae-hparams-from-checkpoint=${ae-hparams-from-checkpoint} tune-n-samples=${tune-n-samples}
 
     impute:
       description: Train an imputer and run predictions.
@@ -64,7 +73,7 @@
         - config: options.yml
       flags:
         $include:
-          - high-level-flags
+          - shared-attrs
       
     predict:
       description: Run predictions on imputed data.
@@ -81,7 +90,7 @@
           target-type: link # tells Guild to link ot the resolved files, not copy
       flags:
         $include:
-          - high-level-flags
+          - shared-attrs
 
     evaluate:
       description: Evaluate/test an imputer (autoencoders only).
@@ -98,4 +107,4 @@
           target-type: link # tells Guild to link ot the resolved files, not copy
       flags:
         $include:
-          - high-level-flags
+          - shared-attrs
