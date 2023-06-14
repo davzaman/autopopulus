@@ -32,7 +32,7 @@ feature_mapping_variational = ["target_encode_categorical"]
 imputer_groups = {
     "none": "none",
     # "baseline_imputers" :["simple","mice", "knn"],
-    "baseline": ["simple", "mice"],
+    "baseline": ["simple", "knn"],
     "ae": ["vanilla", "dae", "batchswap"],
     "variational": ["vae", "dvae"],
 }
