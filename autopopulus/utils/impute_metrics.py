@@ -290,10 +290,10 @@ class CategoricalErrorMetric(Metric):
         predicted_cats = self.get_categories(preds)
         target_cats = self.get_categories(target)
 
-        correct = predicted_cats.ne(target_cats).to(int)
+        wrong = predicted_cats.ne(target_cats).to(int)
         if missing_indicators is not None:
             missing_indicators = self.get_categories(missing_indicators)
-            correct *= missing_indicators
+            wrong *= missing_indicators
             count = self.sum_fn(missing_indicators)
         else:
             count = torch.tensor(
@@ -301,7 +301,7 @@ class CategoricalErrorMetric(Metric):
                 target_cats.size()[0] if self.columnwise else target_cats.numel(),
                 device=self.device,
             )
-        self.num_wrong += self.sum_fn(correct)
+        self.num_wrong += self.sum_fn(wrong)
         self.total += count
 
     def compute(self) -> float:
