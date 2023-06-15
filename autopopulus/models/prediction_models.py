@@ -1,6 +1,7 @@
 from timeit import default_timer as timer
 from typing import Callable, List, Dict, Any, Optional, Tuple, Union
 from tqdm import tqdm
+from cloudpickle import dump, load
 from argparse import ArgumentParser, Namespace
 from pandas import DataFrame, MultiIndex, Series, concat
 from numpy import ndarray, logspace, mean
@@ -47,7 +48,12 @@ from sktime.transformations.panel.tsfresh import TSFreshFeatureExtractor
 from autopopulus.data.constants import PATIENT_ID
 from autopopulus.data.types import DataTypeTimeDim
 from autopopulus.utils.cli_arg_utils import YAMLStringListToList
-from autopopulus.utils.log_utils import PREDICT_METRIC_TAG_FORMAT, BasicLogger
+from autopopulus.utils.log_utils import (
+    PREDICT_METRIC_TAG_FORMAT,
+    SERIALIZED_PREDICTOR_FORMAT,
+    BasicLogger,
+    get_serialized_model_path,
+)
 from autopopulus.models.evaluation import (
     bootstrap_confidence_interval,
     shapiro_wilk_test,
@@ -177,6 +183,7 @@ class Predictor(TransformerMixin, CLIInitialized):
         )
 
     # TODO: incorporate TunableEstimator
+    # TODO: separate evaluation/logging with fitting
     def fit(self, X: Dict[str, DataFrame], y: Dict[str, DataFrame]):
         bootstrap_metrics = []
         # Need to concat train and val for hold-out validation with sklearn
@@ -212,33 +219,37 @@ class Predictor(TransformerMixin, CLIInitialized):
                 cv=holdout_validation_split,
                 n_jobs=-1,
             )
+            # Run GridSearch on concatenated train+val
+            rank_zero_print(f"Starting fit of {model}")
+            start = timer()
+            try:
+                cv.fit(X_tune, y_tune)
+            except ValueError:  # lightgbm has a weird issue with column names.
+                # https://github.com/autogluon/autogluon/issues/399#issuecomment-623326629
+                cv.fit(
+                    X_tune.rename(columns=lambda x: re.sub("[^A-Za-z0-9_]+", "", x)),
+                    y_tune,
+                )
+            rank_zero_print(f"Fit took {timer() - start} seconds.")
 
+            ## Evaluation ##
+            preds = cv.predict(X_eval)
+            pred_probas = cv.predict_proba(X_eval)[:, 1]
+            self.save_model(modeln, cv.best_estimator_)
             # Create N seeds using the original seed for each bootstrap
             gen = default_rng(self.seed)
             bootstrap_seeds = gen.integers(0, 10000, self.num_bootstraps)
             for b in tqdm(range(self.num_bootstraps)):
-                X_boot, y_boot = resample(
-                    X_tune, y_tune, stratify=y_tune, random_state=bootstrap_seeds[b]
+                preds_boot, pred_probas_boot, true_boot = resample(
+                    preds,
+                    pred_probas,
+                    y_eval,
+                    stratify=y_eval,
+                    random_state=bootstrap_seeds[b],
                 )
 
-                # Run GridSearch on concatenated train+val
-                rank_zero_print(f"Starting fit of {model}")
-                start = timer()
-                try:
-                    cv.fit(X_boot, y_boot)
-                except ValueError:  # lightgbm has a weird issue with column names.
-                    # https://github.com/autogluon/autogluon/issues/399#issuecomment-623326629
-                    cv.fit(
-                        X_boot.rename(
-                            columns=lambda x: re.sub("[^A-Za-z0-9_]+", "", x)
-                        ),
-                        y_boot,
-                    )
-                rank_zero_print(f"Fit took {timer() - start} seconds.")
                 # Evaluate on best model
-                metric_results = self.evaluate(
-                    y_eval, cv.predict(X_eval), cv.predict_proba(X_eval)[:, 1]
-                )
+                metric_results = self.evaluate(true_boot, preds_boot, pred_probas_boot)
                 # plot across all bootstraps
                 self.logger.add_scalars(
                     metric_results,
@@ -337,6 +348,18 @@ class Predictor(TransformerMixin, CLIInitialized):
             model_cls = model_metadata["cls"]
             models.append(model_cls(**model_kwargs))
         return models
+
+    def save_model(self, modeln: str, estimator: BaseEstimator):
+        with open(
+            get_serialized_model_path(SERIALIZED_PREDICTOR_FORMAT.format(model=modeln)),
+            "wb",
+        ) as f:
+            dump(estimator, f)
+
+    def load_model(self, model_path: str) -> BaseEstimator:
+        with open(model_path, "rb") as f:
+            estimator = load(f)
+        return estimator
 
     ###################
     #     HELPERS     #
