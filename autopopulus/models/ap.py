@@ -29,6 +29,7 @@ from pytorch_lightning.strategies.strategy import Strategy
 from pytorch_lightning.loggers import Logger
 
 from autopopulus.task_logic.utils import ImputerT, get_tune_metric
+from autopopulus.utils.cli_arg_utils import str2bool
 
 # from pl_bolts.callbacks import ModuleDataMonitor, BatchGradientVerificationCallback
 
@@ -38,7 +39,7 @@ warnings.filterwarnings(action="ignore", category=LightningDeprecationWarning)
 from autopopulus.models.ae import AEDitto
 from autopopulus.utils.log_utils import (
     IMPUTE_METRIC_TAG_FORMAT,
-    SERIALIZED_MODEL_FORMAT,
+    SERIALIZED_AE_IMPUTER_MODEL_FORMAT,
     TUNE_LOG_DIR,
     AutoencoderLogger,
     copy_artifacts_from_tune,
@@ -142,7 +143,7 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         self.trainer.fit(self.ae, datamodule=data)
         self.trainer.save_checkpoint(
             get_serialized_model_path(
-                SERIALIZED_MODEL_FORMAT.format(
+                SERIALIZED_AE_IMPUTER_MODEL_FORMAT.format(
                     data_type_time_dim=self.data_type_time_dim.name
                 ),
                 "pt",
@@ -321,7 +322,8 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         trainer_overrides: Optional[Dict[str, Any]] = None,
         callback_overrides: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """This MUST get called after data.setup("fit")!!!!"""
+        # TODO: write tests.
+        """This MUST get called after data.setup("fit") if data is not None!!!!"""
 
         trainer_args = {
             "logger": self.logger,
@@ -428,7 +430,7 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         best_model: pl.LightningModule = checkpoint.get_model(AEDitto)
         self.ae = best_model
         model_log_path = get_serialized_model_path(
-            SERIALIZED_MODEL_FORMAT.format(
+            SERIALIZED_AE_IMPUTER_MODEL_FORMAT.format(
                 data_type_time_dim=self.data_type_time_dim.name
             ),
             "pt",
@@ -576,7 +578,7 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         )
         p.add_argument(
             "--model-monitoring",
-            type=bool,
+            type=str2bool,
             default=False,
             help="Adds callbacks to the trainer to monitor the gradient and data passed to the model amongst other checks.",
         )

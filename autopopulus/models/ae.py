@@ -1041,11 +1041,12 @@ class AEDitto(LightningModule):
             default=None,
             help="When training the autoencoder, what dropout to use (if at all) between layers.",
         )
+        # TODO: set these all to none os that the defaults are properly defined by the function defaults?
         p.add_argument(
             "--lossn",
             type=str,
             choices=LOSS_CHOICES,
-            default="BCE",
+            default="CEMAAPE",
             help="When training the autoencoder, what type of loss to use.",
         )
         p.add_argument(

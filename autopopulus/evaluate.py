@@ -14,7 +14,7 @@ from autopopulus.task_logic.baseline_imputation import evaluate_baseline_imputat
 from autopopulus.task_logic.utils import AE_METHOD_SETTINGS, ImputerT
 from autopopulus.utils.get_set_cli_args import init_cli_args, load_cli_args
 from autopopulus.utils.log_utils import (
-    SERIALIZED_MODEL_FORMAT,
+    SERIALIZED_AE_IMPUTER_MODEL_FORMAT,
     get_serialized_model_path,
 )
 from autopopulus.utils.utils import (
@@ -81,7 +81,7 @@ def evaluate_autoencoder_imputer(args: Namespace):
     imputer = AEImputer.from_checkpoint(
         args,
         get_serialized_model_path(
-            SERIALIZED_MODEL_FORMAT.format(
+            SERIALIZED_AE_IMPUTER_MODEL_FORMAT.format(
                 data_type_time_dim=args.data_type_time_dim.name
             ),
             "pt",

@@ -43,11 +43,14 @@ BASELINE_DATA_SETTINGS: Dict[str, Any] = {
 
 
 AE_METHOD_SETTINGS: Dict[str, Dict[str, Dict[str, Any]]] = {
-    "vanilla": {"train": {}},
-    "dae": {"train": {"dropout_corruption": 0.3}},
-    "batchswap": {"train": {"batchswap_corruption": 0.3}},
-    "vae": {"train": {"variational": True}},
-    "dvae": {"train": {"dropout_corruption": 0.3, "variational": True}},
+    "vanilla": {"train": {}, "data": {"scale": True}},
+    "dae": {"train": {"dropout_corruption": 0.3}, "data": {"scale": True}},
+    "batchswap": {"train": {"batchswap_corruption": 0.3}, "data": {"scale": True}},
+    "vae": {"train": {"variational": True}, "data": {"scale": True}},
+    "dvae": {
+        "train": {"dropout_corruption": 0.3, "variational": True},
+        "data": {"scale": True},
+    },
     "ap_new": {
         "data": {
             "scale": True,

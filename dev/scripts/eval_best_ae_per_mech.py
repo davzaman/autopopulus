@@ -3,11 +3,6 @@ from os.path import join
 import pandas as pd
 from guild.run import Run
 
-from autopopulus.utils.log_utils import (
-    SERIALIZED_MODEL_FORMAT,
-    get_serialized_model_path,
-)
-
 
 def get_best_performance_per_mechanism(
     impute_data: pd.DataFrame,
@@ -63,6 +58,6 @@ if __name__ == "__main__":
     )
     best_for_mech = get_best_performance_per_mechanism(impute_data)
     for run in best_for_mech["run"]:
-        # TODO: ensure no duplicates for semi_observed? + log the mechanism it was best for?
+        # want to rerun per mechanism even if the autoencoder type is the same
         eval_best_on_semi_observed(run)
         eval_best_bootstrap(run)
