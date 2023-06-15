@@ -24,6 +24,7 @@ from autopopulus.utils.log_utils import (
 STATIC_BASELINE_METHODS = ["knn", "mice", "simple", "none"]
 # Even if it cannot be tuned, so that I have a list of reference of what counts as baseline.
 # TODO[LOW]: add one for longitudinal
+# These should work for both ctn and cat versions, or else put them in the ignore list of MixedFeatureImputer
 STATIC_BASELINE_IMPUTER_MODEL_PARAM_GRID: Dict[ABCMeta, Dict[str, List[Any]]] = {
     KNNImputer: {
         "n_neighbors": [3, 5, 10],

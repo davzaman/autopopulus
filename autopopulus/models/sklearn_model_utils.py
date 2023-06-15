@@ -33,11 +33,16 @@ class MixedFeatureImputer(TransformerMixin, BaseEstimator):
         onehot_groupby: Dict[int, str],
         numeric_transformer: _BaseImputer = SimpleImputer(strategy="mean"),
         categorical_transformer: _BaseImputer = SimpleImputer(strategy="most_frequent"),
+        numeric_ignore_params: List[str] = [],
+        categorical_ignore_params: List[str] = [],
     ):
         self.numeric_transformer = numeric_transformer
         self.categorical_transformer = categorical_transformer
         self.onehot_groupby = onehot_groupby
         self.ctn_cols = ctn_cols
+        # params to ignore when creating param grid
+        self.numeric_ignore_params = numeric_ignore_params
+        self.categorical_ignore_params = categorical_ignore_params
 
     def fit(self, X: DataFrame, y: Optional[Series] = None) -> "MixedFeatureImputer":
         self.columns = list(X.columns)
@@ -95,10 +100,12 @@ class MixedFeatureImputer(TransformerMixin, BaseEstimator):
             **{
                 f"numeric_transformer__{param_name}": param_values
                 for param_name, param_values in numeric_tune_kwargs.items()
+                if param_name not in self.numeric_ignore_params
             },
             **{
                 f"categorical_transformer__{param_name}": param_values
                 for param_name, param_values in categorical_tune_kwargs.items()
+                if param_name not in self.categorical_ignore_params
             },
         }
 

@@ -51,6 +51,7 @@ def knn(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
             categorical_transformer=KNNImputer(
                 n_neighbors=1,  # any more than that and it'll take the average
             ),
+            categorical_ignore_params=["n_neighbors", "weights"],
         ),
         score_fn=TransformScorer(
             get_tune_metric(ImputerT.BASELINE, data, "original"),
@@ -63,6 +64,7 @@ def knn(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
     with open(get_serialized_model_path("knn"), "wb") as f:
         dump(imputer, f)
     return {
+        # TODO: this might not be necessary anymore bc of mixedfeatureimputer
         # Add columns back in (sklearn erases) for rmse for missing only columns
         split: pd.DataFrame(
             # impute data
