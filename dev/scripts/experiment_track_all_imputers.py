@@ -47,15 +47,13 @@ replace_nan_with = ["0"]
 # chosen_methods = ["none", "baseline", "ae", "vae"]
 chosen_methods = ["baseline", "ae", "variational"]
 experiment_tracker = "guild"
-datasets = ["cure_ckd"]
+datasets = ["cure_ckd", "crrt"]
 # if use_queues nonzero, will use queues, specify the number of queues (parralellism).
 guild_use_queues: int = 1
-# fully_observed=no uses entire dataset
-all_data = False
-# fully_observed=yes will ampute and impute a missingness scenario
-fully_observed = True
-# fully_observed = False
-
+data_filtering = {
+    "cure_ckd": {"all_data": False, "fully_observed": True},
+    "crrt": {"all_data": True, "fully_observed": False},
+}
 
 # expand to individual names
 chosen_methods = [
@@ -97,6 +95,12 @@ def run_command(command_args: Dict[str, str]):
 
 
 for dataset in datasets:
+    # fully_observed=no uses entire dataset
+    all_data = data_filtering[dataset]["all_data"]
+    # fully_observed=yes will ampute and impute a missingness scenario
+    fully_observed = data_filtering[dataset]["fully_observed"]
+    # fully_observed = False
+
     if fully_observed:
         with open(f"dev/{dataset}_amputation_pattern_grid.txt", "r") as f:
             amputation_patterns = json.load(f)
