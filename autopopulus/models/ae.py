@@ -980,31 +980,37 @@ class AEDitto(LightningModule):
         # don't modify the original one passed in when inverting/etc
         pred = reconstruct_batch.clone()
         data_are_observed = (~isnan(data)).bool()
+        threshold_cat_cols: bool = True
         # get unmapped versions of everything, logging in original but data is mapped
         if (
             data_feature_space == "original"
             and self.hparams.data_feature_space == "mapped"
         ) and self.feature_map_inversion is not None:
             pred = self.feature_map_inversion(pred)
+            # if target_encode_categorical we don't want to threshold
+            # inverted values will already be in 0/1 which wen sigmoided will be <= 0.5
+            # when thresholded that means everything is predicted to be true
+            threshold_cat_cols = self.hparams.feature_map != "target_encode_categorical"
 
-        # Sigmoid/softmax and threshold but in original space
-        pred = binary_column_threshold(
-            pred,
-            self.get_col_idxs_by_type(
-                data_feature_space=data_feature_space,
-                feature_type="binary",
-                default_action=lambda: [],  # empty list if dne
-            ),
-            0.5,
-        )  # do nothing if no "binary" cols (empty list [])
-        pred = onehot_column_threshold(
-            pred,
-            self.get_col_idxs_by_type(
-                data_feature_space=data_feature_space,
-                feature_type="onehot",
-                default_action=lambda: [],  # empty list if dne
-            ),
-        )  # do nothing if no "binary" cols (empty list [])
+        if threshold_cat_cols:
+            # Sigmoid/softmax and threshold but in original space
+            pred = binary_column_threshold(
+                pred,
+                self.get_col_idxs_by_type(
+                    data_feature_space=data_feature_space,
+                    feature_type="binary",
+                    default_action=lambda: [],  # empty list if dne
+                ),
+                0.5,
+            )  # do nothing if no "binary" cols (empty list [])
+            pred = onehot_column_threshold(
+                pred,
+                self.get_col_idxs_by_type(
+                    data_feature_space=data_feature_space,
+                    feature_type="onehot",
+                    default_action=lambda: [],  # empty list if dne
+                ),
+            )  # do nothing if no "binary" cols (empty list [])
 
         # Keep original where it's not missing, otherwise fill with pred
         imputed = data.where(data_are_observed, pred)
