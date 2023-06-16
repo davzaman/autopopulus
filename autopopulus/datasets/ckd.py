@@ -189,6 +189,7 @@ class CureCKDDataLoader(AbstractDatasetLoader):
         df, labels = self.load_flattened_df()
         df = self.filter_adhoc(df)
         labels = labels[df.index]  # filter down labels too
+
         # Fix column name for egfr since it's egfr_time_mean, instead of egfr_time_egfr_mean to match the pattern of other labs
         def egfr_mean_regex(col: str) -> str:
             return re.sub(
@@ -522,7 +523,7 @@ class CureCKDDataLoader(AbstractDatasetLoader):
 
 # Testing
 if __name__ == "__main__":
-    from utils.get_set_cli_args import init_cli_args, load_cli_args
+    from autopopulus.utils.get_set_cli_args import init_cli_args, load_cli_args
     import sys
 
     load_cli_args()

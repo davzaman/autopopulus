@@ -55,8 +55,10 @@ def regex_safe_colname(coln: str) -> str:
     When looking up pd.str.contains(str) the passed str has to be regex safe.
     If a column has regex keywords in it like `+` then there's a problem.
     e.g., 'IONIZED CA++,CORRECTED_min' from crrt dataset.
+    Similar with parenthesis.
+    Chaining is fastest: https://stackoverflow.com/a/27086669/1888794
     """
-    return coln.replace("+", "\+")
+    return coln.replace("+", "\+").replace("(", "\(").replace(")", "\)")
 
 
 def onehot_multicategorical_column(

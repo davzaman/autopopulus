@@ -590,6 +590,12 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
             }
         }
 
+        assert len(self.col_idxs_by_type["original"]["continuous"]) + len(
+            self.col_idxs_by_type["original"]["categorical"]
+        ) == len(
+            self.columns["original"]
+        ), "Continuous and categorical columns given don't partition all the columns evenly."
+
         # useful for target encoding
         if self.dataset_loader.onehot_prefixes is not None:
             self.col_idxs_by_type["original"]["onehot"]: List[List[int]] = [
