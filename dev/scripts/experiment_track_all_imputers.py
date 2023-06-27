@@ -30,7 +30,7 @@ feature_mapping_variational = ["target_encode_categorical"]
 
 # maps imputer method to list of imputer names under that group
 imputer_groups = {
-    "none": "none",
+    "none": ["none"],
     # "baseline_imputers" :["simple","mice", "knn"],
     "baseline": ["simple", "knn"],
     "ae": ["vanilla", "dae", "batchswap"],
@@ -44,8 +44,7 @@ replace_nan_with = ["0"]
 ####################################
 # experiment switches: all experiments: none, baseline, ae, vae
 # can use a mix of group names and also individual ones
-# chosen_methods = ["none", "baseline", "ae", "vae"]
-chosen_methods = ["baseline", "ae", "variational"]
+chosen_methods = ["none", "baseline", "ae", "variational"]
 experiment_tracker = "guild"
 datasets = ["cure_ckd", "crrt"]
 # if use_queues nonzero, will use queues, specify the number of queues (parralellism).
@@ -68,7 +67,7 @@ def cli_str(obj) -> str:
 
 def run_command(command_args: Dict[str, str]):
     if experiment_tracker == "guild":
-        base = "guild run --force-flags main "
+        base = "guild run main "
         base += "--stage" if guild_use_queues else "--background"
         subprocess.run(
             base.split() + [f"{name}={val}" for name, val in command_args.items()]

@@ -103,9 +103,10 @@ def combine_all_guild_dfs(guild_data: Dict[str, pd.DataFrame]) -> pd.DataFrame:
                 list(
                     all_info["amputation-patterns"]
                     .apply(string_json_to_python)
-                    .apply(lambda l: l[0])
+                    .apply(lambda l: l[0] if l is not None else l)
+                    .dropna()
                 ),
-                index=all_info.index,
+                index=all_info[all_info["amputation-patterns"].notna()].index,
             )
             .assign(num_incomplete_vars=lambda df: df["incomplete_vars"].apply(len))
             .assign(
