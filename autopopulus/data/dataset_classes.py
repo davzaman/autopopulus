@@ -1175,10 +1175,13 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
                         else:
                             split_data[data_feature_space][data_role] = split_dfs[split]
 
-        return self._create_dataloader(split_data, apply_transform_adhoc)
+        return self._create_dataloader(split, split_data, apply_transform_adhoc)
 
     def _create_dataloader(
-        self, split_data: Dict[str, Dict[str, DataFrame]], apply_transform_adhoc: bool
+        self,
+        split: str,
+        split_data: Dict[str, Dict[str, DataFrame]],
+        apply_transform_adhoc: bool,
     ) -> DataLoader:
         """Packages data for pytorch Dataset/DataLoader."""
         is_longitudinal = self.data_type_time_dim in (
@@ -1197,9 +1200,9 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
             dataset,
             collate_fn=self._batch_collate if is_longitudinal else None,
             batch_size=self.batch_size,
-            shuffle=False,
-            prefetch_factor=256,
-            persistent_workers=True,
+            shuffle=split == "train",
+            # prefetch_factor=256,
+            persistent_workers=False,
             num_workers=self.num_workers,
             # don't use pin memory: https://discuss.pytorch.org/t/dataloader-method-acquire-of-thread-lock-objects/52943
             pin_memory=True,
