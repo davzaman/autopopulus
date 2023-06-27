@@ -1018,6 +1018,9 @@ class TestCommonDataModule(unittest.TestCase):
             rng.random((5, 5)), columns=["bin", "mult1", "ctn1", "mult2", "ctn2"]
         )
         nsamples = len(df)
+        df["bin"] = rng.integers(0, 2, nsamples)
+        df["mult1"] = rng.integers(0, 3, nsamples)
+        df["mult2"] = rng.integers(0, 2, nsamples)
         y = pd.Series(rng.integers(0, 2, nsamples))  # random binary outcome
         datasetloader_args = (df, y, hypothesis["ctn_cols"], hypothesis["cat_cols"])
 
