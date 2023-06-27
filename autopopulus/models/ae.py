@@ -668,7 +668,10 @@ class AEDitto(LightningModule):
         self.build_decoder()
 
     def set_feature_map_inversion(self, feature_map: str):
-        """Lambdas are not pickle-able for checkpointing, so dynamically set."""
+        """
+        NOTE: inversion should put columns back in order in original space.
+        Lambdas are not pickle-able for checkpointing, so dynamically set.
+        """
         # Safe to assume "mapped" key exists for these feature maps
         if feature_map == "discretize_continuous":
             self.feature_map_inversion = (
@@ -807,9 +810,6 @@ class AEDitto(LightningModule):
             assert self.hparams.col_idxs_by_type[
                 self.hparams.data_feature_space
             ], "Failed to get indices of continuous and categorical columns. Likely failed to pass list of columns and list of continuous columns. This is required for CEMSE and CEMAAPE loss."
-            assert (
-                self.hparams.feature_map != "discretize_continuous"
-            ), "Passed a loss of CEMSE or CEMAAPE but indicated you discretized the data. These cannot both happen (since if all the data is discretized you want to use BCE loss instead)."
         # for now do not support vae with categorical features
         # TODO: create VAE prior/likelihood for fully categorical features, or beta-div instead.
         if self.hparams.variational:
@@ -822,9 +822,6 @@ class AEDitto(LightningModule):
             ) == 0 or (
                 self.hparams.feature_map == "target_encode_categorical"
             ), "Indicated you wanted to use a variational autoencoder and also have categorical features, but these cannot be used togther."
-            assert (
-                self.hparams.lossn != "CEMSE" and self.hparams.lossn != "CEMAAPE"
-            ), "Indicated CEMSE / CEMAAPE loss which refers to mixed data loss, but also indicated you want to use a variational autoencoder which only support continuous features."
 
         if self.hparams.feature_map == "discretize_continuous":
             assert (
@@ -968,7 +965,8 @@ class AEDitto(LightningModule):
         """
         Assumes all tensors passed in are detached.
         This function should not mutate the inputs.
-        1. Invert any feature mapping (if passing original data when feature mapping)
+        Outputs should always be in correct column order wrt the feature space.
+        1. Invert any feature mapping (if passing original data when feature mapping), this should return columns in the order they were in in original space.
         2. sigmoid/softmax categorical columns only + threshold
         3. keep original values where it's not missing.
         """
