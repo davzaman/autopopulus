@@ -10,7 +10,8 @@ import torch
 from torch.utils.data import DataLoader
 
 from ray import tune, air
-from ray.tune.schedulers import ASHAScheduler
+from ray.tune.schedulers import ASHAScheduler, ResourceChangingScheduler
+from ray.tune.schedulers.resource_changing_scheduler import DistributeResources
 from ray.air.config import RunConfig, ScalingConfig, CheckpointConfig
 from ray.train.lightning import (
     LightningTrainer,
@@ -191,12 +192,11 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         # More workers means more parallel dataloading, but more overhead (slower start).
         ncpu_per_gpu = total_cpus_on_machine // total_gpus_on_machine
         scaling_config = ScalingConfig(
-            num_workers=min(4, ncpu_per_gpu),
+            num_workers=min(n_gpus_per_trial, self.num_gpus),
             use_gpu=self.num_gpus > 0,
-            # TODO: should cpu be 1?
             resources_per_worker={
-                "CPU": int(0.8 * ncpu_per_gpu),
-                "GPU": min(n_gpus_per_trial, self.num_gpus),
+                "CPU": ncpu_per_gpu - 1,  # It needs 1 to manage things
+                "GPU": 1,
             },
         )
         # set up the model without the param grid params
@@ -233,7 +233,10 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
             tune_config=tune.TuneConfig(
                 metric=tune_metric,
                 mode="min",
-                scheduler=ASHAScheduler(),
+                scheduler=ResourceChangingScheduler(
+                    base_scheduler=ASHAScheduler(),
+                    resources_allocation_function=DistributeResources(add_bundles=True),
+                ),
                 num_samples=tune_n_samples,
                 trial_name_creator=lambda trial: trial.trial_id,
             ),
@@ -332,7 +335,7 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
             "num_nodes": self.num_nodes,
             "devices": self.num_gpus,
             # https://pytorch-lightning.readthedocs.io/en/stable/accelerators/gpu_intermediate.html#distributed-and-16-bit-precision
-            "precision": 16,
+            "precision": "16-mixed",
             "enable_checkpointing": False,
             "strategy": self.strategy,
             "profiler": self.profiler,
