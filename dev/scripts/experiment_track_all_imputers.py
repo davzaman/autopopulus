@@ -1,9 +1,17 @@
-from typing import Any, Dict
+from csv import DictWriter
+from os import name as os_name
+from os.path import join, basename
+import time
+from typing import Any, Dict, List, Tuple
 import json
 import re
 import sys
 import itertools
 import subprocess
+import asyncio
+from asyncio.subprocess import PIPE
+
+import mlflow
 
 # Enforce you're in the right env
 output = subprocess.run(["conda", "list"], stdout=subprocess.PIPE).stdout.decode(
@@ -61,6 +69,116 @@ chosen_methods = [
 ]
 
 
+async def read_stream_and_display(stream, display) -> bytes:
+    """
+    Read from stream line by line until EOF, display, and capture the lines.
+    Ref: https://stackoverflow.com/a/25960956/1888794
+    """
+    output = []
+    while True:
+        line = await stream.readline()
+        if not line:
+            break
+        output.append(line)
+        display(line)  # assume it doesn't block
+    return b"".join(output)
+
+
+async def read_and_display(*cmd) -> Tuple[int, bytes, bytes]:
+    """
+    Capture cmd's stdout, stderr while displaying them as they arrive (line by line).
+    Ref: https://stackoverflow.com/a/25960956/1888794
+    """
+    # start process
+    process = await asyncio.create_subprocess_exec(*cmd, stdout=PIPE, stderr=PIPE)
+
+    # read child's stdout/stderr concurrently (capture and display)
+    try:
+        stdout, stderr = await asyncio.gather(
+            read_stream_and_display(process.stdout, sys.stdout.buffer.write),
+            read_stream_and_display(process.stderr, sys.stderr.buffer.write),
+        )
+    except Exception:
+        process.kill()
+        raise
+    finally:
+        # wait for the process to exit
+        rc = await process.wait()
+    return (rc, stdout, stderr)
+
+
+class RunManager:
+    def __init__(self, append: bool = True) -> None:
+        # run the event loop
+        if os_name == "nt":
+            self.loop = asyncio.ProactorEventLoop()  # for subprocess' pipes on Windows
+            asyncio.set_event_loop(self.loop)
+        else:
+            self.loop = asyncio.get_event_loop()
+
+        self.progress_file = "run_progress.csv"
+        self.field_names = [
+            "return_code",
+            "command",
+            "run_id",
+            "timestamp",
+            "method",
+            "dataset",
+            "fully-observed",
+            "replace-nan-with",
+            "feature-map",
+            "percent-missing",
+            "amputation-patterns",
+            "bootstrap-evaluate-imputer",
+        ]
+        with open(self.progress_file, "a" if append else "w", newline="") as csvfile:
+            writer = DictWriter(csvfile, fieldnames=self.field_names)
+            writer.writeheader()
+
+    def __del__(self):
+        self.close()
+
+    def close(self):
+        self.loop.close()
+
+    def run(self, pyfile: str, command_args: Dict[str, Any]) -> str:
+        command = [sys.executable, pyfile]
+        for name, val in command_args.items():
+            command += [f"--{name}", cli_str(val)]
+
+        rc, parent_hash = self.run_and_save_output(command, run_name=basename(pyfile))
+
+        with open(self.progress_file, "a") as csvfile:
+            writer = DictWriter(  # ignore parent-hash
+                csvfile, fieldnames=self.field_names, extrasaction="ignore"
+            )
+            writer.writerow(
+                {
+                    "return_code": rc,
+                    "command": " ".join(command),
+                    "run_id": parent_hash,
+                    "timestamp": time.strftime("%d-%m-%Y %H:%M:%S"),
+                    **command_args,
+                }
+            )
+
+        return parent_hash
+
+    def run_and_save_output(self, cmd: List[str], run_name: str) -> Tuple[int, str]:
+        rc, stdout, stderr = self.loop.run_until_complete(read_and_display(*cmd))
+        stdout, stderr = stdout.decode("utf-8"), stderr.decode("utf-8")
+        parent_hash = re.search(r"(?:Logger Hash: )(\w+)\b", str(stdout)).groups()[-1]
+        if parent_hash:
+            artifact_path = mlflow.get_run(
+                run_id=parent_hash
+            ).info.artifact_uri.replace("file://", "")
+            with open(join(artifact_path, f"{run_name}.log"), "w") as f:
+                f.write(stdout)
+            with open(join(artifact_path, f"{run_name}.err"), "w") as f:
+                f.write(stderr)
+        return (rc, parent_hash)
+
+
 def cli_str(obj) -> str:
     # format for split() also same thign for CLI. the str repr of lists/etc has spaces which will create problems.
     return str(obj).replace(" ", "")
@@ -76,6 +194,9 @@ def product_dict(**kwargs):
         yield dict(zip(keys, instance))
 
 
+run_manager = RunManager()
+
+
 def run_command(command_args: Dict[str, Any]):
     if experiment_tracker == "guild":
         base = "guild run main "
@@ -86,19 +207,10 @@ def run_command(command_args: Dict[str, Any]):
         )
     else:
         for command_args in product_dict(**listify_command_args(command_args)):
-            command = [sys.executable, "autopopulus/impute.py"]
-            for name, val in command_args.items():
-                command += [f"--{name}", cli_str(val)]
-            output = subprocess.run(command, stdout=subprocess.PIPE).stdout.decode(
-                "utf-8"
-            )
-            parent_hash = re.search(r"(?:Logger Hash: )(\w+)\b", str(output)).groups()[
-                -1
-            ]
-            command[1] = "autopopulus/evaluate.py"
-            subprocess.run(command + ["--parent-hash", parent_hash])
-            command[1] = "autopopulus/predict.py"
-            subprocess.run(command + ["--parent-hash", parent_hash])
+            parent_hash = run_manager.run("autopopulus/impute.py", command_args)
+            sub_command_args = {**command_args, "parent-hash": parent_hash}
+            run_manager.run("autopopulus/evaluate.py", sub_command_args)
+            run_manager.run("autopopulus/predict.py", sub_command_args)
 
 
 for dataset in datasets:
@@ -158,6 +270,8 @@ for dataset in datasets:
                     "amputation-patterns": amputation_patterns,
                 }
                 run_command(fully_observed_command_args)
+
+run_manager.close()
 
 if experiment_tracker == "guild" and guild_use_queues:
     print("======================================================")
