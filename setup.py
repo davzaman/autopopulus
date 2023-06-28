@@ -47,6 +47,7 @@ setup(
             "snakeviz",
             "filprofiler",
             "aim",
+            "mlflow",
             "pip-chill",
         ]
     },

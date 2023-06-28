@@ -2,10 +2,6 @@ from argparse import Namespace
 from typing import Callable, Dict, List, Optional, Union
 from pandas import DataFrame
 import numpy as np
-import pickle as pk
-from os import makedirs
-from os.path import dirname
-from pyparsing import col
 from torchmetrics import MetricCollection
 from tqdm import tqdm
 from numpy.random import default_rng
@@ -17,7 +13,7 @@ from autopopulus.utils.log_utils import (
     IMPUTE_METRIC_TAG_FORMAT,
     MIXED_FEATURE_METRIC_FORMAT,
     BasicLogger,
-    get_serialized_model_path,
+    dump_artifact,
 )
 from autopopulus.task_logic import (
     baseline_static_imputation,
@@ -79,24 +75,20 @@ def save_test_data(args: Namespace, data: CommonDataModule):
     Same in evaluate.py.
     Save the test split (same as AE saving test dataloader) + aux info.
     """
-    test_dataloader_path = get_serialized_model_path(
-        f"{args.data_type_time_dim.name}_test_dataloader", "pt"
+    dump_artifact(
+        {
+            "data": data.splits["data"]["test"],
+            "ground_truth": data.splits["ground_truth"]["test"],
+            "col_idxs_by_type": data.col_idxs_by_type["original"],
+            "semi_observed_training": (
+                True
+                if data.evaluate_on_remaining_semi_observed
+                else data.semi_observed_training
+            ),
+        },
+        objn=f"{args.data_type_time_dim.name}_test_dataloader",
+        ftype="pt",
     )
-    makedirs(dirname(test_dataloader_path), exist_ok=True)
-    with open(test_dataloader_path, "wb") as file:
-        pk.dump(
-            {
-                "data": data.splits["data"]["test"],
-                "ground_truth": data.splits["ground_truth"]["test"],
-                "col_idxs_by_type": data.col_idxs_by_type["original"],
-                "semi_observed_training": (
-                    True
-                    if data.evaluate_on_remaining_semi_observed
-                    else data.semi_observed_training
-                ),
-            },
-            file,
-        )
 
 
 def get_baseline_metrics(col_idxs_by_type) -> List[Dict[str, Union[str, Callable]]]:

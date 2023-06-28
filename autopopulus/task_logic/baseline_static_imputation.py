@@ -4,7 +4,6 @@ from typing import Dict
 
 import miceforest as mf
 import pandas as pd
-from cloudpickle import dump
 
 ## Sklearn
 # Required for IterativeImputer, as it's experimental
@@ -15,7 +14,7 @@ from sklearn.tree import DecisionTreeClassifier
 ## Local Modules
 from autopopulus.data import CommonDataModule
 from autopopulus.models.sklearn_model_utils import MixedFeatureImputer
-from autopopulus.utils.log_utils import get_serialized_model_path
+from autopopulus.utils.log_utils import dump_artifact
 from autopopulus.models.sklearn_model_utils import TransformScorer, TunableEstimator
 from autopopulus.task_logic.utils import (
     ImputerT,
@@ -34,8 +33,7 @@ def simple(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
         onehot_groupby=data.groupby["original"]["categorical_onehots"],
     )
     imputer.fit(data.splits["data"]["train"])
-    with open(get_serialized_model_path("simple"), "wb") as f:
-        dump(imputer, f)
+    dump_artifact(imputer, "simple")
     return {  # impute data
         split: imputer.transform(data.splits["data"][split])
         for split in ["train", "val", "test"]
@@ -61,8 +59,7 @@ def knn(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
     )
     imputer.fit(data.splits["data"], data.splits["ground_truth"])
     # need to pickle with cloudpickle bc score_fn is lambda
-    with open(get_serialized_model_path("knn"), "wb") as f:
-        dump(imputer, f)
+    dump_artifact(imputer, "knn")
     return {
         # TODO: this might not be necessary anymore bc of mixedfeatureimputer
         # Add columns back in (sklearn erases) for rmse for missing only columns
@@ -97,8 +94,7 @@ def mice(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
         ),
     )
     imputer.fit(data.splits["data"], data.splits["ground_truth"])
-    with open(get_serialized_model_path("mice"), "wb") as f:
-        dump(imputer, f)
+    dump_artifact(imputer, "mice")
     return {
         # Add columns back in (sklearn erases) for rmse for missing only columns
         split: pd.DataFrame(
@@ -125,6 +121,6 @@ def miceforest(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFram
     X_test = imputer.impute_new_data(data.splits["data"]["test"]).complete_data()
 
     # Serialize Model
-    dump(imputer, get_serialized_model_path("miceforest"))
+    dump_artifact(imputer, "miceforest")
 
     return {"train": X_train, "val": X_val, "test": X_test}

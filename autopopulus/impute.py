@@ -1,7 +1,5 @@
-import pickle as pk
 from argparse import Namespace
-from os import makedirs
-from os.path import dirname, join
+import sys
 from typing import Callable
 
 #### Traceback ####
@@ -28,7 +26,12 @@ from autopopulus.task_logic.utils import (
     ImputerT,
 )
 from autopopulus.utils.get_set_cli_args import init_cli_args, load_cli_args
-from autopopulus.utils.log_utils import init_sys_logger
+from autopopulus.utils.log_utils import (
+    dump_artifact,
+    init_sys_logger,
+    mlflow_end,
+    mlflow_init,
+)
 from autopopulus.utils.utils import rank_zero_print, seed_everything
 
 
@@ -41,13 +44,16 @@ def get_imputation_logic(args: Namespace) -> Callable[[Namespace, DataT], None]:
 
 
 def main():
+    orig_command = sys.argv.copy()
     load_cli_args()
     args = init_cli_args()
+    setattr(args, "orig_command", orig_command)
     # if args.verbose:
     #     rank_zero_print(args)
     seed_everything(args.seed)
 
     init_sys_logger()
+    mlflow_init(args)
 
     # Assumes dataset name is kosher from argparse
     data_loader = DATA_LOADERS[args.dataset].from_argparse_args(args)
@@ -69,10 +75,8 @@ def main():
 
     imputed_data = get_imputation_logic(args)(args, data)
     labels = data.splits["label"]
-    pickled_imputed_data_path = join("serialized_models", "imputed_data.pkl")
-    makedirs(dirname(pickled_imputed_data_path), exist_ok=True)
-    with open(pickled_imputed_data_path, "wb") as file:
-        pk.dump((imputed_data, labels), file)
+    dump_artifact((imputed_data, labels), "imputed_data", "pkl")
+    mlflow_end()
 
 
 if __name__ == "__main__":

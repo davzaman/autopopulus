@@ -13,6 +13,7 @@ from ray import tune, air
 from ray.tune.schedulers import ASHAScheduler, ResourceChangingScheduler
 from ray.tune.schedulers.resource_changing_scheduler import DistributeResources
 from ray.air.config import RunConfig, ScalingConfig, CheckpointConfig
+from ray.air.integrations.mlflow import MLflowLoggerCallback
 from ray.train.lightning import (
     LightningTrainer,
     LightningConfigBuilder,
@@ -27,7 +28,7 @@ from pytorch_lightning.utilities.rank_zero import LightningDeprecationWarning
 from pytorch_lightning.callbacks import Callback
 from pytorch_lightning.profilers import Profiler
 from pytorch_lightning.strategies.strategy import Strategy
-from pytorch_lightning.loggers import Logger
+from pytorch_lightning.loggers import Logger, MLFlowLogger
 
 from autopopulus.task_logic.utils import ImputerT, get_tune_metric
 from autopopulus.utils.cli_arg_utils import str2bool
@@ -148,7 +149,8 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
                     data_type_time_dim=self.data_type_time_dim.name
                 ),
                 "pt",
-                self.trial_num,
+                trial_num=self.trial_num,
+                run_id=self.logger.run_id,
             ),
         )
         self._save_test_data(data)
@@ -172,9 +174,20 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         # TODO[LOW]: This should be changed to be more easily in sync with get_args_from_data
         data_feature_space = "mapped" if "mapped" in data.groupby else "original"
         tune_metric: str = get_tune_metric(ImputerT.AE, data, data_feature_space)
+
+        tune_callbacks = None
+        if isinstance(self.logger, MLFlowLogger):
+            # https://docs.ray.io/en/latest/tune/examples/tune-mlflow.html#mlflow-logger-api
+            # it refers back to the parent run we want to keep after we toss the tune dir away. the mlflow tune runs will remain but no artifacts
+            tune_callbacks = [
+                MLflowLoggerCallback(
+                    experiment_name="Tuning", tags={"parent": self.logger._run_id}
+                )
+            ]
         #### Setup LightningTrainer ####
         run_config = RunConfig(
             name=experiment_name,
+            callbacks=tune_callbacks,
             # TODO: if i'm doing keep=1 do i need this?
             local_dir=TUNE_LOG_DIR,
             # define AIR CheckpointConfig to properly save checkpoints in AIR format.
@@ -244,7 +257,7 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         )
         result = tuner.fit()
         best_result: air.Result = result.get_best_result(metric=tune_metric, mode="min")
-        self._save_artifacts_from_tune(best_result)
+        self._save_artifacts_from_tune(best_result, tune_callbacks)
         self._save_test_data(data)
         return self
 
@@ -427,7 +440,9 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
     ######################
     #    Tune Helpers    #
     ######################
-    def _save_artifacts_from_tune(self, best_result: air.Result):
+    def _save_artifacts_from_tune(
+        self, best_result: air.Result, tune_callbacks: List[Callback]
+    ):
         # Assign best model, and then copy the metrics and model to the right dir for logging
         checkpoint: LightningCheckpoint = best_result.checkpoint
         best_model: pl.LightningModule = checkpoint.get_model(AEDitto)
@@ -440,7 +455,12 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
             self.trial_num,
         )
         copy_artifacts_from_tune(
-            best_result, model_path=model_log_path, metric_path=self.logger.save_dir
+            best_result,
+            model_path=model_log_path,
+            logger=self.logger,
+            mlflow_callback=tune_callbacks[0]
+            if isinstance(self.logger, MLFlowLogger)
+            else None,
         )
 
     def _get_tune_grid(self, data: CommonDataModule) -> Dict[str, Any]:
@@ -476,16 +496,14 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
     @rank_zero_only
     def _save_test_data(self, data: CommonDataModule):
         if self.runtest:  # Serialize test dataloader to run in separate script
-            # Serialize data with torch but serialize model with plightning
-            torch.save(
-                data.test_dataloader(),
-                get_serialized_model_path(
-                    f"{self.data_type_time_dim.name}_test_dataloader",
-                    "pt",
-                    self.trial_num,
-                ),
-                pickle_module=cloudpickle,
+            path = get_serialized_model_path(
+                f"{self.data_type_time_dim.name}_test_dataloader",
+                "pt",
+                trial_num=self.trial_num,
+                run_id=self.logger.run_id,
             )
+            # Serialize data with torch but serialize model with plightning
+            torch.save(data.test_dataloader(), path, pickle_module=cloudpickle)
 
     @classmethod
     def from_checkpoint(
