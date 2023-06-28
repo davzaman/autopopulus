@@ -14,6 +14,7 @@ from autopopulus.task_logic.utils import AE_METHOD_SETTINGS, ImputerT
 from autopopulus.utils.get_set_cli_args import init_cli_args, load_cli_args
 from autopopulus.utils.log_utils import (
     SERIALIZED_AE_IMPUTER_MODEL_FORMAT,
+    BasicLogger,
     get_serialized_model_path,
     load_artifact,
     mlflow_end,
@@ -41,8 +42,10 @@ def main():
     mlflow_init(args)
 
     parent_hash = getattr(args, "parent_hash", None)
+    parent_hash = getattr(args, "parent_hash", None)
     imputer_type = ImputerT.type(args.method)
     if imputer_type == ImputerT.AE:
+        evaluate_autoencoder_imputer(args, parent_hash)
         evaluate_autoencoder_imputer(args, parent_hash)
     elif imputer_type == ImputerT.BASELINE:
         evaluate_baseline_imputer(args, parent_hash)
@@ -58,8 +61,15 @@ def evaluate_baseline_imputer(args: Namespace, parent_hash: Optional[str] = None
         f"{args.data_type_time_dim.name}_test_dataloader", "pt", run_id=parent_hash
     )
 
+    log = BasicLogger(
+        args=args,
+        run_hash=getattr(args, "parent_hash", None),
+        experiment_name=args.experiment_name,
+        verbose=args.verbose,
+    )
     evaluate_baseline_imputation(
         args,
+        log=log,
         split="test",
         pred=imputed_data["test"],
         input_data=test_data["data"],
@@ -68,6 +78,7 @@ def evaluate_baseline_imputer(args: Namespace, parent_hash: Optional[str] = None
         semi_observed_training=test_data["semi_observed_training"],
         bootstrap=args.bootstrap_evaluate_imputer,
     )
+    log.close()
 
 
 def evaluate_autoencoder_imputer(args: Namespace, parent_hash: Optional[str] = None):
@@ -114,5 +125,5 @@ def evaluate_autoencoder_imputer(args: Namespace, parent_hash: Optional[str] = N
 if __name__ == "__main__":
     import sys
 
-    sys.argv += ["--parent-hash", "b4b49a9117cb41afadef3f0573c8c38e"]
+    # sys.argv += ["--parent-hash", "b4b49a9117cb41afadef3f0573c8c38e"]
     main()

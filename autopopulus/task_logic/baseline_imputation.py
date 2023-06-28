@@ -1,5 +1,6 @@
 from argparse import Namespace
 from typing import Callable, Dict, List, Optional, Union
+import mlflow
 from pandas import DataFrame
 import numpy as np
 from torchmetrics import MetricCollection
@@ -11,6 +12,7 @@ from autopopulus.data.transforms import list_to_tensor
 # Local
 from autopopulus.utils.log_utils import (
     IMPUTE_METRIC_TAG_FORMAT,
+    LOGGER_TYPE,
     MIXED_FEATURE_METRIC_FORMAT,
     BasicLogger,
     dump_artifact,
@@ -45,6 +47,11 @@ def baseline_imputation_logic(
     # will create train/val/test
     data.setup("fit")
 
+    # if using mlflow we want this to encapsulate any artifacts and metrics
+    log = BasicLogger(
+        args=args, experiment_name=args.experiment_name, verbose=args.verbose
+    )
+
     imputed_data_per_split = fn(args, data)
     if any(
         [
@@ -57,6 +64,7 @@ def baseline_imputation_logic(
     for split in ["train", "val"]:  # Test will be run in evaluate.py.
         evaluate_baseline_imputation(
             args,
+            log=log,
             split=split,
             pred=imputed_data_per_split[split],
             input_data=data.splits["data"][split],
@@ -64,6 +72,9 @@ def baseline_imputation_logic(
             col_idxs_by_type=data.col_idxs_by_type["original"],
             semi_observed_training=data.semi_observed_training,
         )
+    if LOGGER_TYPE == "mlflow":
+        mlflow.set_tags(vars(args))
+    log.close()
 
     return imputed_data_per_split
 
@@ -125,6 +136,7 @@ def get_baseline_metrics(col_idxs_by_type) -> List[Dict[str, Union[str, Callable
 
 def evaluate_baseline_imputation(
     args: Namespace,
+    log: BasicLogger,
     split: str,
     pred: DataT,
     input_data: DataT,
@@ -139,9 +151,6 @@ def evaluate_baseline_imputation(
     if semi_observed_training:  # if data.semi_observed_training
         return
 
-    log: BasicLogger = BasicLogger(
-        args=args, experiment_name=args.experiment_name, verbose=args.verbose
-    )
     metrics: List[Dict[str, Union[str, Callable]]] = get_baseline_metrics(
         col_idxs_by_type
     )
@@ -164,7 +173,6 @@ def evaluate_baseline_imputation(
         log_baseline_imputation_performance(
             pred, true, where_data_are_missing, split, metrics, log
         )
-    log.close()
 
 
 def log_baseline_imputation_performance(

@@ -1,3 +1,5 @@
+import sys
+
 from autopopulus.models.prediction_models import Predictor
 from autopopulus.utils.get_set_cli_args import init_cli_args, load_cli_args
 from autopopulus.utils.utils import rank_zero_print, seed_everything
@@ -35,7 +37,5 @@ def main():
 
 
 if __name__ == "__main__":
-    import sys
-
-    sys.argv += ["--parent-hash", "b4b49a9117cb41afadef3f0573c8c38e"]
+    # sys.argv += ["--parent-hash", "b4b49a9117cb41afadef3f0573c8c38e"]
     main()
