@@ -21,6 +21,7 @@ guild_runs/
 *.pt
 # tflow
 *.tfevents
+run_progress.csv
 
 # C extensions
 *.so
