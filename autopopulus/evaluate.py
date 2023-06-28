@@ -2,6 +2,7 @@ import argparse  # needed to guild knows to import flags
 import pickle as pk
 from argparse import Namespace
 from os.path import join
+from typing import Optional
 
 import torch
 from numpy.random import default_rng
@@ -15,10 +16,11 @@ from autopopulus.task_logic.utils import AE_METHOD_SETTINGS, ImputerT
 from autopopulus.utils.get_set_cli_args import init_cli_args, load_cli_args
 from autopopulus.utils.log_utils import (
     SERIALIZED_AE_IMPUTER_MODEL_FORMAT,
+    BasicLogger,
     get_serialized_model_path,
+    load_artifact,
 )
 from autopopulus.utils.utils import (
-    rank_zero_print,
     resample_indices_only,
     seed_everything,
 )
@@ -38,30 +40,32 @@ def main():
 
     seed_everything(args.seed)
 
+    parent_hash = getattr(args, "parent_hash", None)
     imputer_type = ImputerT.type(args.method)
     if imputer_type == ImputerT.AE:
-        evaluate_autoencoder_imputer(args)
+        evaluate_autoencoder_imputer(args, parent_hash)
     elif imputer_type == ImputerT.BASELINE:
-        evaluate_baseline_imputer(args)
+        evaluate_baseline_imputer(args, parent_hash)
 
 
-def evaluate_baseline_imputer(args: Namespace):
+def evaluate_baseline_imputer(args: Namespace, parent_hash: Optional[str] = None):
     """Similar to AE except we expect the model has already been run on test and we don't need to load the  model and run it."""
     # get model output on test
-    pickled_imputed_data_path = join("serialized_models", "imputed_data.pkl")
-    rank_zero_print("Loading pickled imputed data...")
-    with open(pickled_imputed_data_path, "rb") as file:
-        imputed_data, _ = pk.load(file)
+    imputed_data, _ = load_artifact("imputed_data", "pkl", parent_hash=parent_hash)
     # get test data
-    test_dataloader_path = get_serialized_model_path(
-        f"{args.data_type_time_dim.name}_test_dataloader", "pt"
+    test_data = load_artifact(
+        f"{args.data_type_time_dim.name}_test_dataloader", "pt", parent_hash=parent_hash
     )
-    rank_zero_print("Loading pickled test data...")
-    with open(test_dataloader_path, "rb") as file:
-        test_data = pk.load(file)
 
+    log = BasicLogger(
+        args=args,
+        run_hash=getattr(args, "parent_hash", None),
+        experiment_name=args.experiment_name,
+        verbose=args.verbose,
+    )
     evaluate_baseline_imputation(
         args,
+        log=log,
         split="test",
         pred=imputed_data["test"],
         input_data=test_data["data"],
@@ -70,12 +74,15 @@ def evaluate_baseline_imputer(args: Namespace):
         semi_observed_training=test_data["semi_observed_training"],
         bootstrap=args.bootstrap_evaluate_imputer,
     )
+    log.close()
 
 
-def evaluate_autoencoder_imputer(args: Namespace):
+def evaluate_autoencoder_imputer(args: Namespace, parent_hash: Optional[str] = None):
     test_dataloader = torch.load(
         get_serialized_model_path(
-            f"{args.data_type_time_dim.name}_test_dataloader", "pt"
+            f"{args.data_type_time_dim.name}_test_dataloader",
+            "pt",
+            parent_hash=parent_hash,
         )
     )
     imputer = AEImputer.from_checkpoint(
@@ -85,6 +92,7 @@ def evaluate_autoencoder_imputer(args: Namespace):
                 data_type_time_dim=args.data_type_time_dim.name
             ),
             "pt",
+            parent_hash=parent_hash,
         ),
     )
 
@@ -111,4 +119,7 @@ def evaluate_autoencoder_imputer(args: Namespace):
 
 
 if __name__ == "__main__":
+    # import sys
+
+    # sys.argv += ["--parent-hash", "1fe7fc7a2e7546389e63be2471c2a868"]
     main()

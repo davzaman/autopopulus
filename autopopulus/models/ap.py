@@ -1,6 +1,7 @@
 import cloudpickle
 from typing import Any, Dict, List, Optional, Tuple, Union
 from argparse import ArgumentParser, Namespace
+import mlflow
 import pandas as pd
 import warnings
 from sklearn.base import TransformerMixin, BaseEstimator
@@ -13,11 +14,13 @@ from ray import tune, air
 from ray.tune.schedulers import ASHAScheduler, ResourceChangingScheduler
 from ray.tune.schedulers.resource_changing_scheduler import DistributeResources
 from ray.air.config import RunConfig, ScalingConfig, CheckpointConfig
+from ray.air.integrations.mlflow import MLflowLoggerCallback
 from ray.train.lightning import (
     LightningTrainer,
     LightningConfigBuilder,
     LightningCheckpoint,
 )
+
 
 ## Lightning ##
 import pytorch_lightning as pl
@@ -27,7 +30,7 @@ from pytorch_lightning.utilities.rank_zero import LightningDeprecationWarning
 from pytorch_lightning.callbacks import Callback
 from pytorch_lightning.profilers import Profiler
 from pytorch_lightning.strategies.strategy import Strategy
-from pytorch_lightning.loggers import Logger
+from pytorch_lightning.loggers import Logger, MLFlowLogger
 
 from autopopulus.task_logic.utils import ImputerT, get_tune_metric
 from autopopulus.utils.cli_arg_utils import str2bool
@@ -50,7 +53,7 @@ from autopopulus.models.callbacks import EpochTimerCallback, VisualizeModelCallb
 from autopopulus.data import CommonDataModule
 from autopopulus.data.types import DataTypeTimeDim
 from autopopulus.data.constants import PATIENT_ID, TIME_LEVEL
-from autopopulus.utils.utils import CLIInitialized
+from autopopulus.utils.utils import CLIInitialized, rank_zero_print
 from autopopulus.data.dataset_classes import (
     CommonDatasetWithTransform,
     CommonTransformedDataset,
@@ -151,7 +154,7 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
                 self.trial_num,
             ),
         )
-        self._save_test_data(data)
+        self._end_of_training(data)
 
     def tune(
         self,
@@ -172,9 +175,19 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         # TODO[LOW]: This should be changed to be more easily in sync with get_args_from_data
         data_feature_space = "mapped" if "mapped" in data.groupby else "original"
         tune_metric: str = get_tune_metric(ImputerT.AE, data, data_feature_space)
+
+        tune_callbacks = None
+        if isinstance(self.logger, MLFlowLogger):
+            # https://docs.ray.io/en/latest/tune/examples/tune-mlflow.html#mlflow-logger-api
+            tune_callbacks = [
+                MLflowLoggerCallback(
+                    experiment_name="Tuning", tags={"parent": self.logger._run_id}
+                )
+            ]
         #### Setup LightningTrainer ####
         run_config = RunConfig(
             name=experiment_name,
+            callbacks=tune_callbacks,
             # TODO: if i'm doing keep=1 do i need this?
             local_dir=TUNE_LOG_DIR,
             # define AIR CheckpointConfig to properly save checkpoints in AIR format.
@@ -244,9 +257,14 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         )
         result = tuner.fit()
         best_result: air.Result = result.get_best_result(metric=tune_metric, mode="min")
-        self._save_artifacts_from_tune(best_result)
-        self._save_test_data(data)
+        self._save_artifacts_from_tune(best_result, tune_callbacks)
+        self._end_of_training(data)
         return self
+
+    def _end_of_training(self, data: CommonDataModule):
+        self._save_test_data(data)
+        if isinstance(self.logger, MLFlowLogger):
+            rank_zero_print(f"Logger Hash: {self.logger._run_id}")
 
     def transform(self, dataloader: DataLoader) -> pd.DataFrame:
         """
@@ -427,7 +445,9 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
     ######################
     #    Tune Helpers    #
     ######################
-    def _save_artifacts_from_tune(self, best_result: air.Result):
+    def _save_artifacts_from_tune(
+        self, best_result: air.Result, tune_callbacks: List[Callback]
+    ):
         # Assign best model, and then copy the metrics and model to the right dir for logging
         checkpoint: LightningCheckpoint = best_result.checkpoint
         best_model: pl.LightningModule = checkpoint.get_model(AEDitto)
@@ -440,7 +460,12 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
             self.trial_num,
         )
         copy_artifacts_from_tune(
-            best_result, model_path=model_log_path, metric_path=self.logger.save_dir
+            best_result,
+            model_path=model_log_path,
+            logger=self.logger,
+            mlflow_callback=tune_callbacks[0]
+            if isinstance(self.logger, MLFlowLogger)
+            else None,
         )
 
     def _get_tune_grid(self, data: CommonDataModule) -> Dict[str, Any]:
@@ -476,16 +501,16 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
     @rank_zero_only
     def _save_test_data(self, data: CommonDataModule):
         if self.runtest:  # Serialize test dataloader to run in separate script
-            # Serialize data with torch but serialize model with plightning
-            torch.save(
-                data.test_dataloader(),
-                get_serialized_model_path(
-                    f"{self.data_type_time_dim.name}_test_dataloader",
-                    "pt",
-                    self.trial_num,
-                ),
-                pickle_module=cloudpickle,
+            path = get_serialized_model_path(
+                f"{self.data_type_time_dim.name}_test_dataloader",
+                "pt",
+                self.trial_num,
             )
+            # Serialize data with torch but serialize model with plightning
+            torch.save(data.test_dataloader(), path, pickle_module=cloudpickle)
+
+            if isinstance(self.logger, MLFlowLogger):
+                self.logger.experiment.log_artifact(self.logger._run_id, path, path)
 
     @classmethod
     def from_checkpoint(

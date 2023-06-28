@@ -29,11 +29,14 @@ def main():
         args,
         base_logger_context=BasicLogger.get_base_context_from_args(args),
         experiment_name=args.experiment_name,
-        parent_run_hash=args.aim_hash if hasattr(args, "aim_hash") else None,
+        parent_run_hash=getattr(args, "parent_hash", None),
         data_type_time_dim=args.data_type_time_dim,
     )
     predictor.fit(imputed_data, labels)
 
 
 if __name__ == "__main__":
+    # import sys
+
+    # sys.argv += ["--parent-hash", "1fe7fc7a2e7546389e63be2471c2a868"]
     main()

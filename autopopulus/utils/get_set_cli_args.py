@@ -22,6 +22,7 @@ from autopopulus.utils.utils import get_module_function_names
 def load_cli_args(args_options_path: str = "options.yml"):
     """
     Modify command line args if desired, or load from YAML file.
+    CLI gets priority.
     """
     if isfile(args_options_path):  # if file exists
         with open(args_options_path, "r") as f:
@@ -29,7 +30,8 @@ def load_cli_args(args_options_path: str = "options.yml"):
 
         # sys.argv = [sys.argv[0]]
         for k, v in res.items():
-            sys.argv += [f"--{k}", str(v)]
+            if f"--{k}" not in sys.argv:
+                sys.argv += [f"--{k}", str(v)]
 
 
 # This has to be in a separate script from `cli_arg_utils.py` because otherwise we get circular imports.
@@ -61,10 +63,10 @@ def init_cli_args() -> Namespace:
         help="When running tuning, what experiment name to set. The guild file also shares this name.",
     )
     p.add_argument(
-        "--aim-hash",
+        "--parent-hash",
         type=str,
         default=None,
-        help="Hash to continue the same Aim Run across impute/predict scripts/tasks.",
+        help="Hash to continue the same Aim or MlFlow Run across impute/predict scripts/tasks.",
     )
 
     #### DATASET LOADING ####

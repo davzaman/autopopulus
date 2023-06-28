@@ -1,7 +1,8 @@
-from typing import Dict
+from typing import Any, Dict
 import json
 import re
 import sys
+import itertools
 import subprocess
 
 # Enforce you're in the right env
@@ -44,8 +45,8 @@ replace_nan_with = ["0"]
 ####################################
 # experiment switches: all experiments: none, baseline, ae, vae
 # can use a mix of group names and also individual ones
-chosen_methods = ["none", "baseline", "ae", "variational"]
-experiment_tracker = "guild"
+chosen_methods = ["simple"]
+experiment_tracker = "mlflow"
 datasets = ["cure_ckd", "crrt"]
 # if use_queues nonzero, will use queues, specify the number of queues (parralellism).
 guild_use_queues: int = 1
@@ -65,32 +66,39 @@ def cli_str(obj) -> str:
     return str(obj).replace(" ", "")
 
 
-def run_command(command_args: Dict[str, str]):
+def listify_command_args(command_args: Dict[str, Any]):
+    return {k: v if isinstance(v, list) else [v] for k, v in command_args.items()}
+
+
+def product_dict(**kwargs):
+    keys = kwargs.keys()
+    for instance in itertools.product(*kwargs.values()):
+        yield dict(zip(keys, instance))
+
+
+def run_command(command_args: Dict[str, Any]):
     if experiment_tracker == "guild":
         base = "guild run main "
         base += "--stage" if guild_use_queues else "--background"
         subprocess.run(
-            base.split() + [f"{name}={val}" for name, val in command_args.items()]
+            base.split()
+            + [f"{name}={cli_str(val)}" for name, val in command_args.items()]
         )
-    elif experiment_tracker == "aim":
-        command = [sys.executable, "autopopulus/impute.py"]
-        for name, val in command_args.items():
-            command += [f"--{name}", str(val)]
-        output = subprocess.run(command, stdout=subprocess.PIPE).stdout.decode("utf-8")
-        aim_hash = re.search(r"(?:Aim Logger Hash: )(\w+)\b", str(output)).groups()[-1]
-        command[1] = "autopopulus/evaluate.py"
-        subprocess.run(command + ["--aim-hash", aim_hash])
-        command[1] = "autopopulus/predict.py"
-        subprocess.run(command + ["--aim-hash", aim_hash])
-    elif experiment_tracker == "none":
-        command = [sys.executable, "autopopulus/impute.py"]
-        for name, val in command_args.items():
-            command += [f"--{name}", str(val)]
-        subprocess.run(command, stdout=subprocess.PIPE).stdout.decode("utf-8")
-        command[1] = "autopopulus/evaluate.py"
-        subprocess.run(command)
-        command[1] = "autopopulus/predict.py"
-        subprocess.run(command)
+    else:
+        for command_args in product_dict(**listify_command_args(command_args)):
+            command = [sys.executable, "autopopulus/impute.py"]
+            for name, val in command_args.items():
+                command += [f"--{name}", cli_str(val)]
+            output = subprocess.run(command, stdout=subprocess.PIPE).stdout.decode(
+                "utf-8"
+            )
+            parent_hash = re.search(r"(?:Logger Hash: )(\w+)\b", str(output)).groups()[
+                -1
+            ]
+            command[1] = "autopopulus/evaluate.py"
+            subprocess.run(command + ["--parent-hash", parent_hash])
+            command[1] = "autopopulus/predict.py"
+            subprocess.run(command + ["--parent-hash", parent_hash])
 
 
 for dataset in datasets:
@@ -110,35 +118,33 @@ for dataset in datasets:
         print("======================================================")
         print(f"Staging {method} imputation...")
         if method == "none":
-            run_command(
-                {"method": "none", "fully-observed": "yes", "dataset": cli_str(dataset)}
-            )
+            run_command({"method": "none", "fully-observed": "yes", "dataset": dataset})
         else:
             command_args = {
-                "method": cli_str(method),
-                "dataset": cli_str(dataset),
+                "method": method,
+                "dataset": dataset,
             }
             # bootstrap evaluate the baseline models no matter what
             # manually pick the AE models to bootstrap eval later
             if method in imputer_groups["baseline"]:
-                command_args["bootstrap-evaluate-imputer"] = cli_str(True)
+                command_args["bootstrap-evaluate-imputer"] = True
             # Added to the end if the conditions are met otherwise nothing happens
             if method in imputer_groups["ae"]:
                 command_args = {
                     **command_args,
-                    "feature-map": cli_str(feature_mapping),
-                    "replace-nan-with": cli_str(replace_nan_with),
+                    "feature-map": feature_mapping,
+                    "replace-nan-with": replace_nan_with,
                 }
             elif (
                 method in imputer_groups["variational"]
             ):  # on vae and dvae only try target_encode_categorical
                 command_args = {
                     **command_args,
-                    "feature-map": cli_str(feature_mapping_variational),
-                    "replace-nan-with": cli_str(replace_nan_with),
+                    "feature-map": feature_mapping_variational,
+                    "replace-nan-with": replace_nan_with,
                 }
             # if command_args.get("feature-map", "") == "discretize_continuous":
-            # command_args["uniform-prob"] = cli_str(True)
+            # command_args["uniform-prob"] = True
 
             if all_data:
                 # When multiple flags have list values, Guild generates the cartesian product of all possible flag combinations.
@@ -148,8 +154,8 @@ for dataset in datasets:
                 fully_observed_command_args = {
                     **command_args,
                     "fully-observed": "yes",
-                    "percent-missing": cli_str(percent_missing),
-                    "amputation-patterns": cli_str(amputation_patterns),
+                    "percent-missing": percent_missing,
+                    "amputation-patterns": amputation_patterns,
                 }
                 run_command(fully_observed_command_args)
 

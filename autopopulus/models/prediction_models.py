@@ -1,7 +1,7 @@
 from timeit import default_timer as timer
 from typing import Callable, List, Dict, Any, Optional, Tuple, Union
 from tqdm import tqdm
-from cloudpickle import dump, load
+from cloudpickle import load
 from argparse import ArgumentParser, Namespace
 from pandas import DataFrame, MultiIndex, Series, concat
 from numpy import ndarray, logspace, mean
@@ -52,7 +52,7 @@ from autopopulus.utils.log_utils import (
     PREDICT_METRIC_TAG_FORMAT,
     SERIALIZED_PREDICTOR_FORMAT,
     BasicLogger,
-    get_serialized_model_path,
+    dump_artifact,
 )
 from autopopulus.models.evaluation import (
     bootstrap_confidence_interval,
@@ -350,11 +350,7 @@ class Predictor(TransformerMixin, CLIInitialized):
         return models
 
     def save_model(self, modeln: str, estimator: BaseEstimator):
-        with open(
-            get_serialized_model_path(SERIALIZED_PREDICTOR_FORMAT.format(model=modeln)),
-            "wb",
-        ) as f:
-            dump(estimator, f)
+        dump_artifact(estimator, SERIALIZED_PREDICTOR_FORMAT.format(model=modeln))
 
     def load_model(self, model_path: str) -> BaseEstimator:
         with open(model_path, "rb") as f:
