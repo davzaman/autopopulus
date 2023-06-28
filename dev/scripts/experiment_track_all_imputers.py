@@ -118,10 +118,10 @@ class RunManager:
 
         self.progress_file = "run_progress.csv"
         self.field_names = [
+            "timestamp",
             "return_code",
             "command",
             "run_id",
-            "timestamp",
             "method",
             "dataset",
             "fully-observed",
