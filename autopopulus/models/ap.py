@@ -1,7 +1,6 @@
 import cloudpickle
 from typing import Any, Dict, List, Optional, Tuple, Union
 from argparse import ArgumentParser, Namespace
-import mlflow
 import pandas as pd
 import warnings
 from sklearn.base import TransformerMixin, BaseEstimator
@@ -15,13 +14,11 @@ from ray.tune.schedulers import ASHAScheduler, ResourceChangingScheduler
 from ray.tune.schedulers.resource_changing_scheduler import DistributeResources
 from ray.air.config import RunConfig, ScalingConfig, CheckpointConfig
 from ray.air.integrations.mlflow import MLflowLoggerCallback
-from ray.air.integrations.mlflow import MLflowLoggerCallback
 from ray.train.lightning import (
     LightningTrainer,
     LightningConfigBuilder,
     LightningCheckpoint,
 )
-
 
 ## Lightning ##
 import pytorch_lightning as pl
@@ -54,7 +51,7 @@ from autopopulus.models.callbacks import EpochTimerCallback, VisualizeModelCallb
 from autopopulus.data import CommonDataModule
 from autopopulus.data.types import DataTypeTimeDim
 from autopopulus.data.constants import PATIENT_ID, TIME_LEVEL
-from autopopulus.utils.utils import CLIInitialized, rank_zero_print
+from autopopulus.utils.utils import CLIInitialized
 from autopopulus.data.dataset_classes import (
     CommonDatasetWithTransform,
     CommonTransformedDataset,
@@ -153,10 +150,12 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
                 ),
                 "pt",
                 trial_num=self.trial_num,
-                run_id=self.logger.run_id,
+                run_id=self.logger.run_id
+                if isinstance(self.logger, MLFlowLogger)
+                else None,
             ),
         )
-        self._end_of_training(data)
+        self._save_test_data(data)
 
     def tune(
         self,
@@ -263,11 +262,6 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         self._save_artifacts_from_tune(best_result, tune_callbacks)
         self._save_test_data(data)
         return self
-
-    def _end_of_training(self, data: CommonDataModule):
-        self._save_test_data(data)
-        if isinstance(self.logger, MLFlowLogger):
-            rank_zero_print(f"Logger Hash: {self.logger._run_id}")
 
     def transform(self, dataloader: DataLoader) -> pd.DataFrame:
         """
@@ -508,7 +502,9 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
                 f"{self.data_type_time_dim.name}_test_dataloader",
                 "pt",
                 trial_num=self.trial_num,
-                run_id=self.logger.run_id,
+                run_id=self.logger.run_id
+                if isinstance(self.logger, MLFlowLogger)
+                else None,
             )
             # Serialize data with torch but serialize model with plightning
             torch.save(data.test_dataloader(), path, pickle_module=cloudpickle)

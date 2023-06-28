@@ -23,8 +23,8 @@ from autopopulus.data.types import DataTypeTimeDim
 from autopopulus.utils.utils import rank_zero_print
 
 TUNE_LOG_DIR = "tune_results"
-# LOGGER_TYPE = "TensorBoard"
-LOGGER_TYPE = "mlflow"
+LOGGER_TYPE = "TensorBoard"
+# LOGGER_TYPE = "mlflow"
 # LOGGER_TYPE = "Aim"
 
 """
@@ -144,6 +144,8 @@ def dump_artifact(
     if LOGGER_TYPE == "mlflow":
         active_run = mlflow.active_run()
         run_id = active_run.info.run_id if active_run else None
+    else:
+        run_id = None
 
     path = get_serialized_model_path(objn, ftype, trial_num=trial_num, run_id=run_id)
     makedirs(dirname(path), exist_ok=True)
@@ -165,6 +167,8 @@ def mlflow_init(args: Namespace):
 
 @rank_zero_only
 def mlflow_end():
+    if LOGGER_TYPE != "mlflow":
+        return
     rank_zero_print(f"Logger Hash: {mlflow.active_run().info.run_id}")
     mlflow.end_run()
 
@@ -396,7 +400,7 @@ def copy_artifacts_from_tune(
     We don't want the per-rank tfevents, just the high level one.
     """
     # Model path should already exist
-    if isinstance(logger, MLFlowLogger):
+    if LOGGER_TYPE == "mlflow":
         # don't want a to_path, mlflow will figure it out
         save_fn = lambda from_path, to_path: logger.experiment.log_artifact(
             logger._run_id, from_path, to_path
@@ -421,7 +425,7 @@ def copy_artifacts_from_tune(
 
     # above won't copy over metrics saved separately/synced to mlflow
     # ray-tune will save it disjoint for each epoch
-    if isinstance(logger, MLFlowLogger):
+    if LOGGER_TYPE == "mlflow":
         # copy over metrics if mlflow
         best_mlflow_run_id = {
             str(trial): run_id for trial, run_id in mlflow_callback._trial_runs.items()
