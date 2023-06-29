@@ -68,9 +68,10 @@ def main():
     #     "feature_map": None,
     #     "uniform_prob": False,
     # }
-
+    ncpu_per_gpu = args.total_cpus_on_machine // args.total_gpus_on_machine
+    num_workers = ncpu_per_gpu - 1
     data = CommonDataModule.from_argparse_args(
-        args, dataset_loader=data_loader, **data_settings
+        args, dataset_loader=data_loader, **data_settings, num_workers=num_workers
     )
 
     imputed_data = get_imputation_logic(args)(args, data)
