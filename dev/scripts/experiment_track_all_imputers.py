@@ -53,9 +53,9 @@ replace_nan_with = ["0"]
 ####################################
 # experiment switches: all experiments: none, baseline, ae, vae
 # can use a mix of group names and also individual ones
-chosen_methods = ["simple"]
+chosen_methods = ["vanilla"]
 experiment_tracker = "mlflow"
-datasets = ["cure_ckd", "crrt"]
+datasets = ["cure_ckd"]
 # if use_queues nonzero, will use queues, specify the number of queues (parralellism).
 guild_use_queues: int = 1
 data_filtering = {
@@ -108,7 +108,7 @@ async def read_and_display(*cmd) -> Tuple[int, bytes, bytes]:
 
 
 class RunManager:
-    def __init__(self, append: bool = True) -> None:
+    def __init__(self, experiment_tracker: str, append: bool = True) -> None:
         # run the event loop
         if os_name == "nt":
             self.loop = asyncio.ProactorEventLoop()  # for subprocess' pipes on Windows
@@ -116,6 +116,7 @@ class RunManager:
         else:
             self.loop = asyncio.get_event_loop()
 
+        self.experiment_tracker = experiment_tracker
         self.progress_file = "run_progress.csv"
         self.field_names = [
             "timestamp",
@@ -131,15 +132,33 @@ class RunManager:
             "amputation-patterns",
             "bootstrap-evaluate-imputer",
         ]
-        with open(self.progress_file, "a" if append else "w", newline="") as csvfile:
-            writer = DictWriter(csvfile, fieldnames=self.field_names)
-            writer.writeheader()
+        if experiment_tracker != "guild":
+            with open(
+                self.progress_file, "a" if append else "w", newline=""
+            ) as csvfile:
+                writer = DictWriter(csvfile, fieldnames=self.field_names)
+                writer.writeheader()
 
     def __del__(self):
         self.close()
 
     def close(self):
         self.loop.close()
+
+    def run_command(self, command_args: Dict[str, Any]):
+        if self.experiment_tracker == "guild":
+            base = "guild run main "
+            base += "--stage" if guild_use_queues else "--background"
+            subprocess.run(
+                base.split()
+                + [f"{name}={cli_str(val)}" for name, val in command_args.items()]
+            )
+        else:
+            for command_args in product_dict(**listify_command_args(command_args)):
+                parent_hash = self.run("autopopulus/impute.py", command_args)
+                sub_command_args = {**command_args, "parent-hash": parent_hash}
+                self.run("autopopulus/evaluate.py", sub_command_args)
+                self.run("autopopulus/predict.py", sub_command_args)
 
     def run(self, pyfile: str, command_args: Dict[str, Any]) -> str:
         command = [sys.executable, pyfile]
@@ -194,25 +213,7 @@ def product_dict(**kwargs):
         yield dict(zip(keys, instance))
 
 
-run_manager = RunManager()
-
-
-def run_command(command_args: Dict[str, Any]):
-    if experiment_tracker == "guild":
-        base = "guild run main "
-        base += "--stage" if guild_use_queues else "--background"
-        subprocess.run(
-            base.split()
-            + [f"{name}={cli_str(val)}" for name, val in command_args.items()]
-        )
-    else:
-        for command_args in product_dict(**listify_command_args(command_args)):
-            parent_hash = run_manager.run("autopopulus/impute.py", command_args)
-            sub_command_args = {**command_args, "parent-hash": parent_hash}
-            run_manager.run("autopopulus/evaluate.py", sub_command_args)
-            run_manager.run("autopopulus/predict.py", sub_command_args)
-
-
+run_manager = RunManager(experiment_tracker=experiment_tracker)
 for dataset in datasets:
     # fully_observed=no uses entire dataset
     all_data = data_filtering[dataset]["all_data"]
@@ -230,7 +231,9 @@ for dataset in datasets:
         print("======================================================")
         print(f"Staging {method} imputation...")
         if method == "none":
-            run_command({"method": "none", "fully-observed": "yes", "dataset": dataset})
+            run_manager.run_command(
+                {"method": "none", "fully-observed": "yes", "dataset": dataset}
+            )
         else:
             command_args = {
                 "method": method,
@@ -261,7 +264,7 @@ for dataset in datasets:
             if all_data:
                 # When multiple flags have list values, Guild generates the cartesian product of all possible flag combinations.
                 all_data_command_args = {**command_args, "fully-observed": "no"}
-                run_command(all_data_command_args)
+                run_manager.run_command(all_data_command_args)
             if fully_observed:
                 fully_observed_command_args = {
                     **command_args,
@@ -269,7 +272,7 @@ for dataset in datasets:
                     "percent-missing": percent_missing,
                     "amputation-patterns": amputation_patterns,
                 }
-                run_command(fully_observed_command_args)
+                run_manager.run_command(fully_observed_command_args)
 
 run_manager.close()
 
