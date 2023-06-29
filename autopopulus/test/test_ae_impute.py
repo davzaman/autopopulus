@@ -37,7 +37,7 @@ from autopopulus.models.ae import COL_IDXS_BY_TYPE_FORMAT, AEDitto
 from autopopulus.models.ap import AEImputer
 from autopopulus.models.dnn import ResetSeed
 from autopopulus.utils.impute_metrics import MAAPEMetric, universal_metric
-from models.torch_model_utils import (
+from autopopulus.models.torch_model_utils import (
     BatchSwapNoise,
     BinColumnThreshold,
     CtnCatLoss,
