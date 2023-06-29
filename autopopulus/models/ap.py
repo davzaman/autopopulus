@@ -45,6 +45,7 @@ from autopopulus.utils.log_utils import (
     TUNE_LOG_DIR,
     AutoencoderLogger,
     copy_artifacts_from_tune,
+    get_mlflow_artifact_path,
     get_serialized_model_path,
 )
 from autopopulus.models.callbacks import EpochTimerCallback, VisualizeModelCallback
@@ -143,6 +144,7 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         assert hasattr(self, "ae")  # Assumes AEDitto is instantiated.
         self.trainer = pl.Trainer(**self._get_trainer_args(data))
         self.trainer.fit(self.ae, datamodule=data)
+        run_id = self._get_run_id()
         self.trainer.save_checkpoint(
             get_serialized_model_path(
                 SERIALIZED_AE_IMPUTER_MODEL_FORMAT.format(
@@ -150,12 +152,10 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
                 ),
                 "pt",
                 trial_num=self.trial_num,
-                run_id=self.logger.run_id
-                if isinstance(self.logger, MLFlowLogger)
-                else None,
+                run_id=run_id,
             ),
         )
-        self._save_test_data(data)
+        self._save_test_data(data, run_id)
 
     def tune(
         self,
@@ -177,15 +177,25 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         data_feature_space = "mapped" if "mapped" in data.groupby else "original"
         tune_metric: str = get_tune_metric(ImputerT.AE, data, data_feature_space)
 
-        tune_callbacks = None
         if isinstance(self.logger, MLFlowLogger):
             # https://docs.ray.io/en/latest/tune/examples/tune-mlflow.html#mlflow-logger-api
             # it refers back to the parent run we want to keep after we toss the tune dir away. the mlflow tune runs will remain but no artifacts
-            tune_callbacks = [
-                MLflowLoggerCallback(
-                    experiment_name="Tuning", tags={"parent": self.logger._run_id}
-                )
-            ]
+            tune_callbacks = [MLflowLoggerCallback(experiment_name="Tuning")]
+            # we want the tuner logger to be something different
+            # self.logger has attached to the outter mlflow run
+            # otherwise, the tune context will be unable to see the outer mlflow run and throw an error
+            trainer_overrides = {
+                "enable_checkpointing": True,
+                "logger": MLFlowLogger(
+                    experiment_name=self.logger._experiment_name,
+                    run_name=self.logger._run_name,
+                    log_model=True,
+                ),
+            }
+        else:
+            tune_callbacks = None
+            trainer_overrides = {"enable_checkpointing": True}
+
         #### Setup LightningTrainer ####
         run_config = RunConfig(
             name=experiment_name,
@@ -221,9 +231,7 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
             .module(cls=AEDitto, *ae_args, **ae_kwargs)
             .ddp_strategy(find_unused_parameters=False)
             .trainer(
-                **self._get_trainer_args(
-                    data, trainer_overrides={"enable_checkpointing": True}
-                )
+                **self._get_trainer_args(data, trainer_overrides=trainer_overrides)
             )
             .fit_params(datamodule=data)
             # LightningTrainer: freq of metric reporting == freq of checkpointing
@@ -259,8 +267,9 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
         )
         result = tuner.fit()
         best_result: air.Result = result.get_best_result(metric=tune_metric, mode="min")
-        self._save_artifacts_from_tune(best_result, tune_callbacks)
-        self._save_test_data(data)
+        run_id = self._get_run_id()
+        self._save_artifacts_from_tune(best_result, tune_callbacks, run_id)
+        self._save_test_data(data, run_id)
         return self
 
     def transform(self, dataloader: DataLoader) -> pd.DataFrame:
@@ -442,33 +451,43 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
     ######################
     #    Tune Helpers    #
     ######################
+    def _get_run_id(self) -> Optional[str]:
+        return self.logger.run_id if isinstance(self.logger, MLFlowLogger) else None
+
     def _save_artifacts_from_tune(
-        self, best_result: air.Result, tune_callbacks: List[Callback]
+        self,
+        best_result: air.Result,
+        tune_callbacks: List[Callback],
+        run_id: Optional[str] = None,
     ):
         # Assign best model, and then copy the metrics and model to the right dir for logging
         checkpoint: LightningCheckpoint = best_result.checkpoint
         best_model: pl.LightningModule = checkpoint.get_model(AEDitto)
         self.ae = best_model
+        if isinstance(self.logger, MLFlowLogger):
+            metric_log_path = get_mlflow_artifact_path(run_id=run_id)
+            mlflow_callback = tune_callbacks[0]
+        else:
+            metric_log_path = self.logger.save_dir
+            mlflow_callback = None
         model_log_path = get_serialized_model_path(
             SERIALIZED_AE_IMPUTER_MODEL_FORMAT.format(
                 data_type_time_dim=self.data_type_time_dim.name
             ),
             "pt",
-            self.trial_num,
+            trial_num=self.trial_num,
+            run_id=run_id,
         )
         copy_artifacts_from_tune(
             best_result,
             model_path=model_log_path,
-            logger=self.logger,
-            mlflow_callback=tune_callbacks[0]
-            if isinstance(self.logger, MLFlowLogger)
-            else None,
+            metric_path=metric_log_path,
+            mlflow_callback=mlflow_callback,
         )
 
     def _get_tune_grid(self, data: CommonDataModule) -> Dict[str, Any]:
         if self.fast_dev_run or data.limit_data:
             # Will have to set cuda_visible devices before running the python code if true
-            # ray.init(local_mode=True)  # Local debugging for tuning
             # tune will try everything in the grid, so just do 1
             hidden_layers_grid = [[0.5]]
             batchnorm = [False]
@@ -496,15 +515,13 @@ class AEImputer(TransformerMixin, BaseEstimator, CLIInitialized):
     #    Checkpointing   #
     ######################
     @rank_zero_only
-    def _save_test_data(self, data: CommonDataModule):
+    def _save_test_data(self, data: CommonDataModule, run_id: Optional[str] = None):
         if self.runtest:  # Serialize test dataloader to run in separate script
             path = get_serialized_model_path(
                 f"{self.data_type_time_dim.name}_test_dataloader",
                 "pt",
                 trial_num=self.trial_num,
-                run_id=self.logger.run_id
-                if isinstance(self.logger, MLFlowLogger)
-                else None,
+                run_id=run_id,
             )
             # Serialize data with torch but serialize model with plightning
             torch.save(data.test_dataloader(), path, pickle_module=cloudpickle)

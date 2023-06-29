@@ -23,8 +23,8 @@ from autopopulus.data.types import DataTypeTimeDim
 from autopopulus.utils.utils import rank_zero_print
 
 TUNE_LOG_DIR = "tune_results"
-LOGGER_TYPE = "TensorBoard"
-# LOGGER_TYPE = "mlflow"
+# LOGGER_TYPE = "TensorBoard"
+LOGGER_TYPE = "mlflow"
 # LOGGER_TYPE = "Aim"
 
 """
@@ -113,9 +113,7 @@ def get_serialized_model_path(
 
     if LOGGER_TYPE == "mlflow":
         # Sandbox the resources (model, dat, etc) for a run if using mlflow
-        base_path = mlflow.get_run(run_id=run_id).info.artifact_uri.replace(
-            "file://", ""
-        )
+        base_path = get_mlflow_artifact_path(run_id=run_id)
     else:
         base_path = ""
     return join(base_path, serialized_model_path)
@@ -171,6 +169,10 @@ def mlflow_end():
         return
     rank_zero_print(f"Logger Hash: {mlflow.active_run().info.run_id}")
     mlflow.end_run()
+
+
+def get_mlflow_artifact_path(run_id: str) -> str:
+    return mlflow.get_run(run_id=run_id).info.artifact_uri.replace("file://", "")
 
 
 class BasicLogger:
@@ -365,17 +367,10 @@ def copy_log_from_tune(
                     copy(join(root, file), logdir)
 
 
-def metric_path_from_run_id(run_id: str) -> str:
-    return join(
-        dirname(mlflow.get_run(run_id).info.artifact_uri).replace("file://", ""),
-        "metrics",
-    )
-
-
 def copy_artifacts_from_tune(
     best_result: air.Result,
     model_path: str,
-    logger: Logger,
+    metric_path: str,
     mlflow_callback: Optional[MLflowLoggerCallback] = None,
 ):
     """
@@ -402,26 +397,22 @@ def copy_artifacts_from_tune(
     # Model path should already exist
     if LOGGER_TYPE == "mlflow":
         # don't want a to_path, mlflow will figure it out
-        save_fn = lambda from_path, to_path: logger.experiment.log_artifact(
-            logger._run_id, from_path, to_path
-        )
         keep_regex = ".*.json"
-        metric_path = None
     else:
-        save_fn = copy
         keep_regex = "tfevents|.*.json"
-        metric_path = logger.save_dir
         if not exists(metric_path):
             makedirs(metric_path)
 
-    save_fn(join(best_result.checkpoint.path, "model"), model_path)
+    if not exists(model_path):
+        makedirs(model_path)
+    copy(join(best_result.checkpoint.path, "model"), model_path)
 
     # copy metrics
     for root, dirs, files in walk(best_result.log_dir):
         if root == str(best_result.log_dir):  # only look at high level (not per rank)
             for file in files:  # only tfevent and json files
                 if search(keep_regex, file):
-                    save_fn(join(root, file), metric_path)
+                    copy(join(root, file), metric_path)
 
     # above won't copy over metrics saved separately/synced to mlflow
     # ray-tune will save it disjoint for each epoch
@@ -431,8 +422,8 @@ def copy_artifacts_from_tune(
             str(trial): run_id for trial, run_id in mlflow_callback._trial_runs.items()
         }[best_result.metrics["trial_id"]]
         copytree(
-            metric_path_from_run_id(best_mlflow_run_id),
-            metric_path_from_run_id(logger._run_id),
+            join(dirname(get_mlflow_artifact_path(best_mlflow_run_id)), "metrics"),
+            join(dirname(metric_path), "metrics"),
             dirs_exist_ok=True,
         )
 
