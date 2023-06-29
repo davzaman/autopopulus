@@ -129,7 +129,8 @@ class MDLDiscretizer:
                 column_ranges.append((float(start_range), float(end_range)))
             # min=max: don't want to add a bin back to the min, (it will be binary)
             if max_col_value > min_col_value:
-                column_ranges.append((start_of_last_bin, max_col_value))
+                if start_of_last_bin != max_col_value:
+                    column_ranges.append((start_of_last_bin, max_col_value))
 
             # add list of all ranges for each column to a list
             list_of_ranges_per_col.append(column_ranges)
