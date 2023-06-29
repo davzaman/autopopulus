@@ -89,6 +89,8 @@ class CrrtDataLoader(AbstractDatasetLoader):
             preprocessed_df.drop(self.target, axis=1),
             preprocessed_df[self.target],
         )
+        df.columns = self.sanitize_col_names(df.columns)
+        self.categorical_cols = self.sanitize_col_names(pd.Index(self.categorical_cols))
 
         # set after preproc so we don't include dropped cols.
         self.categorical_cols = df.columns.intersection(self.categorical_cols)
@@ -102,6 +104,17 @@ class CrrtDataLoader(AbstractDatasetLoader):
 
         # return (df.drop("patient_id", axis=1), labels)
         return (df, labels)
+
+    def sanitize_col_names(self, cols: pd.Index) -> pd.Index:
+        return (
+            cols.str.replace("&", "and")
+            .str.replace("+", "plus")
+            .str.replace(",", "")
+            .str.replace("'", "")
+            .str.replace("(", "__")
+            .str.replace(")", "__")
+            .str.replace("%", "_PRCNT")
+        )
 
     def preprocess_data(self, df: pd.DataFrame) -> pd.DataFrame:
         """Pre-processes the data for use by ML model."""
