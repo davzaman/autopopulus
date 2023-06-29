@@ -394,17 +394,15 @@ def copy_artifacts_from_tune(
 
     We don't want the per-rank tfevents, just the high level one.
     """
-    # Model path should already exist
     if LOGGER_TYPE == "mlflow":
-        # don't want a to_path, mlflow will figure it out
         keep_regex = ".*.json"
+        if not exists(model_path):  # metric path should already exist
+            makedirs(dirname(model_path))
     else:
         keep_regex = "tfevents|.*.json"
-        if not exists(metric_path):
+        if not exists(metric_path):  # Model path should already exist
             makedirs(metric_path)
 
-    if not exists(model_path):
-        makedirs(model_path)
     copy(join(best_result.checkpoint.path, "model"), model_path)
 
     # copy metrics
