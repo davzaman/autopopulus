@@ -17,12 +17,14 @@ from utils import (
     PRETTY_NAMES,
 )
 
+tracker = "mlflow"
+
 ########################
 #    Impute Metrics    #
 ########################
 # %%
 impute_data = pd.read_pickle(
-    "/home/davina/Private/repos/autopopulus/guild_runs/guild_impute_results.pkl"
+    f"/home/davina/Private/repos/autopopulus/guild_runs/{tracker}_impute_results.pkl"
 )
 
 # %%
@@ -106,7 +108,7 @@ fig
 #########################
 # %%
 predict_data = pd.read_pickle(
-    "/home/davina/Private/repos/autopopulus/guild_runs/guild_predict_results.pkl"
+    f"/home/davina/Private/repos/autopopulus/guild_runs/{tracker}_predict_results.pkl"
 )
 predict_data.set_index(EXPERIMENT_GRID_VARS)[["val"] + PREDICT_METRIC_DIMENSIONS]
 
@@ -194,7 +196,7 @@ fig
 
 # %%
 time_data = pd.read_pickle(
-    "/home/davina/Private/repos/autopopulus/guild_runs/guild_time_results.pkl"
+    f"/home/davina/Private/repos/autopopulus/guild_runs/{tracker}_time_results.pkl"
 )
 time_data = time_data.set_index(EXPERIMENT_GRID_VARS)[
     ["val", "step", "metric_name", "split"]

@@ -2,7 +2,7 @@
 import numpy as np
 import pandas as pd
 
-from dev.scripts.utils import (
+from utils import (
     EXPERIMENT_GRID_VARS,
     IMPUTE_METRIC_DIMENSIONS,
     PREDICT_METRIC_DIMENSIONS,
@@ -10,6 +10,7 @@ from dev.scripts.utils import (
     all_predict_but,
 )
 
+tracker = "mlflow"
 
 """
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -18,7 +19,7 @@ Impute Metric Validation
 """
 # %%
 impute_data = pd.read_pickle(
-    "/home/davina/Private/repos/autopopulus/guild_impute_results.pkl"
+    f"/home/davina/Private/repos/autopopulus/guild_runs/{tracker}_impute_results.pkl"
 )
 
 # %%
@@ -131,7 +132,7 @@ Predict Metric Validation
 """
 # %%
 predict_data = pd.read_pickle(
-    "/home/davina/Private/repos/autopopulus/guild_predict_results.pkl"
+    f"/home/davina/Private/repos/autopopulus/guild_runs/{tracker}_predict_results.pkl"
 )
 predict_data = predict_data.set_index(EXPERIMENT_GRID_VARS)[
     ["val"] + PREDICT_METRIC_DIMENSIONS
@@ -156,6 +157,8 @@ assert all(
         ].apply(lambda x: x.unique())
     ).apply(lambda x: np.array_equal(x, metrics_logged.values[0]))
 ), "All experiments should have the same metrics logged."
+
+# %%
 assert np.array_equal(
     metrics_logged.values[0],
     np.array(  # Align with evaluate() method in prediction_models.py
@@ -173,3 +176,5 @@ assert np.array_equal(
         ]
     ),
 ), "Not logging all the metrics we want to for prediction."
+
+# %%
