@@ -1,6 +1,6 @@
 from csv import DictWriter
 from os import name as os_name
-from os.path import join, basename
+from os.path import join, basename, exists
 import time
 from typing import Any, Dict, List, Tuple
 import json
@@ -12,6 +12,9 @@ import asyncio
 from asyncio.subprocess import PIPE
 
 import mlflow
+import pandas as pd
+
+from autopopulus.utils.utils import rank_zero_print
 
 # Enforce you're in the right env
 output = subprocess.run(["conda", "list"], stdout=subprocess.PIPE).stdout.decode(
@@ -53,7 +56,7 @@ replace_nan_with = ["0"]
 ####################################
 # experiment switches: all experiments: none, baseline, ae, vae
 # can use a mix of group names and also individual ones
-chosen_methods = ["vanilla"]
+chosen_methods = ["batchswap"]
 experiment_tracker = "mlflow"
 datasets = ["cure_ckd"]
 # if use_queues nonzero, will use queues, specify the number of queues (parralellism).
@@ -108,7 +111,7 @@ async def read_and_display(*cmd) -> Tuple[int, bytes, bytes]:
 
 
 class RunManager:
-    def __init__(self, experiment_tracker: str, append: bool = True) -> None:
+    def __init__(self, experiment_tracker: str, continue_runs: bool = True) -> None:
         # run the event loop
         if os_name == "nt":
             self.loop = asyncio.ProactorEventLoop()  # for subprocess' pipes on Windows
@@ -116,6 +119,7 @@ class RunManager:
         else:
             self.loop = asyncio.get_event_loop()
 
+        self.continue_runs = continue_runs
         self.experiment_tracker = experiment_tracker
         self.progress_file = "run_progress.csv"
         self.field_names = [
@@ -132,9 +136,11 @@ class RunManager:
             "amputation-patterns",
             "bootstrap-evaluate-imputer",
         ]
+        if self.continue_runs and exists(self.progress_file):
+            return
         if experiment_tracker != "guild":
             with open(
-                self.progress_file, "a" if append else "w", newline=""
+                self.progress_file, "a" if self.continue_runs else "w", newline=""
             ) as csvfile:
                 writer = DictWriter(csvfile, fieldnames=self.field_names)
                 writer.writeheader()
@@ -160,10 +166,24 @@ class RunManager:
                 self.run("autopopulus/evaluate.py", sub_command_args)
                 self.run("autopopulus/predict.py", sub_command_args)
 
+    def _default_to_existing_run(self, command: List[str]) -> str:
+        if self.continue_runs:  # there should be no existing run with that command
+            runs = pd.read_csv(self.progress_file)
+            command_str = " ".join(command)
+            existing_run = runs["command"] == command_str
+            if any(existing_run):
+                return runs[existing_run]["run_id"].squeeze()
+            return None
+        return None
+
     def run(self, pyfile: str, command_args: Dict[str, Any]) -> str:
         command = [sys.executable, pyfile]
         for name, val in command_args.items():
             command += [f"--{name}", cli_str(val)]
+
+        if (run_id := self._default_to_existing_run(command)) is not None:
+            rank_zero_print(f"Skipping {command} as it was already run...")
+            return run_id
 
         rc, parent_hash = self.run_and_save_output(command, run_name=basename(pyfile))
 
@@ -186,8 +206,9 @@ class RunManager:
     def run_and_save_output(self, cmd: List[str], run_name: str) -> Tuple[int, str]:
         rc, stdout, stderr = self.loop.run_until_complete(read_and_display(*cmd))
         stdout, stderr = stdout.decode("utf-8"), stderr.decode("utf-8")
-        parent_hash = re.search(r"(?:Logger Hash: )(\w+)\b", str(stdout)).groups()[-1]
+        parent_hash = re.search(r"(?:Logger Hash: )(\w+)\b", str(stdout))
         if parent_hash:
+            parent_hash = parent_hash.groups()[-1]
             artifact_path = mlflow.get_run(
                 run_id=parent_hash
             ).info.artifact_uri.replace("file://", "")

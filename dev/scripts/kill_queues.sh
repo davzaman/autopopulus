@@ -13,3 +13,4 @@ ps -ef | grep "ray::IDLE" | grep -v grep | awk '{print $2}' | xargs -r kill -9
 for exp_id in $(ls mlruns); do for run_id in $(ls mlruns/$exp_id);do if $(cat mlruns/$exp_id/$run_id/meta.yaml | grep -q "deleted_time"); then rm -r mlruns/$exp_id/$run_id ; fi; done ; done
 
 # for pid in $(ps -ef | awk '/autopopulus\/impute.py/ {print $2}'); do kill -9 $pid; done
+# for pid in $(ps -ef | awk '/RayTrainWorker/ {print $2}'); do kill -9 $pid; done
