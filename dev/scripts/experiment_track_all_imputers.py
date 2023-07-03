@@ -163,6 +163,7 @@ class RunManager:
             for command_args in product_dict(**listify_command_args(command_args)):
                 parent_hash = self.run("autopopulus/impute.py", command_args)
                 sub_command_args = {**command_args, "parent-hash": parent_hash}
+                self._kill_orphaned_ray_procs()
                 self.run("autopopulus/evaluate.py", sub_command_args)
                 self.run("autopopulus/predict.py", sub_command_args)
 
@@ -175,6 +176,11 @@ class RunManager:
                 return runs[existing_run]["run_id"].squeeze()
             return None
         return None
+
+    def _kill_orphaned_ray_procs(self):
+        subprocess.run(
+            "for pid in $(ps -ef | awk '($3 == 1 && $8 ~ /ray/){ print $2; }'); do kill -9 $pid; done".split()
+        )
 
     def run(self, pyfile: str, command_args: Dict[str, Any]) -> str:
         command = [sys.executable, pyfile]
@@ -234,73 +240,89 @@ def product_dict(**kwargs):
         yield dict(zip(keys, instance))
 
 
-run_manager = RunManager(experiment_tracker=experiment_tracker)
-for dataset in datasets:
-    # fully_observed=no uses entire dataset
-    all_data = data_filtering[dataset]["all_data"]
-    # fully_observed=yes will ampute and impute a missingness scenario
-    fully_observed = data_filtering[dataset]["fully_observed"]
-    # fully_observed = False
+def run_all():
+    run_manager = RunManager(experiment_tracker=experiment_tracker)
+    for dataset in datasets:
+        # fully_observed=no uses entire dataset
+        all_data = data_filtering[dataset]["all_data"]
+        # fully_observed=yes will ampute and impute a missingness scenario
+        fully_observed = data_filtering[dataset]["fully_observed"]
+        # fully_observed = False
 
-    if fully_observed:
-        with open(f"dev/{dataset}_amputation_pattern_grid.txt", "r") as f:
-            amputation_patterns = json.load(f)
+        if fully_observed:
+            with open(f"dev/{dataset}_amputation_pattern_grid.txt", "r") as f:
+                amputation_patterns = json.load(f)
 
-    # https://my.guild.ai/t/command-run/146
-    # https://my.guild.ai/t/running-cases-in-parallel/341
-    for method in chosen_methods:
+        # https://my.guild.ai/t/command-run/146
+        # https://my.guild.ai/t/running-cases-in-parallel/341
+        for method in chosen_methods:
+            print("======================================================")
+            print(f"Staging {method} imputation...")
+            if method == "none":
+                run_manager.run_command(
+                    {"method": "none", "fully-observed": "yes", "dataset": dataset}
+                )
+            else:
+                command_args = {
+                    "method": method,
+                    "dataset": dataset,
+                }
+                # bootstrap evaluate the baseline models no matter what
+                # manually pick the AE models to bootstrap eval later
+                if method in imputer_groups["baseline"]:
+                    command_args["bootstrap-evaluate-imputer"] = True
+                # Added to the end if the conditions are met otherwise nothing happens
+                if method in imputer_groups["ae"]:
+                    command_args = {
+                        **command_args,
+                        "feature-map": feature_mapping,
+                        "replace-nan-with": replace_nan_with,
+                    }
+                elif (
+                    method in imputer_groups["variational"]
+                ):  # on vae and dvae only try target_encode_categorical
+                    command_args = {
+                        **command_args,
+                        "feature-map": feature_mapping_variational,
+                        "replace-nan-with": replace_nan_with,
+                    }
+                # if command_args.get("feature-map", "") == "discretize_continuous":
+                # command_args["uniform-prob"] = True
+
+                if all_data:
+                    # When multiple flags have list values, Guild generates the cartesian product of all possible flag combinations.
+                    all_data_command_args = {**command_args, "fully-observed": "no"}
+                    run_manager.run_command(all_data_command_args)
+                if fully_observed:
+                    fully_observed_command_args = {
+                        **command_args,
+                        "fully-observed": "yes",
+                        "percent-missing": percent_missing,
+                        "amputation-patterns": amputation_patterns,
+                    }
+                    run_manager.run_command(fully_observed_command_args)
+    run_manager.close()
+
+    if experiment_tracker == "guild" and guild_use_queues:
         print("======================================================")
-        print(f"Staging {method} imputation...")
-        if method == "none":
-            run_manager.run_command(
-                {"method": "none", "fully-observed": "yes", "dataset": dataset}
-            )
-        else:
-            command_args = {
-                "method": method,
-                "dataset": dataset,
-            }
-            # bootstrap evaluate the baseline models no matter what
-            # manually pick the AE models to bootstrap eval later
-            if method in imputer_groups["baseline"]:
-                command_args["bootstrap-evaluate-imputer"] = True
-            # Added to the end if the conditions are met otherwise nothing happens
-            if method in imputer_groups["ae"]:
-                command_args = {
-                    **command_args,
-                    "feature-map": feature_mapping,
-                    "replace-nan-with": replace_nan_with,
-                }
-            elif (
-                method in imputer_groups["variational"]
-            ):  # on vae and dvae only try target_encode_categorical
-                command_args = {
-                    **command_args,
-                    "feature-map": feature_mapping_variational,
-                    "replace-nan-with": replace_nan_with,
-                }
-            # if command_args.get("feature-map", "") == "discretize_continuous":
-            # command_args["uniform-prob"] = True
+        print("Starting Queues...")
+        for _ in range(guild_use_queues):
+            # https://stackoverflow.com/a/70072233/1888794
+            subprocess.run("guild run queue run-once=yes -y", shell=True)
+        # subprocess.run('guild view -h 127.0.0.1')
 
-            if all_data:
-                # When multiple flags have list values, Guild generates the cartesian product of all possible flag combinations.
-                all_data_command_args = {**command_args, "fully-observed": "no"}
-                run_manager.run_command(all_data_command_args)
-            if fully_observed:
-                fully_observed_command_args = {
-                    **command_args,
-                    "fully-observed": "yes",
-                    "percent-missing": percent_missing,
-                    "amputation-patterns": amputation_patterns,
-                }
-                run_manager.run_command(fully_observed_command_args)
 
-run_manager.close()
+def rerun(command_args_list: List[Dict[str, Any]]):
+    run_manager = RunManager(experiment_tracker=experiment_tracker)
+    for command_args in command_args_list:
+        run_manager.run_command(command_args)
+    run_manager.close()
 
-if experiment_tracker == "guild" and guild_use_queues:
-    print("======================================================")
-    print("Starting Queues...")
-    for _ in range(guild_use_queues):
-        # https://stackoverflow.com/a/70072233/1888794
-        subprocess.run("guild run queue run-once=yes -y", shell=True)
-    # subprocess.run('guild view -h 127.0.0.1')
+
+if __name__ == "__main__":
+    # run_all()
+    from pickle import load
+
+    with open("retry_runs.pkl", "rb") as file:
+        command_args_list = load(file)
+    rerun(command_args_list)
