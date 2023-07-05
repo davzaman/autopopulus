@@ -179,7 +179,8 @@ class RunManager:
 
     def _kill_orphaned_ray_procs(self):
         subprocess.run(
-            "for pid in $(ps -ef | awk '($3 == 1 && $8 ~ /ray/){ print $2; }'); do kill -9 $pid; done".split()
+            "for pid in $(ps -ef | awk '($3 == 1 && $8 ~ /ray/){ print $2; }'); do kill -9 $pid; done",
+            shell=True,
         )
 
     def run(self, pyfile: str, command_args: Dict[str, Any]) -> str:
