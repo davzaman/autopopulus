@@ -14,3 +14,9 @@ for exp_id in $(ls mlruns); do for run_id in $(ls mlruns/$exp_id);do if $(cat ml
 
 # for pid in $(ps -ef | awk '/autopopulus\/impute.py/ {print $2}'); do kill -9 $pid; done
 # for pid in $(ps -ef | awk '/RayTrainWorker/ {print $2}'); do kill -9 $pid; done
+# print orphaned ray workers, $0 represents the whole input record
+# ref: https://unix.stackexchange.com/a/283393
+# ps -ef | awk -v user=$LOGNAME '($1 == user && $3 == 1 && $8 ~ /ray/){ print $0; }'
+
+# kill orphaned ray workers
+for pid in $(ps -ef | awk '($3 == 1 && $8 ~ /ray/){ print $2; }'); do kill -9 $pid; done

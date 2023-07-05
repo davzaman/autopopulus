@@ -75,7 +75,7 @@ client = mlflow.tracking.MlflowClient(tracking_uri=tracking_uri)
 
 # %%
 mlflow.set_tracking_uri(tracking_uri)
-all_runs = mlflow.search_runs(experiment_names=["baseline", "ae"])
+all_runs = mlflow.search_runs(experiment_names=["baseline", "ae", "ae-ec2"])
 # runs = mlflow.search_runs(search_all_experiments=True)
 
 # %%
@@ -87,6 +87,20 @@ metrics = metric_cols.str.replace("metrics.", "")
 runs = all_runs[all_runs["status"] == "FINISHED"]
 
 # %%
+# Duplicate runs
+dup_dims = [
+    "tags.method",
+    "tags.dataset",
+    "tags.fully_observed",
+    "tags.replace_nan_with",
+    "tags.feature_map",
+    "tags.percent_missing",
+    "tags.amputation_patterns",
+    "tags.bootstrap_evaluate_imputer",
+]
+dup_runs = runs[runs.duplicated(subset=dup_dims, keep=False)][["run_id"] + dup_dims]
+dup_runs
+# %%
 run_scalars = pd.concat([all_scalars(run_id) for run_id in runs["run_id"]])
 
 # %%
@@ -94,7 +108,7 @@ all_info = (
     runs.loc[:, ~is_metric_col]
     .merge(run_scalars, how="left", on="run_id")
     .drop(
-        # tags.feature_map is what we want
+        # tags.feature_map is what we want, not params.feature_map
         ["tags.feature_map"],
         axis=1,
     )
@@ -118,6 +132,14 @@ all_info.columns = (
 all_info = pd.concat([all_info, expand_amputation_pattern(all_info)], axis=1).astype(
     {"percent-missing": float}
 )
+
+# %%
+all_info[all_info["metric"].isna()]
+
+
+# %%
+# drop messed up runs
+all_info = all_info[all_info["metric"].notna()]
 
 # %%
 impute_data = expand_col(
