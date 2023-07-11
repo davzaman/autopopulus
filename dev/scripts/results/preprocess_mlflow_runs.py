@@ -75,7 +75,9 @@ client = mlflow.tracking.MlflowClient(tracking_uri=tracking_uri)
 
 # %%
 mlflow.set_tracking_uri(tracking_uri)
-all_runs = mlflow.search_runs(experiment_names=["baseline", "ae", "ae-ec2"])
+dataset = "cure_ckd"
+experiment_groups = {"crrt": ["crrt"], "cure_ckd": ["baseline", "ae", "ae-ec2"]}
+all_runs = mlflow.search_runs(experiment_names=experiment_groups[dataset])
 # runs = mlflow.search_runs(search_all_experiments=True)
 
 # %%
@@ -129,9 +131,10 @@ all_info.columns = (
 )
 
 # %%
-all_info = pd.concat([all_info, expand_amputation_pattern(all_info)], axis=1).astype(
-    {"percent-missing": float}
-)
+if dataset == "cure_ckd":
+    all_info = pd.concat(
+        [all_info, expand_amputation_pattern(all_info)], axis=1
+    ).astype({"percent-missing": float})
 
 # %%
 all_info[all_info["metric"].isna()]
@@ -164,7 +167,7 @@ impute_data
 # %%
 output_dir = "guild_runs"
 makedirs(output_dir, exist_ok=True)
-impute_data.to_pickle(join(root, output_dir, "mlflow_impute_results.pkl"))
+impute_data.to_pickle(join(root, output_dir, f"mlflow_{dataset}_impute_results.pkl"))
 
 # %%
 predict_data = expand_col(
@@ -179,7 +182,7 @@ predict_data = expand_col(
 )
 
 # %%
-predict_data.to_pickle(join(root, output_dir, "mlflow_predict_results.pkl"))
+predict_data.to_pickle(join(root, output_dir, f"mlflow_{dataset}_predict_results.pkl"))
 
 # %%
 time_data = expand_col(
@@ -192,6 +195,6 @@ time_data = expand_col(
 )
 
 # %%
-time_data.to_pickle(join(root, output_dir, "mlflow_time_results.pkl"))
+time_data.to_pickle(join(root, output_dir, f"mlflow_{dataset}_time_results.pkl"))
 
 # %%
