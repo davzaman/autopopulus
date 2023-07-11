@@ -95,7 +95,12 @@ if __name__ == "__main__":
     )
     best_for_mech = get_best_performance_per_mechanism(impute_data)
     run_manager = RunManager(experiment_tracker=tracker, continue_runs=False)
-    for run in best_for_mech["run"]:
+    if run_manager.experiment_tracker == "guild":
+        runs = enumerate(best_for_mech["run"])
+    else:
+        runs = best_for_mech.iterrows()
+
+    for _, run in runs:
         # want to rerun per mechanism even if the autoencoder type is the same
         eval_best_on_semi_observed(run_manager, run)
         eval_best_bootstrap(run_manager, run)
