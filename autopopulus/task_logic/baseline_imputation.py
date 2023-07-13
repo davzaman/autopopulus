@@ -45,6 +45,12 @@ def baseline_imputation_logic(
     # will create train/val/test
     data.setup("fit")
 
+    # apply transform
+    for split in ["train", "val", "test"]:
+        transformed = data._apply_post_split_transforms(split)["original"]
+        data.splits["data"][split] = transformed["data"]
+        data.splits["ground_truth"][split] = transformed["ground_truth"]
+
     imputed_data_per_split = fn(args, data)
     if any(
         [

@@ -1123,6 +1123,28 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
                     .union(self.columns["original"][flat_onehot_indices], sort=False)
                 )
 
+    def _apply_post_split_transforms(
+        self, split: str
+    ) -> Dict[str, Dict[str, DataFrame]]:
+        split_data = {}
+        data_feature_spaces = ["original"]
+        if self.feature_map is not None and self.feature_map != "onehot_categorical":
+            data_feature_spaces.append("mapped")
+        for data_feature_space in data_feature_spaces:  # ["original", "mapped"]
+            split_data[data_feature_space] = {}
+            for (
+                data_role,
+                split_dfs,
+            ) in self.splits.items():  # ["data", "ground_truth"]
+                if data_role != "label":  # apply transform to particular split
+                    if self.transforms is not None:
+                        split_data[data_feature_space][data_role] = self.transforms[
+                            data_feature_space
+                        ][data_role](split_dfs[split])
+                    else:
+                        split_data[data_feature_space][data_role] = split_dfs[split]
+        return split_data
+
     @staticmethod
     def _get_onehot_indices_from_groupby(
         groupby: Dict[str, Dict[int, str]]
@@ -1157,23 +1179,7 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         if apply_transform_adhoc:  # Apply transform 1-by-1 in Dataset __getitem__
             split_data = {k: v[split] for k, v in self.splits.items()}
         else:  # apply transform beforehand on the entire split
-            split_data = {}
-            data_feature_spaces = ["original"]
-            if self.feature_map != "onehot_categorical":
-                data_feature_spaces.append("mapped")
-            for data_feature_space in data_feature_spaces:  # ["original", "mapped"]
-                split_data[data_feature_space] = {}
-                for (
-                    data_role,
-                    split_dfs,
-                ) in self.splits.items():  # ["data", "ground_truth"]
-                    if data_role != "label":  # apply transform to particular split
-                        if self.transforms is not None:
-                            split_data[data_feature_space][data_role] = self.transforms[
-                                data_feature_space
-                            ][data_role](split_dfs[split])
-                        else:
-                            split_data[data_feature_space][data_role] = split_dfs[split]
+            split_data = self._apply_post_split_transforms(split)
 
         return self._create_dataloader(split, split_data, apply_transform_adhoc)
 
