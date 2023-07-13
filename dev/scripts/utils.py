@@ -84,7 +84,7 @@ PRETTY_NAMES = {
             None,
         ],
         "order": [
-            "One Hot Categorical",
+            "Mixed Features",
             "Target Encode Categorical",
             "Discretize Continuous",
             "None",
@@ -112,6 +112,7 @@ PRETTY_NAMES = {
         "name": "Score to Probability Missing",
     },
     "metric_name": {"name": "Metric"},
+    "reduction": {"name": "Metric Reduction"},
     "dataset": {
         "original": ["cure_ckd", "crrt"],
         "order": ["CURE CKD", "CRRT"],
@@ -133,7 +134,7 @@ def save_fig_to_svg(fig, fname: str = "impute_performance.svg"):
 
 
 def format_names(df: pd.DataFrame) -> pd.DataFrame:
-    return df.rename(  # Format col names
+    df = df.rename(  # Format col names
         {k: v["name"] for k, v in PRETTY_NAMES.items()}, axis="columns"
     ).replace(  # Format values
         {
@@ -142,6 +143,17 @@ def format_names(df: pd.DataFrame) -> pd.DataFrame:
             if "original" in v
         }
     )
+    # deal with multiindex
+    if isinstance(df.index, pd.MultiIndex):
+        levels = []
+        for level in df.index.levels:
+            info = PRETTY_NAMES.get(level.name, {})
+            mapper = dict(zip(info.get("original", {}), info.get("order", {})))
+            levels.append(level.map(mapper if mapper else lambda x: x))
+        df.index = df.index.set_levels(levels).set_names(
+            [PRETTY_NAMES.get(n, {}).get("name", n) for n in df.index.names]
+        )
+    return df
 
 
 # Filter for missing only
@@ -293,11 +305,19 @@ async def read_stream_and_display(stream, display) -> bytes:
     """
     output = []
     while True:
-        line = await stream.readline()
-        if not line:
-            break
-        output.append(line)
-        display(line)  # assume it doesn't block
+        try:
+            line = await stream.readline()
+            if not line:
+                break
+            output.append(line)
+            display(line)  # assume it doesn't block
+        except (
+            ValueError
+        ) as e:  # ValueError: Separator is not found, and chunk exceed the limit
+            msg_bytes = str(e).encode()
+            output.append(msg_bytes)
+            display(msg_bytes)
+            continue
     return b"".join(output)
 
 
@@ -306,8 +326,10 @@ async def read_and_display(*cmd) -> Tuple[int, bytes, bytes]:
     Capture cmd's stdout, stderr while displaying them as they arrive (line by line).
     Ref: https://stackoverflow.com/a/25960956/1888794
     """
-    # start process
-    process = await asyncio.create_subprocess_exec(*cmd, stdout=PIPE, stderr=PIPE)
+    # start process, https://stackoverflow.com/a/55458913/1888794
+    process = await asyncio.create_subprocess_exec(
+        *cmd, stdout=PIPE, stderr=PIPE, limit=1024 * 256  # 256 KiB
+    )
 
     # read child's stdout/stderr concurrently (capture and display)
     try:

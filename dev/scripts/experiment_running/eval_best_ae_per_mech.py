@@ -1,8 +1,10 @@
 import subprocess
 from os.path import join
 from typing import Union
+import mlflow
 import pandas as pd
 from guild.run import Run
+from dev.scripts import experiment_running
 
 from dev.scripts.utils import EXPERIMENT_RUNNING_ARGS, RunManager
 
@@ -74,13 +76,19 @@ def eval_best_bootstrap(run_manager: RunManager, eval_run: Union[pd.Series, Run]
         command = f"guild run --proto {run.id} method={method} bootstrap-evaluate-imputer=yes experiment-name=BEST_AE_PER_MECH -y"  # --force-sourcecode -y"
         subprocess.run(command.split())
     else:
+        tracking_uri = "/home/davina/Private/repos/autopopulus/mlruns"
+        client = mlflow.tracking.MlflowClient(tracking_uri=tracking_uri)
+        # the exp name might have changed from aws
+        experiment_name = client.get_experiment(
+            client.get_run(eval_run["run_id"]).info.experiment_id
+        ).name
         command_args = eval_run[
             [x.replace("_", "-") for x in EXPERIMENT_RUNNING_ARGS]
         ].to_dict()
         command_args.update(
             {
                 "bootstrap-evaluate-imputer": "yes",
-                "experiment-name": "BEST_AE_PER_MECH",
+                "experiment-name": experiment_name,
                 "parent-hash": eval_run["run_id"],
             }
         )
@@ -94,7 +102,7 @@ if __name__ == "__main__":
         f"/home/davina/Private/repos/autopopulus/guild_runs/{tracker}_{dataset}_impute_results.pkl"
     )
     best_for_mech = get_best_performance_per_mechanism(impute_data)
-    run_manager = RunManager(experiment_tracker=tracker, continue_runs=False)
+    run_manager = RunManager(experiment_tracker=tracker, continue_runs=True)
     if run_manager.experiment_tracker == "guild":
         runs = enumerate(best_for_mech["run"])
     else:

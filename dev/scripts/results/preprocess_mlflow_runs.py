@@ -1,11 +1,13 @@
 # %%
 # I only need this if i'm running this as interactive cells, instead of a script
+from concurrent.futures import ProcessPoolExecutor
 from os import makedirs
 from os.path import join
 import sys
 
 
 root = "/home/davina/Private/repos/autopopulus"
+dataset = "cure_ckd"
 
 sys.path.insert(0, join(sys.path[0], root))
 
@@ -75,8 +77,10 @@ client = mlflow.tracking.MlflowClient(tracking_uri=tracking_uri)
 
 # %%
 mlflow.set_tracking_uri(tracking_uri)
-dataset = "cure_ckd"
-experiment_groups = {"crrt": ["crrt"], "cure_ckd": ["baseline", "ae", "ae-ec2"]}
+experiment_groups = {
+    "crrt": ["crrt"],
+    "cure_ckd": ["baseline", "ae", "ae-ec2", "BEST_AE_PER_MECH_SEMI_OBSERVED"],
+}
 all_runs = mlflow.search_runs(experiment_names=experiment_groups[dataset])
 # runs = mlflow.search_runs(search_all_experiments=True)
 
@@ -99,11 +103,16 @@ dup_dims = [
     "tags.percent_missing",
     "tags.amputation_patterns",
     "tags.bootstrap_evaluate_imputer",
+    "tags.evaluate_on_remaining_semi_observed",
 ]
 dup_runs = runs[runs.duplicated(subset=dup_dims, keep=False)][["run_id"] + dup_dims]
 dup_runs
 # %%
-run_scalars = pd.concat([all_scalars(run_id) for run_id in runs["run_id"]])
+# Ref: https://stackoverflow.com/a/56138825/1888794
+with ProcessPoolExecutor() as executor:
+    run_scalars = [executor.submit(all_scalars(run_id)) for run_id in runs["run_id"]]
+    run_scalars = [future.result() for future in run_scalars]
+run_scalars = pd.concat(run_scalars)
 
 # %%
 all_info = (
@@ -152,6 +161,7 @@ impute_data = expand_col(
             ~all_info["metric"].str.contains(
                 "sys|hp_metric|epoch|step|restore|done|time|checkpoint|lgbm|rf"
             )
+            & (all_info["evaluate-on-remaining-semi-observed"] != "True")
         ),
         # temp hack to replace name with metric_name to avoid col name collision
         "expanded_columns": re.sub("{|}", "", IMPUTE_METRIC_TAG_FORMAT)
@@ -161,7 +171,6 @@ impute_data = expand_col(
     all_info,
 )
 
-# %%
 impute_data
 
 # %%
@@ -173,16 +182,35 @@ impute_data.to_pickle(join(root, output_dir, f"mlflow_{dataset}_impute_results.p
 predict_data = expand_col(
     {  # predict metrics
         "column": "metric",
-        "filter": all_info["metric"].str.contains("lgbm|rf"),
+        "filter": all_info["metric"].str.contains("lgbm|rf")
+        & (all_info["evaluate-on-remaining-semi-observed"] != "True"),
         "expanded_columns": re.sub("{|}", "", PREDICT_METRIC_TAG_FORMAT)
         .replace("name", "metric_name")
         .split("/"),
     },
     all_info,
 )
+predict_data
 
 # %%
 predict_data.to_pickle(join(root, output_dir, f"mlflow_{dataset}_predict_results.pkl"))
+
+# %%
+if dataset == "cure_ckd":
+    semi_obs = expand_col(
+        {  # predict metrics
+            "column": "metric",
+            "filter": all_info["metric"].str.contains("lgbm|rf")
+            & (all_info["evaluate-on-remaining-semi-observed"] == "True"),
+            "expanded_columns": re.sub("{|}", "", PREDICT_METRIC_TAG_FORMAT)
+            .replace("name", "metric_name")
+            .split("/"),
+        },
+        all_info,
+    )
+    semi_obs.to_pickle(
+        join(root, output_dir, f"mlflow_{dataset}_semi_obs_predict_results.pkl")
+    )
 
 # %%
 time_data = expand_col(
