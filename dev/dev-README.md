@@ -1,9 +1,9 @@
 # Project Structure
 - `options.yml`: argument values for running autopopulus in general (e.g., data paths to datasets, and other arguments to run imputation).
-  When not running with guild, all ArgParse defaults will be overriden with values provided here.
+  When not running with guild, all ArgParse defaults will be overriden with values provided here, with command-line arugments at highest precedence.
 - `guild.yml`: config for running experiments via guild for experiment tracking.
-  Note that any flags defined here need to be passed in on calling `guild run ...`, the `options.yml` values will not be filled in, only the ArgParse defaults defined in my code.
-- `scripts/`: directory of helpful scripts for running experiments via guild.
+  Note that any flags defined here need to be passed in on calling `guild run ...`, the `options.yml` values will not be filled in, only the ArgParse defaults defined in the code.
+- `scripts/`: directory of helpful scripts for running experiments and visualizing results.
 - `notebooks/`: directory of jupyter notebooks for experimental or adhoc scripts
 - `autopopulus/`: root directory for all the source code
   - `impute.py`: main logic for training an imputer/running imputation. Serialized imputed output.
@@ -36,19 +36,6 @@ Run all the scripts here from the root of the project, not in `/dev/`.
 - `data_description/ae_type_name/predictor_model`: tensorboard logs of predictive preformance under a certain data (full, amputed, etc), aeutoencoder type (ap_new, etc), and predictor model (lr, rf).
 - `data_description/ae_type_name/lightning_logs`: tensorboard logs of training and evaluation metrics of autoencoder under certain data.
 
-# Datasets
-- `../ckd-data`: data from ucla and providence.
-- `../ckd-data-new`: updated data from ucla and providence.
-- `../covid-ckd-data`: covid data for ckd patients at ucla and providence.
-- `../dialysis-data`: data from end-stage renal patients on dialysis.
-- `../FIDDLE`: lib used for processing mimic
-- `../FIDDLE_experiments`: lib used for preprocessing raw mimic so the FIDDLE tool can use it.
-- `../mimic3`: downloaded straight from MIT as csv.
-- `../mimic3-benchmarks`: tools from YerevaNN group to benchmark mimic.
-- `../mimic3_processed`: output folder for FIDDLE processing.
-  -..he output of FIDDLE is in `../mimic3_processed/FIDDLE_run/`
-- `../mimic3-yerevann`: mimic procressing from another group other than FIDDLE.
-
 ## Data Loading
 For each new dataset added/supported write a data loader class in `data/`.
 The class should extend `AbstractDatasetLoader`. Look at the definition of that class to know how to implement the data loader (implement all `@abstractmethod`s and `abstract_attribute()`s). They will also be able to initialized via CLI arguments with `from_argparse_args` if you wish.
@@ -63,14 +50,6 @@ SimpleDatasetLoader(
     onehot_prefixes=["abc"],
 )
 ```
-
-### MIMIC
-- MIMIC3 data downloaded from MIT, unzipped using `find . -name '*.csv.gz' -print0 | xargs -0 -n1 gzip -d`
-- preprocessing using YerevaNN work
-  - Followed the steps [here](https://github.com/YerevaNN/mimic3-benchmarks#building-a-benchmark) and [here](https://github.com/YerevaNN/mimic3-benchmarks#train--validation-split)
-  - I only did the decomposition task since it most resembles our rapid decline task.
-  - debugging/code edits submitted as an issue [here](https://github.com/YerevaNN/mimic3-benchmarks/issues/102)
-- After preprocessing, I zipped the original MIMIC3 CSVs to save space with `zip mimic3.ziip -r physionet.org/files/mimiciii/1.4/`. To unzip: `unzip mimic3.zip -d /mimic3`.
 
 # Environment
 Install the env with conda or mamba. With mamba:
@@ -92,12 +71,6 @@ You might see `AttributeError: module 'typing' has no attribute '_ClassVar'`, in
 
 ## Technology
 We use pytorch-lightning. Important tips and tricks [here](https://lightning.ai/docs/pytorch/stable/advanced/speed.html).
-# Experiments
-If you want to add new imputers:
-  - add the name to the `guild.yml` options for method under the `imputer` operation.
-  - add the name for individual guild operation.
-  - add corresponding function to `*_experiments.py`
-
 ## Ray[Tune]
 If using Ray[Tune], to monitor the tuning experiments with a dashboard you can use `tune.init(include_dashboard=True)`.
 However, if you are running into issues, you can check the logs at `cat /tmp/ray/session_latest/logs/dashboard.log` or `cat /tmp/ray/session_latest/logs/dashboard_agent.log`.
@@ -112,26 +85,3 @@ Installation instructions from ray [here](https://docs.ray.io/en/latest/ray-over
   - `pip install --upgrade nbstripout`
   - Navigate to repository directory and run on the terminal `nbstripout --install`
   - Check the created filters: `nbstripout --status`
-- [Snakeviz](https://jiffyclub.github.io/snakeviz/) will help profile the performance runtime-wise.
-
-# Experiment Tracking
-I currently use GuildAI for experiment tracking because it loads into jupyter/pandas more nicely for post-hoc analysis.
-GuildAI is closer to a Makefile + experiment tracking.
-It's very easy to plug in, just add in a `guild.yml` file and then some scripts to run all the different configurations I'd like.
-
-## GuildAI
-
-Important [commands](https://my.guild.ai/t/commands-cheatsheet/193):
-If you want to port-forward `guild view` ui from VSCODE you're going to need to set the host: `guild view -h 127.0.0.1`
-
-## Aim
-Aim is less an experiment tracker and more a better metric visualizer.
-If you have issues installing do the following:
-```shell
-pip install Cython==3.0.0a9
-pip uninstall aim
-pip install --no-binary :aim: aim==3.15.1
-```
-Currently this fix doesn't work for 3.15.2 nor 3.16.
-
-First you need to do `aim init` in the base directory.
