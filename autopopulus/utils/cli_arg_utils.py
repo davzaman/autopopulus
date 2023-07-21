@@ -1,26 +1,11 @@
 from argparse import ArgumentParser, ArgumentTypeError, Namespace, Action
 from enum import Enum
 import re
-import sys
-import yaml
-from os.path import isfile
+
 from collections import ChainMap
 from typing import Dict, List, Optional
 from json import loads
 from logging import warn
-
-
-def load_cli_args(args_options_path: str = "options.yml"):
-    """
-    Modify command line args if desired, or load from YAML file.
-    """
-    if isfile(args_options_path):  # if file exists
-        with open(args_options_path, "r") as f:
-            res = yaml.safe_load(f)
-
-        # sys.argv = [sys.argv[0]]
-        for k, v in res.items():
-            sys.argv += [f"--{k}", str(v)]
 
 
 def parse_guild_args(obj, base_prefix=""):
@@ -83,7 +68,10 @@ def StringToEnum(enum: Enum):
 
 
 def string_json_to_python(obj_string: str) -> Dict:
-    return loads(obj_string.replace("'", '"'))
+    try:
+        return loads(obj_string.replace("'", '"'))
+    except:
+        print(obj_string)
 
 
 def YAMLStringListToList(convert: type = str, choices: Optional[List[str]] = None):
@@ -97,7 +85,6 @@ def YAMLStringListToList(convert: type = str, choices: Optional[List[str]] = Non
             values: str,
             option_string: Optional[str] = None,
         ):
-
             if convert == dict:  # Internal dict will be a string
                 values = string_json_to_python(values)
                 setattr(namespace, self.dest, values)

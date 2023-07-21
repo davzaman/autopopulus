@@ -8,7 +8,6 @@ from os.path import join
 from shutil import copytree, rmtree
 
 from torch.cuda import empty_cache
-from pytorch_lightning.loggers import TensorBoardLogger
 
 from optuna import Study, create_study
 from optuna.trial import FrozenTrial, Trial
@@ -19,8 +18,11 @@ from optuna.integration.pytorch_lightning import PyTorchLightningPruningCallback
 from autopopulus.data.dataset_classes import CommonDataModule
 from autopopulus.models.ap import AEImputer
 from autopopulus.utils.log_utils import (
+    IMPUTE_METRIC_TAG_FORMAT,
+    SERIALIZED_AE_IMPUTER_MODEL_FORMAT,
+    AutoencoderLogger,
+    BasicLogger,
     copy_log_from_tune,
-    get_logdir,
     get_serialized_model_path,
     TUNE_LOG_DIR,
 )
@@ -29,11 +31,14 @@ from autopopulus.utils.log_utils import (
 def create_autoencoder(
     args: Namespace, data: CommonDataModule, settings: Dict
 ) -> AEImputer:
-    logdir = get_logdir(args)
+    # TODO: this is probably broken now that i've changed everything about logging.
+    logdir = BasicLogger.get_logdir(BasicLogger.get_base_context_from_args(args))
     if args.tune_n_samples:
         best_trial_num, best_model_config = run_tune(args, data, settings)
         args.trial_num = best_trial_num
-        best_tune_logdir = get_logdir(args)
+        best_tune_logdir = BasicLogger.get_logdir(
+            BasicLogger.get_base_context_from_args(args)
+        )
         # Copy serialized model and logged values to local path, ignoring tune artifacts
         copy_log_from_tune(best_tune_logdir, logdir)
         copytree(
@@ -47,7 +52,11 @@ def create_autoencoder(
 
         # Load up (now we can do from local because we copied over)
         best_checkpoint = get_serialized_model_path(
-            f"AEDitto_{data.data_type_time_dim.name}", "pt", best_trial_num
+            SERIALIZED_AE_IMPUTER_MODEL_FORMAT.format(
+                data_type_time_dim=data.data_type_time_dim.name
+            ),
+            "pt",
+            best_trial_num,
         )
         ae_imputer = AEImputer.from_checkpoint(
             args, ae_from_checkpoint=best_checkpoint, **best_model_config
@@ -60,7 +69,7 @@ def create_autoencoder(
         return ae_imputer
 
     # If not tuning assume we've been given a specific setting for hyperparams
-    logger = TensorBoardLogger(logdir)
+    logger = AutoencoderLogger(logdir)
     ae_imputer = AEImputer.from_argparse_args(
         args,
         logger=logger,
@@ -106,9 +115,15 @@ def tune_model_optuna(
     args.trial_num = trial.number
 
     config = get_tune_grid(args, trial)
-    logger = TensorBoardLogger(get_logdir(args))
-    data_type_time_dim_name = data.data_type_time_dim.name
-    metric = f"impute/{data_type_time_dim_name}/original/val-CWMAAPE-missingonly"
+    logger = AutoencoderLogger(args)
+    metric = IMPUTE_METRIC_TAG_FORMAT.format(
+        name="MAAPE",
+        feature_space="original",
+        filter_subgroup="missingonly",
+        reduction="CW",
+        split="val",
+        feature_type="mixed",
+    )
 
     ae_imputer = AEImputer.from_argparse_args(
         args,

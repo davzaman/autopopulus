@@ -1,7 +1,7 @@
 ######################
 #     OPERATIONS     #
 ######################
-- config: high-level-flags
+- config: shared-attrs
   flags:
     method:
       required: yes
@@ -11,6 +11,7 @@
       arg-skip: yes  #  don't include as arg, log to guild
       type: string
     fully-observed:
+      type: string
       required: no
       # arg-switch: yes  # ref: https://my.guild.ai/t/flag-not-recognized-no-module-named-batch-size/770/7
     feature-map:
@@ -24,88 +25,86 @@
     replace-nan-with:
       required: no
       type: string
+    dataset:
+      required: no
+      type: string
+    bootstrap-evaluate-imputer:
+      required: no
+      type: string
+    evaluate-on-remaining-semi-observed:
+      required: no
+      type: string
+    ae-hparams-from-checkpoint:
+      required: no
+      type: string
+    tune-n-samples:
+      required: no
+      type: int
 
 # what to do when you run `guild run`
 - operations:
     main:
       description: Train and evaluate an imputer, run downstream predictions.
       label: ${method} ${experiment-name}
-      # plugins: summary
       env: # don't save pycache
         PYTHONDONTWRITEBYTECODE: 1
-      sourcecode:
-        - include:
-          - '*.py'
-          - '*.json'
-          - '*.yml'
-        - exclude:
-            dir:
-              - mlruns
-              - notebooks
-              - tune_results
-              - full
-              - profiling-results
-              - fil-result
+      sourcecode: no
       output-scalars: off
       requires:
         config: options.yml
       flags:
         $include:
-          - high-level-flags
+          - shared-attrs
       steps:
-        - run: train_predict method=${method} experiment-name=${experiment-name} fully-observed=${fully-observed} feature-map=${feature-map} percent-missing=${percent-missing} amputation-patterns=${amputation-patterns} replace-nan-with=${replace-nan-with}
-        - run: test method=${method} experiment-name=${experiment-name} fully-observed=${fully-observed} feature-map=${feature-map} percent-missing=${percent-missing} amputation-patterns=${amputation-patterns} replace-nan-with=${replace-nan-with}
+        - run: impute method=${method} experiment-name=${experiment-name}  fully-observed=${fully-observed} feature-map=${feature-map} percent-missing=${percent-missing} amputation-patterns=${amputation-patterns} replace-nan-with=${replace-nan-with} dataset=${dataset} bootstrap-evaluate-imputer=${bootstrap-evaluate-imputer} evaluate-on-remaining-semi-observed=${evaluate-on-remaining-semi-observed} ae-hparams-from-checkpoint=${ae-hparams-from-checkpoint} tune-n-samples=${tune-n-samples}
+        - run: evaluate method=${method} experiment-name=${experiment-name} fully-observed=${fully-observed} feature-map=${feature-map} percent-missing=${percent-missing} amputation-patterns=${amputation-patterns} replace-nan-with=${replace-nan-with} dataset=${dataset} bootstrap-evaluate-imputer=${bootstrap-evaluate-imputer} evaluate-on-remaining-semi-observed=${evaluate-on-remaining-semi-observed} ae-hparams-from-checkpoint=${ae-hparams-from-checkpoint} tune-n-samples=${tune-n-samples}
+        - run: predict method=${method} experiment-name=${experiment-name}  fully-observed=${fully-observed} feature-map=${feature-map} percent-missing=${percent-missing} amputation-patterns=${amputation-patterns} replace-nan-with=${replace-nan-with} dataset=${dataset} evaluate-on-remaining-semi-observed=${evaluate-on-remaining-semi-observed} ae-hparams-from-checkpoint=${ae-hparams-from-checkpoint} tune-n-samples=${tune-n-samples}
 
-    train_predict:
+    impute:
       description: Train an imputer and run predictions.
       label: ${method} ${experiment-name}
-      main: autopopulus/main
+      main: autopopulus/impute
+      plugins: summary
       env: # don't save pycache
         PYTHONDONTWRITEBYTECODE: 1
-      sourcecode:
-        - include:
-          - '*.py'
-          - '*.json'
-          - '*.yml'
-        - exclude:
-            dir:
-              - mlruns
-              - notebooks
-              - tune_results
-              - full
-              - profiling-results
-              - fil-result
+      sourcecode: no
       output-scalars: off
       requires:
         - config: options.yml
       flags:
         $include:
-          - high-level-flags
-
-    test:
-      description: Evaluate/test an imputer if it's an autoencoder.
+          - shared-attrs
+      
+    predict:
+      description: Run predictions on imputed data.
       label: ${method} ${experiment-name}
-      main: autopopulus/evaluate_imputer
+      main: autopopulus/predict
       env: # don't save pycache
         PYTHONDONTWRITEBYTECODE: 1
-      sourcecode:
-        - include:
-          - '*.py'
-          - '*.json'
-          - '*.yml'
-        - exclude:
-            dir:
-              - mlruns
-              - notebooks
-              - tune_results
-              - full
-              - profiling-results
-              - fil-result
+      sourcecode: no
       output-scalars: off
       requires:
         - config: options.yml
-        - operation: train_predict  # require files generated by train_predict
+        - operation: impute # require files generated by impute
+          select: serialized_models
+          target-type: link # tells Guild to link ot the resolved files, not copy
       flags:
         $include:
-          - high-level-flags
-    
+          - shared-attrs
+
+    evaluate:
+      description: Evaluate/test an imputer (autoencoders only).
+      label: ${method} ${experiment-name}
+      main: autopopulus/evaluate
+      env: # don't save pycache
+        PYTHONDONTWRITEBYTECODE: 1
+      sourcecode: no
+      output-scalars: off
+      requires:
+        - config: options.yml
+        - operation: impute
+          select: serialized_models
+          target-type: link # tells Guild to link ot the resolved files, not copy
+      flags:
+        $include:
+          - shared-attrs

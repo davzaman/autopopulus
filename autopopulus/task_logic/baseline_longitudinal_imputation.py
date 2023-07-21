@@ -1,5 +1,5 @@
 from argparse import Namespace
-from typing import Tuple
+from typing import Dict
 import pandas as pd
 import numpy as np
 
@@ -13,11 +13,8 @@ from pypots.imputation import (
 ## Local Modules
 from autopopulus.data import PAD_VALUE, CommonDataModule
 
-# Alias
-InputDataSplit = Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
 
-
-def brits(args: Namespace, data: CommonDataModule) -> InputDataSplit:
+def brits(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
     data_version = "mapped" if "mapped" in data.nfeatures else "original"
     brits = BRITS(data.nfeatures[data_version] * 0.5)
 
@@ -33,17 +30,9 @@ def brits(args: Namespace, data: CommonDataModule) -> InputDataSplit:
         ), "Data passed has unequal sequence lengths."
         return df.values.reshape(-1, max(seq_lens), data.nfeatures[data_version])
 
-    imputer = brits.fit(
-        multi_index_df_to_3d_numpy(data.splits["data"]["train"])
-    )
-    X_train = imputer.impute(
-        multi_index_df_to_3d_numpy(data.splits["data"]["train"])
-    )
-    X_val = imputer.impute(
-        multi_index_df_to_3d_numpy(data.splits["data"]["val"])
-    )
-    X_test = imputer.impute(
-        multi_index_df_to_3d_numpy(data.splits["data"]["test"])
-    )
+    imputer = brits.fit(multi_index_df_to_3d_numpy(data.splits["data"]["train"]))
+    X_train = imputer.impute(multi_index_df_to_3d_numpy(data.splits["data"]["train"]))
+    X_val = imputer.impute(multi_index_df_to_3d_numpy(data.splits["data"]["val"]))
+    X_test = imputer.impute(multi_index_df_to_3d_numpy(data.splits["data"]["test"]))
 
-    return (X_train, X_val, X_test)
+    return {"train": X_train, "val": X_val, "test": X_test}

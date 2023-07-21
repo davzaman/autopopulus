@@ -26,32 +26,17 @@ from autopopulus.data.transforms import identity
 from autopopulus.test.utils import (
     build_onehot_from_hypothesis,
     create_fake_disc_data,
+    get_dataset_loader,
     mock_disc_data,
 )
-from data.utils import onehot_multicategorical_column
-
-
-def get_dataset_loader(data, label) -> SimpleDatasetLoader:
-    return SimpleDatasetLoader(
-        data,
-        label,
-        **{
-            "continuous_cols": columns["ctn_cols"],
-            "categorical_cols": list(
-                set(columns["columns"]) - set(columns["ctn_cols"])
-            ),
-            "onehot_prefixes": columns["onehot_prefix_names"],
-        },
-    )
-
+from autopopulus.data.utils import onehot_multicategorical_column
 
 standard = {
     # "dataset_loader": get_dataset_loader(X["X"], y),
     "seed": seed,
-    "val_test_size": 0.5,
     "test_size": 0.5,
+    "val_size": 0.5,
     "batch_size": 2,
-    "num_gpus": 0,
     "percent_missing": 0.33,
     # "missingness_mechanism": "MCAR",
 }
@@ -129,27 +114,18 @@ class TestCommonDataModule(unittest.TestCase):
                 dataset_loader=dataset_loader,
                 fully_observed=False,
                 scale=False,
-                ampute=False,
                 feature_map=None,
                 uniform_prob=True,
             )
 
-        # ampute with missing necessary components
         with self.assertRaises(AssertionError):
-            new_settings = self.standard.copy()
-            new_settings["percent_missing"] = None
-            CommonDataModule(**new_settings, dataset_loader=dataset_loader, ampute=True)
-
-        with self.assertRaises(AssertionError):
-            new_settings = self.standard.copy()
-            new_settings["amputation_patterns"] = None
-            CommonDataModule(**new_settings, dataset_loader=dataset_loader, ampute=True)
-
-        with self.assertRaises(AssertionError):
-            new_settings = self.standard.copy()
-            dataset_loader = get_dataset_loader(X["X"], y)
-            dataset_loader.missing_cols = None
-            CommonDataModule(**new_settings, dataset_loader=dataset_loader, ampute=True)
+            # no fully_observed but eval_on_remaining
+            CommonDataModule(
+                **self.standard,
+                dataset_loader=dataset_loader,
+                fully_observed=False,
+                evaluate_on_remaining_semi_observed=True,
+            )
 
         with self.assertRaises(TypeError):
             # Need to pass a dataloader
@@ -250,7 +226,13 @@ class TestCommonDataModule(unittest.TestCase):
 
         with self.subTest("nfeatures"):
             data._set_nfeatures()
-            self.assertDictEqual(data.nfeatures, {"original": 10})
+            self.assertDictEqual(
+                data.nfeatures,
+                {
+                    "original": len(hypothesis["onehot"]["ctn_cols_idx"])
+                    + len(hypothesis["onehot"]["cat_cols_idx"])
+                },
+            )
 
         with self.subTest("set_post_split_transforms"):
             # don't allow infinite values for the transforms
@@ -260,16 +242,15 @@ class TestCommonDataModule(unittest.TestCase):
             data._set_post_split_transforms()
             self.assertEqual(data.transforms, None)
 
-            cuts = [[(0, 1), (1, 2)], [(0, 0.5), (0.5, 1), (1, 1.5)]]
-            category_names = [
-                ["0 - 1", "1 - 2"],
-                ["0 - 0.5", "0.5 - 1", "1 - 1.5"],
-            ]
             disc_data = create_fake_disc_data(
-                rng, nsamples, cuts, category_names, hypothesis["ctn_cols"]
+                rng,
+                nsamples,
+                hypothesis["disc_ctn"]["cuts"],
+                hypothesis["disc_ctn"]["category_names"],
+                hypothesis["ctn_cols"],
             )
             mock_disc_data(mock_MDL, disc_data, y)
-            mock_disc_cuts.return_value = cuts
+            mock_disc_cuts.return_value = hypothesis["disc_ctn"]["cuts"]
 
             # the point isn't to integration test the transforms
             # it's to check we have the info we need and named correctly
@@ -284,10 +265,7 @@ class TestCommonDataModule(unittest.TestCase):
                         **self.standard,
                         scale=True,
                     )
-                    data.columns = {"original": df.columns}
-                    data._set_col_idxs_by_type()
-                    data._set_groupby()
-                    data._set_nfeatures()
+                    data._set_auxilliary_column_info(df)
                     data._split_dataset(df, df, y)
                     data._set_post_split_transforms()
                     for data_name in ["data", "ground_truth"]:
@@ -316,10 +294,7 @@ class TestCommonDataModule(unittest.TestCase):
                         feature_map="discretize_continuous",
                         uniform_prob=True,
                     )
-                    data.columns = {"original": df.columns}
-                    data._set_col_idxs_by_type()
-                    data._set_groupby()
-                    data._set_nfeatures()
+                    data._set_auxilliary_column_info(df)
                     data._split_dataset(df, df, y)
                     data._set_post_split_transforms()
 
@@ -386,10 +361,7 @@ class TestCommonDataModule(unittest.TestCase):
                         **self.standard,
                         feature_map="target_encode_categorical",
                     )
-                    data.columns = {"original": df.columns}
-                    data._set_col_idxs_by_type()
-                    data._set_groupby()
-                    data._set_nfeatures()
+                    data._set_auxilliary_column_info(df)
                     data._split_dataset(df, df, y)
                     data._set_post_split_transforms()
                     # If i called setup this would set auxilliary data, I want the intermediate stuff
@@ -422,7 +394,7 @@ class TestCommonDataModule(unittest.TestCase):
                         ].__self__.named_steps["combine_onehots"]
 
                         self.assertDictEqual(
-                            combine_onehots_obj.onehot_groupby,
+                            combine_onehots_obj.onehot_groupby_prefix,
                             dict(
                                 zip(
                                     hypothesis["onehot"]["onehot_cols"],
@@ -437,8 +409,12 @@ class TestCommonDataModule(unittest.TestCase):
                             .__self__.named_steps["target_encode_categorical"]
                             .cols
                         )
+                        # they're passed using columns["mapped"] by CombineOnehots
+                        #  which has order=bin+ctn, then mult
+                        # thus, when ctn cols are dropped, order=bin vars, then mult
                         np.testing.assert_array_equal(
-                            passed_cat_cols, ["bin", "mult1", "mult2"]
+                            passed_cat_cols,
+                            hypothesis["bin_cols"] + hypothesis["onehot_prefixes"],
                         )
 
             with self.subTest("Yes Transform, Yes Feature Map"):
@@ -450,10 +426,7 @@ class TestCommonDataModule(unittest.TestCase):
                     feature_map="target_encode_categorical",
                     scale=True,
                 )
-                data.columns = {"original": df.columns}
-                data._set_col_idxs_by_type()
-                data._set_groupby()
-                data._set_nfeatures()
+                data._set_auxilliary_column_info(df)
                 data._split_dataset(df, df, y)
                 data._set_post_split_transforms()
                 for data_name in ["data", "ground_truth"]:
@@ -536,7 +509,13 @@ class TestCommonDataModule(unittest.TestCase):
 
         with self.subTest("nfeatures"):
             data._set_nfeatures()
-            self.assertDictEqual(data.nfeatures, {"original": 5})
+            self.assertDictEqual(
+                data.nfeatures,
+                {
+                    "original": len(hypothesis["ctn_cols_idx"])
+                    + len(hypothesis["cat_cols_idx"])
+                },
+            )
 
         with self.subTest("set_post_split_transforms"):
             # don't allow infinite values for the transforms
@@ -546,16 +525,15 @@ class TestCommonDataModule(unittest.TestCase):
             data._set_post_split_transforms()
             self.assertEqual(data.transforms, None)
 
-            cuts = [[(0, 1), (1, 2)], [(0, 0.5), (0.5, 1), (1, 1.5)]]
-            category_names = [
-                ["0 - 1", "1 - 2"],
-                ["0 - 0.5", "0.5 - 1", "1 - 1.5"],
-            ]
             disc_data = create_fake_disc_data(
-                rng, nsamples, cuts, category_names, hypothesis["ctn_cols"]
+                rng,
+                nsamples,
+                hypothesis["disc_ctn"]["cuts"],
+                hypothesis["disc_ctn"]["category_names"],
+                hypothesis["ctn_cols"],
             )
             mock_disc_data(mock_MDL, disc_data, y)
-            mock_disc_cuts.return_value = cuts
+            mock_disc_cuts.return_value = hypothesis["disc_ctn"]["cuts"]
 
             # the point isn't to integration test the transforms
             # it's to check we have the info we need and named correctly
@@ -568,10 +546,7 @@ class TestCommonDataModule(unittest.TestCase):
                         **self.standard,
                         scale=True,
                     )
-                    data.columns = {"original": df.columns}
-                    data._set_col_idxs_by_type()
-                    data._set_groupby()
-                    data._set_nfeatures()
+                    data._set_auxilliary_column_info(df)
                     data._split_dataset(df, df, y)
                     data._set_post_split_transforms()
                     for data_name in ["data", "ground_truth"]:
@@ -597,10 +572,7 @@ class TestCommonDataModule(unittest.TestCase):
                         feature_map="discretize_continuous",
                         uniform_prob=True,
                     )
-                    data.columns = {"original": df.columns}
-                    data._set_col_idxs_by_type()
-                    data._set_groupby()
-                    data._set_nfeatures()
+                    data._set_auxilliary_column_info(df)
                     data._split_dataset(df, df, y)
                     data._set_post_split_transforms()
 
@@ -653,10 +625,7 @@ class TestCommonDataModule(unittest.TestCase):
                         **self.standard,
                         feature_map="target_encode_categorical",
                     )
-                    data.columns = {"original": df.columns}
-                    data._set_col_idxs_by_type()
-                    data._set_groupby()
-                    data._set_nfeatures()
+                    data._set_auxilliary_column_info(df)
                     data._split_dataset(df, df, y)
                     data._set_post_split_transforms()
                     # should have both original and mapped now
@@ -693,10 +662,7 @@ class TestCommonDataModule(unittest.TestCase):
                     feature_map="target_encode_categorical",
                     scale=True,
                 )
-                data.columns = {"original": df.columns}
-                data._set_col_idxs_by_type()
-                data._set_groupby()
-                data._set_nfeatures()
+                data._set_auxilliary_column_info(df)
                 data._split_dataset(df, df, y)
                 data._set_post_split_transforms()
                 for data_name in ["data", "ground_truth"]:
@@ -737,6 +703,9 @@ class TestCommonDataModule(unittest.TestCase):
     def test_set_auxilliary_info_post_mapping_static_onehot(
         self, mock_split, mock_cuts, mock_MDL, df
     ):
+        """
+        These tests will onehot the dataset in addition to other feature mapping.
+        """
         # Ensure all categories/cols present for testing
         assume(
             np.array_equal(
@@ -775,14 +744,16 @@ class TestCommonDataModule(unittest.TestCase):
         self.assertTrue("mapped" not in data.columns)
 
         with self.subTest("With Discretization"):
-            cuts = [[(0, 1), (1, 2)], [(0, 0.5), (0.5, 1), (1, 1.5)]]
-            category_names = [["0 - 1", "1 - 2"], ["0 - 0.5", "0.5 - 1", "1 - 1.5"]]
             disc_data = create_fake_disc_data(
-                rng, nsamples, cuts, category_names, hypothesis["ctn_cols"]
+                rng,
+                nsamples,
+                hypothesis["disc_ctn"]["cuts"],
+                hypothesis["disc_ctn"]["category_names"],
+                hypothesis["ctn_cols"],
             )
 
             mock_disc_data(mock_MDL, disc_data, y)
-            mock_cuts.return_value = cuts
+            mock_cuts.return_value = hypothesis["disc_ctn"]["cuts"]
 
             data = CommonDataModule(
                 dataset_loader=SimpleDatasetLoader(
@@ -801,8 +772,15 @@ class TestCommonDataModule(unittest.TestCase):
                 list(data.groupby["mapped"].keys()),
                 ["categorical_onehots", "binary_vars", "discretized_ctn_cols"],
             )
-            # shifted indices
-            binary_idxs = [0]
+            # order: cat vars in order, then ctn discretized vars in order
+            # bin1[0] mult1[1,2,3,4] mult2[5,6,7] bin2[8] ctn1_disc [9,10] ctn2_disc[11, 12, 13]
+            binary_idxs = [0, 8]
+            onehot_groups = [[1, 2, 3, 4], [5, 6, 7]]
+            discretized_ctn_vars = [[9, 10], [11, 12, 13]]
+            # the amount of vars after onehot enc all cat vars + # bins per ctn var
+            nfeatures = len(hypothesis["onehot"]["cat_cols_idx"]) + sum(
+                [len(cuts) for cuts in hypothesis["disc_ctn"]["cuts"]]
+            )
             self.assertDictEqual(
                 data.groupby["mapped"]["binary_vars"],
                 dict(
@@ -812,7 +790,6 @@ class TestCommonDataModule(unittest.TestCase):
                     )
                 ),
             )
-            onehot_groups = [[1, 2, 3, 4], [5, 6, 7]]
             self.assertDictEqual(
                 data.groupby["mapped"]["categorical_onehots"],
                 dict(
@@ -822,30 +799,30 @@ class TestCommonDataModule(unittest.TestCase):
                     )
                 ),
             )
-            self.assertEqual(data.nfeatures["mapped"], 10 + 5 - 2)
+
+            self.assertEqual(data.nfeatures["mapped"], nfeatures)
             np.testing.assert_array_equal(
                 data.columns["mapped"],
-                ["bin"]
-                + hypothesis["onehot"]["onehot_cols"]
+                hypothesis["onehot"]["cat_cols"]
                 + [
                     f"{col}_{bin_name}"
                     for i, col in enumerate(hypothesis["onehot"]["ctn_cols"])
-                    for bin_name in category_names[i]
+                    for bin_name in hypothesis["disc_ctn"]["category_names"][i]
                 ],
             )
             self.assertEqual(
                 data.col_idxs_by_type["mapped"],
                 {
-                    "categorical": list(range(13)),
+                    "categorical": list(range(nfeatures)),
                     "binary": binary_idxs,
                     # add discretized
-                    "onehot": onehot_groups + [[8, 9], [10, 11, 12]],
+                    "onehot": onehot_groups + discretized_ctn_vars,
                     "continuous": [],
                 },
             )
             self.assertListEqual(
                 data.columns["map-inverted"].tolist(),
-                ["bin"] + hypothesis["onehot"]["onehot_cols"] + ["ctn1", "ctn2"],
+                hypothesis["onehot"]["cat_cols"] + hypothesis["onehot"]["ctn_cols"],
             )
 
         with self.subTest("With Target Encoding"):
@@ -861,14 +838,16 @@ class TestCommonDataModule(unittest.TestCase):
 
             self.assertEqual(
                 list(data.inverse_target_encode_map.keys()),
-                ["inverse_transform", "mapping"],
+                ["mapping", "ordinal_mapping"],
             )
-            self.assertIsNotNone(data.inverse_target_encode_map["inverse_transform"])
+            self.assertIsNotNone(data.inverse_target_encode_map["mapping"])
 
+            # order: bin + ctn vars in order, then multicat vars in order
+            # bin1[0] ctn1[1] ctn2[1] bin2[3] mult1[4] mult2[5]
             # will have reordering and all the binary and multicat vars should be encoded
             self.assertEqual(
                 list(data.inverse_target_encode_map["mapping"].keys()),
-                [0, 3, 4],
+                data.columns["mapped"][[0, 3, 4, 5]].tolist(),
             )
 
             # Leave it to test_transforms to see if combined_onehots is right
@@ -876,24 +855,26 @@ class TestCommonDataModule(unittest.TestCase):
                 list(data.groupby["mapped"].keys()),
                 ["combined_onehots"],
             )
-
-            self.assertEqual(data.nfeatures["mapped"], 5)
+            nfeatures = len(hypothesis["columns"])
+            self.assertEqual(data.nfeatures["mapped"], nfeatures)
             self.assertEqual(
                 data.col_idxs_by_type["mapped"],
                 {
-                    "continuous": list(range(5)),
+                    "continuous": list(range(nfeatures)),
                     "binary": [],
                     "onehot": [],
                     "categorical": [],
                 },
             )
+            # bin + ctn in order then mult in order
             self.assertEqual(
                 data.columns["mapped"].tolist(),
-                ["bin", "ctn1", "ctn2", "mult1", "mult2"],
+                ["bin1", "ctn1", "ctn2", "bin2", "mult1", "mult2"],
             )
+            # same ordering but onehot multicat
             self.assertEqual(
                 data.columns["map-inverted"].tolist(),
-                ["bin", "ctn1", "ctn2"] + hypothesis["onehot"]["onehot_cols"],
+                ["bin1", "ctn1", "ctn2", "bin2"] + hypothesis["onehot"]["onehot_cols"],
             )
 
     @patch(
@@ -906,6 +887,7 @@ class TestCommonDataModule(unittest.TestCase):
     def test_set_auxilliary_info_post_mapping_static_multicat(
         self, mock_split, mock_cuts, mock_MDL, df
     ):
+        """There is no onehot encoding here."""
         nsamples = len(df)
         rng = default_rng(seed)
         y = pd.Series(rng.integers(0, 2, nsamples))  # random binary outcome
@@ -929,14 +911,16 @@ class TestCommonDataModule(unittest.TestCase):
         self.assertTrue("mapped" not in data.columns)
 
         with self.subTest("With Discretization"):
-            cuts = [[(0, 1), (1, 2)], [(0, 0.5), (0.5, 1), (1, 1.5)]]
-            category_names = [["0 - 1", "1 - 2"], ["0 - 0.5", "0.5 - 1", "1 - 1.5"]]
             disc_data = create_fake_disc_data(
-                rng, nsamples, cuts, category_names, hypothesis["ctn_cols"]
+                rng,
+                nsamples,
+                hypothesis["disc_ctn"]["cuts"],
+                hypothesis["disc_ctn"]["category_names"],
+                hypothesis["ctn_cols"],
             )
 
             mock_disc_data(mock_MDL, disc_data, y)
-            mock_cuts.return_value = cuts
+            mock_cuts.return_value = hypothesis["disc_ctn"]["cuts"]
 
             data = CommonDataModule(
                 dataset_loader=SimpleDatasetLoader(*datasetloader_args),
@@ -953,18 +937,25 @@ class TestCommonDataModule(unittest.TestCase):
                 ["binary_vars", "discretized_ctn_cols"],
             )
             # remember nothing was onehot-d so we assume every cat var is binary
+            # this is not what I would normally do, it's just for the test (as opposed to onehot +  discretize continuous)
+            # order: cat cols in order, then ctn cols in order
+            # bin1[0], "mult1"[1] "mult2"[2] bin2[3] ctn1[4,5] ctn2[6,7,8]
             self.assertDictEqual(
                 data.groupby["mapped"]["binary_vars"],
-                {0: "bin", 1: "mult1", 2: "mult2"},
+                {i: col for i, col in enumerate(hypothesis["cat_cols"])},
             )
-            self.assertEqual(data.nfeatures["mapped"], 8)
+            self.assertEqual(
+                data.nfeatures["mapped"], len(hypothesis["onehot"]["cat_cols_idx"])
+            )
             self.assertEqual(
                 data.col_idxs_by_type["mapped"],
                 {
-                    "categorical": list(range(8)),
-                    "binary": [0, 1, 2],
-                    "onehot": [[3, 4], [5, 6, 7]],
-                    "continuous": [],
+                    "categorical": list(
+                        range(len(hypothesis["onehot"]["cat_cols_idx"]))
+                    ),
+                    "binary": [0, 1, 2, 3],
+                    "onehot": [[4, 5], [6, 7, 8]],
+                    "continuous": [],  # there are no
                 },
             )
             np.testing.assert_array_equal(
@@ -973,12 +964,12 @@ class TestCommonDataModule(unittest.TestCase):
                 + [
                     f"{col}_{bin_name}"
                     for i, col in enumerate(hypothesis["onehot"]["ctn_cols"])
-                    for bin_name in category_names[i]
+                    for bin_name in hypothesis["disc_ctn"]["category_names"][i]
                 ],
             )
             self.assertListEqual(
                 data.columns["map-inverted"].tolist(),
-                ["bin", "mult1", "mult2", "ctn1", "ctn2"],
+                hypothesis["cat_cols"] + hypothesis["ctn_cols"],
             )
 
         with self.subTest("With Target Encoding"):
@@ -992,13 +983,13 @@ class TestCommonDataModule(unittest.TestCase):
 
             self.assertEqual(
                 list(data.inverse_target_encode_map.keys()),
-                ["inverse_transform", "mapping"],
+                ["mapping", "ordinal_mapping"],
             )
-            self.assertIsNotNone(data.inverse_target_encode_map["inverse_transform"])
+            self.assertIsNotNone(data.inverse_target_encode_map["mapping"])
             # nothing should be reordered, and all the binary and multicat vars should be encoded
             self.assertEqual(
                 list(data.inverse_target_encode_map["mapping"].keys()),
-                hypothesis["cat_cols_idx"],
+                data.columns["mapped"][hypothesis["cat_cols_idx"]].tolist(),
             )
 
             # no combining so no mapped groupby
@@ -1027,6 +1018,9 @@ class TestCommonDataModule(unittest.TestCase):
             rng.random((5, 5)), columns=["bin", "mult1", "ctn1", "mult2", "ctn2"]
         )
         nsamples = len(df)
+        df["bin"] = rng.integers(0, 2, nsamples)
+        df["mult1"] = rng.integers(0, 3, nsamples)
+        df["mult2"] = rng.integers(0, 2, nsamples)
         y = pd.Series(rng.integers(0, 2, nsamples))  # random binary outcome
         datasetloader_args = (df, y, hypothesis["ctn_cols"], hypothesis["cat_cols"])
 
@@ -1035,7 +1029,7 @@ class TestCommonDataModule(unittest.TestCase):
         with self.subTest("ampute"):
             data = CommonDataModule(
                 dataset_loader=SimpleDatasetLoader(*datasetloader_args),
-                ampute=True,
+                fully_observed=True,
                 amputation_patterns=[
                     {"incomplete_vars": ["ctn1"], "mechanism": "MNAR(G)"}
                 ],
@@ -1047,8 +1041,16 @@ class TestCommonDataModule(unittest.TestCase):
             np.testing.assert_array_equal(
                 data.splits["data"]["train"].columns, df.columns
             )
-            # there should be missing values
-            self.assertGreater(data.splits["data"]["train"].isna().sum().sum(), 0)
+            # there should be missing values in data but not ground truth
+            for split in ["train", "val", "test"]:
+                self.assertGreater(data.splits["data"][split].isna().sum().sum(), 0)
+                self.assertEqual(
+                    data.splits["ground_truth"][split].isna().sum().sum(), 0
+                )
+                # columns should not be changed at all
+                pd.testing.assert_index_equal(
+                    data.splits["data"][split].columns, df.columns
+                )
 
             with self.subTest("Onehot nans"):
                 onehot_df = onehot_multicategorical_column(
@@ -1063,7 +1065,7 @@ class TestCommonDataModule(unittest.TestCase):
                 )
                 data = CommonDataModule(
                     dataset_loader=dataset_loader,
-                    ampute=True,
+                    fully_observed=True,
                     amputation_patterns=[
                         {
                             "incomplete_vars": [onehot_df.columns[3]],
@@ -1074,18 +1076,25 @@ class TestCommonDataModule(unittest.TestCase):
                 )
                 data.columns = {"original": onehot_df.columns}
                 data.setup("fit")
-                # there should be missing values
-                self.assertGreater(data.splits["data"]["train"].isna().sum().sum(), 0)
-                # the onehot groups should all be nan if one is nan
-                for onehot_group in data.col_idxs_by_type["original"]["onehot"]:
-                    onehot_group_isna = (
-                        data.splits["data"]["train"].iloc[:, onehot_group].isna()
+                for split in ["train", "val", "test"]:
+                    # there should be missing values in data but none in ground truth
+                    self.assertEqual(
+                        data.splits["ground_truth"][split].isna().sum().sum(), 0
                     )
-                    self.assertTrue(
-                        (
-                            onehot_group_isna.all(axis=1)
-                            | (~onehot_group_isna.any(axis=1))
-                        ).all()
+                    self.assertGreater(data.splits["data"][split].isna().sum().sum(), 0)
+                    # the onehot groups should all be nan if one is nan
+                    for onehot_group in data.col_idxs_by_type["original"]["onehot"]:
+                        onehot_group_isna = (
+                            data.splits["data"][split].iloc[:, onehot_group].isna()
+                        )
+                        self.assertTrue(
+                            (
+                                onehot_group_isna.all(axis=1)
+                                | (~onehot_group_isna.any(axis=1))
+                            ).all()
+                        )
+                    pd.testing.assert_index_equal(
+                        data.splits["data"][split].columns, onehot_df.columns
                     )
 
         with self.subTest("_add_latent_features"):
@@ -1097,31 +1106,34 @@ class TestCommonDataModule(unittest.TestCase):
             with self.subTest("MNAR (not recoverable"):
                 # should do nothing
                 data.amputation_patterns = [{"mechanism": "MNAR"}]
-                res = data._add_latent_features(df)
+                res, pyampute_patterns = data._add_latent_features(df)
                 # shouldn't add any features
                 np.testing.assert_array_equal(res.columns, df.columns)
                 # shouldn't change patterns
+                self.assertEqual(pyampute_patterns, [{"mechanism": "MNAR"}])
                 self.assertEqual(data.amputation_patterns, [{"mechanism": "MNAR"}])
 
             with self.subTest("MNAR (recoverable)"):
                 data.amputation_patterns = [{"mechanism": "MNAR(G)"}]
-                res = data._add_latent_features(df)
+                res, pyampute_patterns = data._add_latent_features(df)
                 np.testing.assert_array_equal(
                     res.columns, df.columns.append(pd.Index(["latent_p0_g0"]))
                 )
                 self.assertEqual(
-                    data.amputation_patterns,
+                    pyampute_patterns,
                     [{"mechanism": "MNAR", "weights": {"latent_p0_g0": 1}}],
                 )
+                # leave original untouched
+                self.assertEqual(data.amputation_patterns, [{"mechanism": "MNAR(G)"}])
                 with self.subTest("Multiple Latent Features"):
                     data.amputation_patterns = [{"mechanism": "MNAR(G, G)"}]
-                    res = data._add_latent_features(df)
+                    res, pyampute_patterns = data._add_latent_features(df)
                     np.testing.assert_array_equal(
                         res.columns,
                         df.columns.append(pd.Index(["latent_p0_g0", "latent_p0_g1"])),
                     )
                     self.assertEqual(
-                        data.amputation_patterns,
+                        pyampute_patterns,
                         [
                             {
                                 "mechanism": "MNAR",
@@ -1129,13 +1141,16 @@ class TestCommonDataModule(unittest.TestCase):
                             }
                         ],
                     )
+                    self.assertEqual(
+                        data.amputation_patterns, [{"mechanism": "MNAR(G, G)"}]
+                    )
 
                 with self.subTest("Multiple Patterns"):
                     data.amputation_patterns = [
                         {"mechanism": "MNAR(Y)"},
                         {"mechanism": "MNAR(G)"},
                     ]
-                    res = data._add_latent_features(df)
+                    res, pyampute_patterns = data._add_latent_features(df)
                     np.testing.assert_array_equal(
                         res.columns,
                         df.columns.append(
@@ -1143,7 +1158,7 @@ class TestCommonDataModule(unittest.TestCase):
                         ),
                     )
                     self.assertEqual(
-                        data.amputation_patterns,
+                        pyampute_patterns,
                         [
                             {
                                 "mechanism": "MNAR",
@@ -1155,16 +1170,20 @@ class TestCommonDataModule(unittest.TestCase):
                             },
                         ],
                     )
+                    self.assertEqual(
+                        data.amputation_patterns,
+                        [{"mechanism": "MNAR(Y)"}, {"mechanism": "MNAR(G)"}],
+                    )
 
                 with self.subTest("Existing Weights"):
                     with self.subTest("Dict"):
                         data.amputation_patterns = [
                             {"mechanism": "MNAR(G)", "weights": {"bin": 1}}
                         ]
-                        res = data._add_latent_features(df)
+                        res, pyampute_patterns = data._add_latent_features(df)
                         # add to the weights
                         self.assertEqual(
-                            data.amputation_patterns,
+                            pyampute_patterns,
                             [
                                 {
                                     "mechanism": "MNAR",
@@ -1172,16 +1191,111 @@ class TestCommonDataModule(unittest.TestCase):
                                 }
                             ],
                         )
+                        self.assertEqual(
+                            data.amputation_patterns,
+                            [{"mechanism": "MNAR(G)", "weights": {"bin": 1}}],
+                        )
                     with self.subTest("List"):
                         data.amputation_patterns = [
                             {"mechanism": "MNAR(G)", "weights": [1, 0, 0, 0, 0]}
                         ]
-                        res = data._add_latent_features(df)
+                        res, pyampute_patterns = data._add_latent_features(df)
                         # add to the weights
                         self.assertEqual(
-                            data.amputation_patterns,
+                            pyampute_patterns,
                             [{"mechanism": "MNAR", "weights": [1, 0, 0, 0, 0, 1]}],
                         )
+                        self.assertEqual(
+                            data.amputation_patterns,
+                            [{"mechanism": "MNAR(G)", "weights": [1, 0, 0, 0, 0]}],
+                        )
+
+    @settings(suppress_health_check=[HealthCheck(3)], deadline=None)
+    @given(data_frames(columns=hypothesis["columns"]))
+    def test_evaluate_on_remaining_semi_observed(self, df_test):
+        assume(  # each row should have at least 1 NaN to be semi-observed
+            df_test.isna().any(axis=1).all()
+            and not df_test.isna().all(axis=1).any()  # no 1 col should be all nan
+            and not df_test.isna().all(axis=0).any()  # no 1 row should be all nan
+        )
+        rng = default_rng(seed)
+        # Fully observed
+        df_train_val = pd.DataFrame(
+            rng.random((50, df_test.shape[1])), columns=df_test.columns
+        )
+        # every idx is even in train_val, odd for eval
+        df_train_val.index = df_train_val.index * 2
+        df_test.index = df_test.index * 2 + 1
+
+        y_train_val = pd.Series(
+            rng.integers(0, 2, len(df_train_val)), index=df_train_val.index
+        )  # random binary outcome
+        y_test = pd.Series(
+            rng.integers(0, 2, len(df_test)), index=df_test.index
+        )  # random binary outcome
+
+        # combine them and randomly shuffle them
+        X = pd.concat([df_train_val, df_test], axis=0).sample(frac=1, random_state=seed)
+        y = pd.concat([y_train_val, y_test], axis=0).sample(frac=1, random_state=seed)
+        pd.testing.assert_index_equal(X.index, y.index)
+
+        datasetloader_args = (
+            X,
+            y,
+            hypothesis["ctn_cols"],
+            hypothesis["cat_cols"],
+        )
+
+        with self.subTest("No Ampute"):
+            data = CommonDataModule(
+                dataset_loader=SimpleDatasetLoader(*datasetloader_args),
+                **self.standard,
+                fully_observed=True,
+                evaluate_on_remaining_semi_observed=True,
+            )
+            data.setup("fit")
+            for split in ["train", "val"]:
+                for data_role in ["data", "ground_truth", "label"]:
+                    # should have even indices
+                    self.assertTrue(
+                        (data.splits[data_role][split].index % 2 == 0).all()
+                    )
+                # no ampute so both data and ground_truth has no nans for train and val
+                self.assertEqual(data.splits["data"][split].isna().sum().sum(), 0)
+                self.assertEqual(
+                    data.splits["ground_truth"][split].isna().sum().sum(), 0
+                )
+            for data_role in ["data", "ground_truth", "label"]:
+                # should have odd indices
+                self.assertTrue((data.splits[data_role]["test"].index % 2 == 1).all())
+
+        with self.subTest("Ampute"):
+            data = CommonDataModule(
+                dataset_loader=SimpleDatasetLoader(*datasetloader_args),
+                **self.standard,
+                fully_observed=True,
+                evaluate_on_remaining_semi_observed=True,
+                amputation_patterns=[
+                    {"incomplete_vars": ["ctn1"], "mechanism": "MNAR(G)"}
+                ],
+            )
+
+            data.setup("fit")
+            for split in ["train", "val"]:
+                for data_role in ["data", "ground_truth", "label"]:
+                    # should have even indices
+                    self.assertTrue(
+                        (data.splits[data_role][split].index % 2 == 0).all()
+                    )
+                # data should have nans due to ampute
+                self.assertGreater(data.splits["data"][split].isna().sum().sum(), 0)
+                # ground truth should still not have nans
+                self.assertEqual(
+                    data.splits["ground_truth"][split].isna().sum().sum(), 0
+                )
+            for data_role in ["data", "ground_truth", "label"]:
+                # should have odd indices
+                self.assertTrue((data.splits[data_role]["test"].index % 2 == 1).all())
 
 
 if __name__ == "__main__":

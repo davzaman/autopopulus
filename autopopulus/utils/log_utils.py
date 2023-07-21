@@ -1,33 +1,89 @@
 from argparse import Namespace
-from logging import FileHandler, StreamHandler, basicConfig, info, INFO
-from shutil import copy
-from typing import Dict, List, Optional, Union
+from logging import FileHandler, StreamHandler, basicConfig, INFO
+from shutil import copy, rmtree, copytree
+from typing import Any, Dict, List, Optional, Union
 
+from cloudpickle import dump, load
 from regex import search
-from os.path import join, exists
+from os.path import join, exists, dirname
 from os import makedirs, walk
 import sys
-import numpy as np
-import pandas as pd
 
-from pytorch_lightning.loggers import LightningLoggerBase
-from pytorch_lightning.loggers.base import rank_zero_experiment
-from pytorch_lightning.utilities import rank_zero_info
-from pytorch_lightning.utilities import rank_zero_only
 from torch.utils.tensorboard import SummaryWriter
-from torch import isnan, tensor
 
-import tensorflow as tf
-from tensorflow.core.util.event_pb2 import Event
+from ray import air
+from ray.air.integrations.mlflow import MLflowLoggerCallback
+from aim import Text, Run as AimRun
+import mlflow
+from mlflow.entities import Run as MlFlowRun
+from pytorch_lightning.loggers import Logger
+from pytorch_lightning.utilities.rank_zero import rank_zero_only
 
-
-from autopopulus.data import CommonDataModule
-from autopopulus.utils.impute_metrics import CWMAAPE, CWRMSE
+from autopopulus.data.types import DataTypeTimeDim
+from autopopulus.utils.utils import rank_zero_print
 
 TUNE_LOG_DIR = "tune_results"
+# LOGGER_TYPE = "TensorBoard"
+LOGGER_TYPE = "mlflow"
+# LOGGER_TYPE = "Aim"
+
+"""
+For tensorboard, to make sure baseline and AE are logging using tensorboard the same way
+We split context between guild flags and stuff in the metric (which will go into the TB tag).
+
+IMPUTE:
+split: train/val/test
+feature_space: original/mapped
+filter_subgroup: all/missingonly
+reduction: CW/EW/NA (columnwise/errorwise/not applicable)
+
+PREDICT:
+aggregate_type: mean/cilower/ciupper/none
+"""
+IMPUTE_METRIC_TAG_FORMAT = (
+    "{split}/{feature_space}/{filter_subgroup}/{reduction}/{feature_type}/{name}"
+)
+PREDICT_METRIC_TAG_FORMAT = "{predictor}/{aggregate_type}/{name}"
+TIME_TAG_FORMAT = "{split}/epoch_duration_sec"
+MIXED_FEATURE_METRIC_FORMAT = "{ctn_name}_{cat_name}"
+SERIALIZED_AE_IMPUTER_MODEL_FORMAT = "AEDitto_{data_type_time_dim}"
+SERIALIZED_PREDICTOR_FORMAT = "{model}_predictor"
 
 
-def init_new_logger(fname: Optional[str] = None):
+# Ref: https://stackoverflow.com/a/6794451/1888794
+# Import Logger everywhere you want to use a logger.
+if LOGGER_TYPE == "TensorBoard":
+    from pytorch_lightning.loggers import TensorBoardLogger
+elif LOGGER_TYPE == "Aim":
+    from aim.pytorch_lightning import AimLogger
+elif LOGGER_TYPE == "mlflow":
+    from pytorch_lightning.loggers import MLFlowLogger
+
+
+# Treat like a class for easy semantics to compare to BasicLogger
+def AutoencoderLogger(args: Optional[Namespace] = None):
+    if LOGGER_TYPE == "TensorBoard":
+        base_context = BasicLogger.get_base_context_from_args(args)
+        return TensorBoardLogger(save_dir=BasicLogger.get_logdir(**base_context))
+    elif LOGGER_TYPE == "Aim":
+        # return AimLogger(experiment="lightning_logs")
+        return AimLogger(experiment=args.experiment_name)
+    elif LOGGER_TYPE == "mlflow":
+        # optionally continue the same run
+        active_run = mlflow.active_run()
+        run_id = (
+            active_run.info.run_id if active_run else getattr(args, "parent_hash", None)
+        )
+        return MLFlowLogger(
+            experiment_name=args.experiment_name,
+            run_name=args.method,
+            run_id=run_id,
+            tags=vars(args),
+            log_model=True,
+        )
+
+
+def init_sys_logger(fname: Optional[str] = None):
     handlers = [StreamHandler(sys.stdout)]
     if fname is not None:
         handlers.append(FileHandler(fname))
@@ -40,8 +96,12 @@ def init_new_logger(fname: Optional[str] = None):
     )
 
 
+@rank_zero_only  # need this with mlflow
 def get_serialized_model_path(
-    modeln: str, ftype: str = "pkl", trial_num: Optional[int] = None
+    modeln: str,
+    ftype: str = "pkl",
+    trial_num: Optional[int] = None,
+    run_id: Optional[str] = None,
 ) -> str:
     """Path to dump serialized model, whether it's autoencoder, or predictive model."""
     dir_name = "serialized_models"
@@ -50,109 +110,251 @@ def get_serialized_model_path(
     if not exists(dir_name):
         makedirs(dir_name)
     serialized_model_path = join(dir_name, f"{modeln}.{ftype}")
-    return serialized_model_path
+
+    if LOGGER_TYPE == "mlflow":
+        # Sandbox the resources (model, dat, etc) for a run if using mlflow
+        base_path = get_mlflow_artifact_path(run_id=run_id)
+    else:
+        base_path = ""
+    return join(base_path, serialized_model_path)
 
 
-def log_imputation_performance(
-    results: List[pd.DataFrame],
-    data: CommonDataModule,
-    log: SummaryWriter,
-    runtest: bool,
+def load_artifact(
+    objn: str,
+    ftype: str = "pkl",
+    trial_num: Optional[int] = None,
+    run_id: Optional[str] = None,
+) -> Any:
+    path = get_serialized_model_path(objn, ftype, trial_num=trial_num, run_id=run_id)
+    rank_zero_print(f"Loading pickled {objn}...")
+    with open(path, "rb") as file:
+        obj = load(file)
+    return obj
+
+
+@rank_zero_only
+def dump_artifact(
+    obj,
+    objn: str,
+    ftype: str = "pkl",
+    trial_num: Optional[int] = None,
 ):
-    """For a given imputation method, logs the performance for the following metrics (matches AE). Assumes results are in order: train, val, test."""
-    metrics = {"RMSE": CWRMSE, "MAAPE": CWMAAPE}
-    if runtest:
-        stages = ["train", "val", "test"]
+    if LOGGER_TYPE == "mlflow":
+        active_run = mlflow.active_run()
+        run_id = active_run.info.run_id if active_run else None
     else:
-        stages = ["train", "val"]
+        run_id = None
 
-    for stage_i, stage in enumerate(stages):
-        est = results[stage_i]
+    path = get_serialized_model_path(objn, ftype, trial_num=trial_num, run_id=run_id)
+    makedirs(dirname(path), exist_ok=True)
+    with open(path, "wb") as file:
+        dump(obj, file)
 
-        true = data.splits["ground_truth"][stage]
-        # if the original dataset contains nans and we're not filtering to fully observed, need to fill in ground truth too for metric computation
-        ground_truth_non_missing_mask = ~np.isnan(true)
-        true = true.where(ground_truth_non_missing_mask, est)
 
-        orig = data.splits["data"][stage]
-        if isinstance(orig, pd.DataFrame):
-            orig = tensor(orig.values)
-        missing_mask = isnan(orig).bool()
+@rank_zero_only
+def mlflow_init(args: Namespace):
+    if LOGGER_TYPE != "mlflow":
+        return
+    mlflow.set_experiment(experiment_name=args.experiment_name)
+    parent_hash = getattr(args, "parent_hash", None)
+    mlflow.start_run(run_id=parent_hash, run_name=args.method)
+    if parent_hash is None:  # first time we want to log all the args as tags
+        # avoid too long values
+        mlflow.set_tags({k: v for k, v in vars(args).items() if len(str(v)) < 5000})
 
-        # START HERE
-        for name, metricfn in metrics.items():
-            metric = metricfn(est, true)
-            metric_missing_only = metricfn(est, true, missing_mask)
-            rank_zero_info(
-                f"{name}: {metric}.\n Missing cols only, {name}: {metric_missing_only}"
+
+@rank_zero_only
+def mlflow_end():
+    if LOGGER_TYPE != "mlflow":
+        return
+    rank_zero_print(f"Logger Hash: {mlflow.active_run().info.run_id}")
+    mlflow.end_run()
+
+
+def get_mlflow_artifact_path(run_id: str) -> str:
+    return mlflow.get_run(run_id=run_id).info.artifact_uri.replace("file://", "")
+
+
+class BasicLogger:
+    def __init__(
+        self,
+        run_hash: Optional[str] = None,
+        experiment_name: Optional[str] = None,
+        verbose: bool = False,
+        base_context: Optional[Dict[str, Any]] = None,
+        args: Optional[Namespace] = None,
+    ) -> None:
+        """
+        This is used for baseline_imputation, and prediction performance.
+        If base context is passed, it uses it. Otherwise it looks for args.
+        This is especially required if using tensorboard, otherwise you won't get a logger.
+        """
+        self.verbose = verbose
+        if base_context is None and args is not None:
+            base_context = self.get_base_context_from_args(args)
+
+        if LOGGER_TYPE == "TensorBoard":
+            if base_context is None and args is None:
+                self.logger = None
+            else:  # Get the universal logger for tensorboard.
+                self.logger = SummaryWriter(log_dir=self.get_logdir(**base_context))
+        elif LOGGER_TYPE == "Aim":
+            # return AimRun(repo=target_path)
+            self.logger = AimRun(run_hash=run_hash, experiment=experiment_name)
+            self.logger["hparams"] = base_context
+        elif LOGGER_TYPE == "mlflow":
+            self.logger: MlFlowRun = mlflow.get_run(
+                run_id=mlflow.active_run().info.run_id
             )
-            log.add_scalar(f"impute/{stage}-{name}", metric)
-            log.add_scalar(f"impute/{stage}-{name}-missingonly", metric_missing_only)
 
+        self.base_context = base_context
 
-def get_logdir(args: Namespace) -> str:
-    """Get logging directory based on experiment settings."""
-    prefix = f"{TUNE_LOG_DIR}/trial_{args.trial_num}/" if "trial_num" in args else ""
-    # Missingness scenario could be 1 mech or mixed
-    if args.amputation_patterns:
-        pattern_mechanisms = ",".join(
-            [pattern["mechanism"] for pattern in args.amputation_patterns]
-        )
-        dir_name = (
-            f"{prefix}F.O./{args.percent_missing}/{pattern_mechanisms}/{args.method}"
-        )
-    else:
-        dir_name = f"{prefix}full/{args.method}"
-    if not exists(dir_name):
-        makedirs(dir_name)
-    return dir_name
+    @classmethod
+    @staticmethod
+    def get_base_context_from_args(args: Namespace) -> Dict[str, Any]:
+        return {
+            k: getattr(args, k) if hasattr(args, k) else None
+            for k in [
+                "method",
+                "amputation_patterns",
+                "percent_missing",
+                "trial_num",
+                "data_type_time_dim",
+            ]
+        }
 
+    @classmethod
+    @staticmethod
+    def get_logdir(
+        method: str,  # impute method
+        amputation_patterns: Optional[List[Dict]] = None,
+        percent_missing: Optional[float] = None,
+        trial_num: Optional[int] = None,
+        data_type_time_dim: Optional[DataTypeTimeDim] = None,
+        put_impute_flags_in_path: bool = False,
+    ) -> str:
+        """
+        Get logging directory based on experiment settings.
+        This is the scalars "path" in tensorboard and guild.
+        """
+        # if tune_prefix is empty string, os.path.join will ignore it
+        tune_prefix = ""
+        if data_type_time_dim is not None:
+            tune_prefix = join(tune_prefix, data_type_time_dim.name)
+        if trial_num is not None:
+            tune_prefix = join(tune_prefix, TUNE_LOG_DIR, f"trial_{trial_num}")
+        if put_impute_flags_in_path:
+            # Missingness scenario could be 1 mech or mixed
+            if amputation_patterns:
+                pattern_mechanisms = ",".join(
+                    [pattern["mechanism"] for pattern in amputation_patterns]
+                )
+                dir_name = join(
+                    tune_prefix,
+                    "F.O.",
+                    str(percent_missing),
+                    pattern_mechanisms,
+                    method,
+                )
+            else:
+                dir_name = join(tune_prefix, "full", method)
+        else:  # Flags wont go into path, use guild to get that info
+            dir_name = join(tune_prefix, method)
 
-def get_summarywriter(
-    logdir: Optional[str], predictive_model: Optional[str] = None
-) -> SummaryWriter:
-    """Get the universal logger for tensorboard."""
-    if not logdir:
-        return
-    if predictive_model:
-        return SummaryWriter(log_dir=join(logdir, predictive_model))
-    return SummaryWriter(log_dir=logdir)
+        if not exists(dir_name):
+            makedirs(dir_name)
+        return dir_name
 
-
-def add_scalars(
-    logger: SummaryWriter,
-    tag_scalar_dict: Dict[str, float],
-    global_step: Optional[int] = None,
-    walltime: Optional[float] = None,
-    prefix: Optional[str] = None,
-) -> None:
-    """Adds scalars from dict but not to same plot."""
-    if not logger:
-        return
-    for tag, scalar_value in tag_scalar_dict.items():
-        if prefix:
-            logger.add_scalar(f"{prefix}/{tag}", scalar_value, global_step, walltime)
+    def add_scalar(
+        self,
+        metric: float,
+        name: str,
+        global_step: Optional[int] = None,
+        walltime: Optional[float] = None,
+        context: Optional[Dict[str, Any]] = None,
+        # formatting name for tensorboard using context, relies on "{name}" being used in the format string
+        tb_name_format: Optional[str] = None,
+    ):
+        if not self.logger:
+            return
+        if tb_name_format is not None:
+            logged_name = tb_name_format.format(name=name, **context)
         else:
-            logger.add_scalar(tag, scalar_value, global_step, walltime)
+            logged_name = name
 
+        if self.verbose:
+            if global_step is not None:
+                rank_zero_print(f"{logged_name}[{global_step}]: {metric}")
+            else:
+                rank_zero_print(f"{logged_name}: {metric}")
 
-def add_all_text(
-    logger: SummaryWriter,
-    tag_scalar_dict: Dict[str, str],
-    global_step: Optional[int] = None,
-    walltime: Optional[float] = None,
-) -> None:
-    """Adds text from dict."""
-    if not logger:
-        return
-    for tag, text_string in tag_scalar_dict.items():
-        logger.add_text(tag, text_string, global_step, walltime)
+        if isinstance(self.logger, SummaryWriter):
+            self.logger.add_scalar(logged_name, metric, global_step, walltime)
+        elif isinstance(self.logger, AimRun):
+            # this doesn't use logged_name
+            self.logger.track(metric, name, global_step, context={**context})
+        elif isinstance(self.logger, MlFlowRun):
+            mlflow.log_metric(key=logged_name, value=metric, step=global_step)
+
+    def add_scalars(
+        self,
+        tag_scalar_dict: Dict[str, float],
+        global_step: Optional[int] = None,
+        walltime: Optional[float] = None,
+        context: Optional[Dict[str, Any]] = None,
+        tb_name_format: Optional[str] = None,
+    ) -> None:
+        """Adds scalars from dict but not to same plot."""
+        if not self.logger:
+            return
+        for name, metric in tag_scalar_dict.items():
+            self.add_scalar(
+                metric,
+                name,
+                global_step,
+                walltime,
+                context=context,
+                tb_name_format=tb_name_format,
+            )
+
+    def add_all_text(
+        self,
+        tag_scalar_dict: Dict[str, str],
+        global_step: Optional[int] = None,
+        walltime: Optional[float] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Adds text from dict."""
+        if not self.logger:
+            return
+        for tag, text_string in tag_scalar_dict.items():
+            if isinstance(self.logger, SummaryWriter):
+                self.logger.add_text(tag, text_string, global_step, walltime)
+            elif isinstance(self.logger, AimRun):
+                self.logger.add_text(
+                    Text(text_string),
+                    tag,
+                    global_step,
+                    context={**context},
+                )
+            elif isinstance(self.loger, MlFlowRun):
+                mlflow.log_text(text_string, f"{tag}.txt")
+
+    def close(self):
+        if self.logger is not None:
+            if isinstance(self.logger, AimRun):
+                rank_zero_print(f"Logger Hash: {self.logger.hash}")
+            elif isinstance(self.logger, MlFlowRun):
+                pass
+            else:
+                self.logger.close()
 
 
 def copy_log_from_tune(
     best_tune_logdir: str, logdir: str, logger: SummaryWriter = None
 ):
     """
+    NOTE: This is for older version of Ray.
     We want to copy these over locally so we can remove the tune files and readily compare the output later.
     Walk through the best tune run logdirectory,
         ignoring top-level (which is tune metadata we don't care about),
@@ -163,3 +365,64 @@ def copy_log_from_tune(
             for file in files:
                 if search("tfevents", file):  # only tfevent files
                     copy(join(root, file), logdir)
+
+
+def copy_artifacts_from_tune(
+    best_result: air.Result,
+    model_path: str,
+    metric_path: str,
+    mlflow_callback: Optional[MLflowLoggerCallback] = None,
+):
+    """
+    Copy metrics and model.
+    Ray Tune output in 2.4.0 looks like:
+    long_tune_name/
+        checkpoint_000<num>/
+            model --> KEEP
+        rank_0/
+            checkpoints/
+                *.ckpt
+            *tfevents*
+            hparams.yaml
+        rank_.../
+        ...
+        *tfevents* --> KEEP
+        params.json --> KEEP
+        params.pkl (just a pkl of the json)
+        progress.csv
+        result.json --> KEEP
+
+    We don't want the per-rank tfevents, just the high level one.
+    """
+    if LOGGER_TYPE == "mlflow":
+        keep_regex = ".*.json"
+        if not exists(model_path):  # metric path should already exist
+            makedirs(dirname(model_path))
+    else:
+        keep_regex = "tfevents|.*.json"
+        if not exists(metric_path):  # Model path should already exist
+            makedirs(metric_path)
+
+    copy(join(best_result.checkpoint.path, "model"), model_path)
+
+    # copy metrics
+    for root, dirs, files in walk(best_result.log_dir):
+        if root == str(best_result.log_dir):  # only look at high level (not per rank)
+            for file in files:  # only tfevent and json files
+                if search(keep_regex, file):
+                    copy(join(root, file), metric_path)
+
+    # above won't copy over metrics saved separately/synced to mlflow
+    # ray-tune will save it disjoint for each epoch
+    if LOGGER_TYPE == "mlflow":
+        # copy over metrics if mlflow
+        best_mlflow_run_id = {
+            str(trial): run_id for trial, run_id in mlflow_callback._trial_runs.items()
+        }[best_result.metrics["trial_id"]]
+        copytree(
+            join(dirname(get_mlflow_artifact_path(best_mlflow_run_id)), "metrics"),
+            join(dirname(metric_path), "metrics"),
+            dirs_exist_ok=True,
+        )
+
+    rmtree(TUNE_LOG_DIR)  # delete tune files

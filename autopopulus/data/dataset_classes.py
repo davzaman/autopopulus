@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from argparse import ArgumentParser
+from copy import deepcopy
 from functools import reduce
 from itertools import chain
 from os import cpu_count
@@ -30,8 +31,14 @@ from torch.utils.data import DataLoader
 from autopopulus.data.constants import (
     PAD_VALUE,
     PATIENT_ID,
+    TIME_LEVEL,
 )
-from autopopulus.data.utils import enforce_numpy, explode_nans
+from autopopulus.data.utils import (
+    enforce_numpy,
+    explode_nans,
+    get_samples_from_index,
+    regex_safe_colname,
+)
 from autopopulus.data.types import (
     DataColumn,
     DataT,
@@ -221,15 +228,10 @@ class CommonTransformedDataset(Dataset):
         self.transformed_data = transformed_data
         self.longitudinal = longitudinal
 
-        # TODO[LOW]: Refactor out
-        def get_unique(index: Index) -> ndarray:
-            try:
-                return index.unique(PATIENT_ID)
-            except Exception:
-                return index.unique()
-
         # "original" should always exist and "data" should match "ground_truth" index.
-        self.split_ids = get_unique(self.transformed_data["original"]["data"].index)
+        self.split_ids = get_samples_from_index(
+            self.transformed_data["original"]["data"].index
+        )
 
     def __len__(self) -> int:
         return len(self.split_ids)
@@ -350,14 +352,14 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         fully_observed: bool = False,
         data_type_time_dim=DataTypeTimeDim.STATIC,
         scale: bool = False,
-        ampute: bool = False,
-        feature_map: Optional[str] = None,
+        feature_map: Optional[str] = "onehot_categorical",
         uniform_prob: bool = False,
         separate_ground_truth_transform: bool = False,
-        val_test_size: Optional[float] = None,
         test_size: Optional[float] = None,
+        val_size: Optional[float] = None,
         percent_missing: Optional[float] = None,
         amputation_patterns: Optional[List[Dict[str, Any]]] = None,
+        evaluate_on_remaining_semi_observed: bool = False,
         seed: Optional[int] = None,
         limit_data: Optional[int] = None,  # Debugging purposes
     ):
@@ -365,8 +367,8 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         self.seed = seed
         self.dataset_loader = dataset_loader
 
-        self.val_test_size = val_test_size
         self.test_size = test_size
+        self.val_size = val_size
         self.batch_size = batch_size
         if isinstance(num_workers, int):
             self.num_workers = num_workers
@@ -377,15 +379,19 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         self.fully_observed = fully_observed
         self.data_type_time_dim = data_type_time_dim
         self.scale = scale
-        self.ampute = ampute
         self.feature_map = feature_map
         self.uniform_prob = uniform_prob
         self.separate_ground_truth_transform = separate_ground_truth_transform
         self.percent_missing = percent_missing
         self.amputation_patterns = amputation_patterns
-        self._validate_inputs()
-
+        self.evaluate_on_remaining_semi_observed = evaluate_on_remaining_semi_observed
+        self.ampute = (
+            self.fully_observed
+            and self.percent_missing is not None
+            and self.amputation_patterns is not None
+        )
         self.limit_data = limit_data
+        self._validate_inputs()
 
     def setup(self, stage: Optional[str] = None):
         """
@@ -410,42 +416,47 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
                 X = X.loc[idx]
                 y = y.loc[idx]
 
-            # get the columns before sklearn/other preprocessing steps strip them away
-            self.columns = {"original": X.columns}
-
-            if self.fully_observed:
-                # keep rows NOT missing a value for any feature
-                fully_observed_mask = X.notna().all(axis=1)
-                X = X[fully_observed_mask]
-                y = y[fully_observed_mask]
+            # get the columns info before sklearn/other preprocessing steps strip them away
+            self._set_auxilliary_column_info(X)
 
             ground_truth = X.copy()
+            # optional separate test set
+            X_test, y_test, ground_truth_test = None, None, None
+            if self.fully_observed:
+                # rows NOT missing a value for any feature
+                where_fully_observed = X.notna().all(axis=1)
+                if self.evaluate_on_remaining_semi_observed:
+                    # save remaining semi observed subset before filtering down
+                    X_test = X[~where_fully_observed]
+                    y_test = y[~where_fully_observed]
+                    ground_truth_test = ground_truth[~where_fully_observed]
+                X = X[where_fully_observed]
+                y = y[where_fully_observed]
+                ground_truth = ground_truth[where_fully_observed]
+                # test is possibly semi-observed but not training since its fully observed
+                self.semi_observed_training = False
+            else:
+                self.semi_observed_training = ground_truth.isna().any().any()
 
             # Don't ampute if we're doing a purely F.O. experiment.
             if self.ampute:
                 # TODO: add tests for _add_latent_features, refact into function to test?
-                X = self._add_latent_features(X)
+                X, pyampute_patterns = self._add_latent_features(X)
                 amputer = MultivariateAmputation(
                     prop=self.percent_missing,
-                    patterns=self.amputation_patterns,
+                    patterns=pyampute_patterns,
                     seed=self.seed,
                 )
                 X = amputer.fit_transform(X)
                 # drop the added latent features.
                 X = X.drop(X.filter(regex=r"latent_p\d+_.+").columns, axis=1)
 
-            # cat indices and ctn indices
-            self._set_col_idxs_by_type()
-            # group categorical (bin/multicat/onehot) vars together, etc.
-            self._set_groupby()
-
-            # expand nans where its onehot to make sure the whole group is nan
-            # before assigned to splits
+            # expand nans for onehots, ensure whole group is nan before splitting data
+            # this works if amputing or not or evaluating on remaining data when F.O.
             X = explode_nans(X, self.col_idxs_by_type["original"].get("onehot", []))
 
             # split by pt id
-            self._split_dataset(ground_truth, X, y)
-            self._set_nfeatures()
+            self._split_dataset(ground_truth, X, y, ground_truth_test, X_test, y_test)
             self._set_post_split_transforms()
 
     def train_dataloader(self):
@@ -464,7 +475,7 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         assert (self.num_workers >= 0) and (
             self.num_workers <= cpu_count()
         ), "Number of CPUs has to be a non-negative integer, and not exceed the number of cores."
-        assert (self.val_test_size is not None and self.test_size is not None) or (
+        assert (self.test_size is not None and self.val_size is not None) or (
             hasattr(self.dataset_loader, "split_ids")
         ), "Need to either specify split percentages or provide custom splits to the dataset loader."
         if self.feature_map == "discretize_continuous":
@@ -479,14 +490,14 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
             assert (
                 self.feature_map == "discretize_continuous"
             ), "Did not indicate to discretize but indicated uniform probability. You need discretization to impose a uniform probability."
-        # need auxiliary info for amputation, (more if mar)
-        if self.ampute:
+        if self.evaluate_on_remaining_semi_observed:
             assert (
-                self.percent_missing is not None
-                and self.amputation_patterns is not None
-            ), "Failed to provide settings for amputation."
+                self.fully_observed
+            ), "Can only evaluate on remaining semi-observed if we request to filter to fully observed subset."
 
-    def _add_latent_features(self, data: DataFrame) -> DataFrame:
+    def _add_latent_features(
+        self, data: DataFrame
+    ) -> Tuple[DataFrame, List[Dict[str, Any]]]:
         """
         For amputation, if MNAR is recoverable we need to create and add our own latent features.
         If we want MNAR (recoverable) specify the distribution name(s) in parentheses.
@@ -494,8 +505,9 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         Mutates self.amputation_patterns.
         """
         X = data.copy()
-        # TODO: is the pattern dict inside the list mutable in this way?
-        for i, pattern in enumerate(self.amputation_patterns):
+        # we might modify the patterns passed in so we create a new object
+        pyampute_patterns = deepcopy(self.amputation_patterns)
+        for i, pattern in enumerate(pyampute_patterns):
             # match MNAR(*) or MNAR(*, *, ...) but not MNAR alone
             if re.search(r"MNAR\(\w+(?:,\s*\w+)*\)", pattern["mechanism"]):
                 # Grab everything in between () and split by comma
@@ -530,7 +542,15 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
 
                     # Change name to be pyampute compatible
                     pattern["mechanism"] = "MNAR"
-        return X
+        return (X, pyampute_patterns)
+
+    def _set_auxilliary_column_info(self, X: DataFrame):
+        self.columns = {"original": X.columns}
+        # cat indices and ctn indices
+        self._set_col_idxs_by_type()
+        # group categorical (bin/multicat/onehot) vars together, etc.
+        self._set_groupby()
+        self._set_nfeatures()
 
     def _set_col_idxs_by_type(self):
         """
@@ -557,23 +577,31 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
                     [
                         self.columns["original"].get_loc(col)
                         for col in self.columns["original"]
-                        if ctn_cols.str.contains(col).any()
+                        if ctn_cols.str.contains(regex_safe_colname(col)).any()
                     ]
                 ),
                 "categorical": array(
                     [
                         self.columns["original"].get_loc(col)
                         for col in self.columns["original"]
-                        if cat_cols.str.contains(col).any()
+                        if cat_cols.str.contains(regex_safe_colname(col)).any()
                     ]
                 ),
             }
         }
 
+        assert len(self.col_idxs_by_type["original"]["continuous"]) + len(
+            self.col_idxs_by_type["original"]["categorical"]
+        ) == len(
+            self.columns["original"]
+        ), "Continuous and categorical columns given don't partition all the columns evenly."
+
         # useful for target encoding
         if self.dataset_loader.onehot_prefixes is not None:
             self.col_idxs_by_type["original"]["onehot"]: List[List[int]] = [
-                where(self.columns["original"].str.contains(col))[0]
+                where(
+                    self.columns["original"].str.contains(f"^{regex_safe_colname(col)}")
+                )[0].tolist()
                 for col in self.dataset_loader.onehot_prefixes
             ]
             # If its missing argwhere() returns an empty array that i don't want.
@@ -646,6 +674,9 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         ground_truth: DataFrame,
         X: DataFrame,
         y: Union[Series, ndarray],
+        ground_truth_test: Optional[DataFrame] = None,
+        X_test: Optional[DataFrame] = None,
+        y_test: Optional[Union[Series, ndarray]] = None,
     ):
         """
         Splits dataset into train/test/val via data index (pt id).
@@ -656,13 +687,27 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         Where the mapping could be discretized, target encoded, or onehot encoded.
         The self.splits dictionary will then look like:
         {
-            "data": {"train": ..., "val": ..., "test": ...},
-            "ground_truth": {"train": ..., "val": ..., "test": ...},
-            # "non_missing_mask": {"train": ..., "val": ..., "test": ...},
-            "label": {"train": ..., "val": ..., "test": ...},
+            "data": {
+                "original": {"train": vals, "val": vals, "test": vals},
+                "mapped": {...}
+            },
+            "ground_truth": {...},
+            "label": {...},
         }
         """
         splits = self._get_dataset_splits(X, y)
+
+        if self.evaluate_on_remaining_semi_observed:
+            assert (
+                (ground_truth_test is not None)
+                and (X_test is not None)
+                and (y_test is not None)
+            ), "Asked to evaluate on remaining semi-observed portion of datset, but nothing was passed in to dataset split."
+            assert list(splits.keys()) == [
+                "train",
+                "val",
+            ], "_get_dataset_splits should only return train and val if test set is already provided (remaining semi-observed portion of dataset.)"
+
         self.splits: Dict[str, Tensor] = {
             "data": {},
             "ground_truth": {},
@@ -672,10 +717,12 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         for split_name, split_ids in splits.items():
             self.splits["ground_truth"][split_name] = ground_truth.loc[split_ids]
             self.splits["data"][split_name] = X.loc[split_ids]
-            # self.splits["non_missing_mask"][split_name] = (
-            #     ~X.loc[split_ids].isna().astype(bool)
-            # )
             self.splits["label"][split_name] = y[split_ids]
+
+        if self.evaluate_on_remaining_semi_observed:
+            self.splits["ground_truth"]["test"] = ground_truth_test
+            self.splits["data"]["test"] = X_test
+            self.splits["label"]["test"] = y_test
 
     def _get_dataset_splits(
         self,
@@ -684,42 +731,50 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
     ) -> Dict[str, ndarray]:
         """
         Splitting via df index with label stratification using sklearn.
+        If dataset_loader already has split_ids specified, use them.
+        If evaluating on remaining semi_observed, we already have a test set,
+            only split into train and val.
+        Otherwise split intro train/val/test according to (curried) proportions.
         """
         # Use pre-specified splits if user has them
         if hasattr(self.dataset_loader, "split_ids"):
             return self.dataset_loader.split_ids
-
         # TODO[LOW]: enforce pt id is the same name for all dataset
-        # pick pt id if longitudinal portion of data (multiindex)
-        level = PATIENT_ID if isinstance(X.index, MultiIndex) else None
-        sample_ids = X.index.unique(level).values
+        sample_ids = get_samples_from_index(X.index)
+        labels = y
 
         train_val_ids, test_ids = train_test_split(
             sample_ids,
-            test_size=self.val_test_size,
-            stratify=y,
+            test_size=self.test_size,
+            stratify=labels,
             random_state=self.seed,
         )
+        if self.evaluate_on_remaining_semi_observed:
+            # don't split again we already have test, trainval is just train and test is val
+            train_ids = train_val_ids
+            val_ids = test_ids
+            return {"train": train_ids, "val": val_ids}
+
         train_ids, val_ids = train_test_split(
             train_val_ids,
-            test_size=self.test_size,
-            stratify=y[train_val_ids],
+            test_size=self.val_size,
+            stratify=labels[train_val_ids],
             random_state=self.seed,
         )
 
-        return {
-            "train": train_ids,
-            "val": val_ids,
-            "test": test_ids,
-        }
+        return {"train": train_ids, "val": val_ids, "test": test_ids}
 
     def _set_post_split_transforms(self):
         """
         Setup sklearn pipeline for transforms to run after splitting data.
         Assumes groupby is set for categorical onehots and binary vars.
-        There are separate pipelines for data and ground_truth.
+        There can be separate pipelines for data and ground_truth.
         If feature_map, we will keep a separate transform function that only applies the non-mapping steps.
         If discretizing update the groupby (so all bins for the same var can be grouped later), and save the bins fitted/learned by discretizer.
+
+        NOTE: FEATURE MAPPINGS SHOULD
+            1. preserve nans.
+            2. not introduce any new nans.
         """
 
         def get_steps(
@@ -729,7 +784,6 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         ) -> List[TransformerMixin]:
             steps = []
             if scale:
-                # Scale continuous features. Can produce negative numbers.
                 steps.append(
                     (
                         "scale_continuous",
@@ -744,6 +798,7 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
                                     self.col_idxs_by_type["original"]["continuous"],
                                 )
                             ],
+                            reorder_cols=True,
                         ),
                     ),
                 )
@@ -761,6 +816,16 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
                         ),
                     )
                 )
+                if uniform_prob:
+                    steps.append(
+                        (
+                            "uniform_probability_across_nans",
+                            # I don't need groupby in mapped space since i'm not using the indices, but the names.
+                            UniformProbabilityAcrossNans(
+                                self.groupby["original"], self.columns["original"]
+                            ),
+                        )
+                    )
             elif feature_map == "target_encode_categorical":
                 intermediate_categorical_cols = self.dataset_loader.categorical_cols
                 if "onehot" in self.col_idxs_by_type["original"]:
@@ -790,6 +855,7 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
                             self.dataset_loader.onehot_prefixes, sort=False
                         )
                     )
+                    # a mix of binary and multicategorical (not one hot/now combined) features
                     intermediate_categorical_cols = self.columns["mapped"].drop(
                         self.columns["original"][
                             self.col_idxs_by_type["original"]["continuous"]
@@ -803,21 +869,11 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
                         "target_encode_categorical",
                         TargetEncoder(
                             cols=intermediate_categorical_cols,
-                            handle_unknown="return_nan",
+                            handle_missing="return_nan",
                         ),
                     ),
                 )
 
-            if uniform_prob:
-                steps.append(
-                    (
-                        "uniform_probability_across_nans",
-                        # I don't need groupby in mapped space since i'm not using the indices, but the names.
-                        UniformProbabilityAcrossNans(
-                            self.groupby["original"], self.columns["original"]
-                        ),
-                    )
-                )
             return steps
 
         #### POST FIT LOGIC ####
@@ -1008,17 +1064,23 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         elif self.feature_map == "target_encode_categorical":
             target_encoder = data_pipeline.named_steps["target_encode_categorical"]
             # TODO: should there be data and ground_truth?
-            self.inverse_target_encode_map: Dict[
-                # the transform function or col_index: {ordinal#: encoded_float}
-                str,
-                Union[Callable, Dict[int, Dict[int, float]]],
-            ] = {
-                "inverse_transform": target_encoder.ordinal_encoder.inverse_transform,
+            """
+            We drop the "unknown" and "nan" handling mappings.
+            When we're inverting there should be no nans, so we don't need nan inversion.
+                1. the model output should not have any nans
+                2. the ground truth should not have any nans. When we're semi_observed_training there will be no feature inversion. We only compute the loss in mapped space.
+            When we're inverting we don't care about the unknown mapping, we will opt for the closes known category and fill with that.
+            """
+            # If this changes test_transforms needs to change
+            self.inverse_target_encode_map = {
                 "mapping": {
-                    # we cannot invert the mapping since multiple ordinal values might be mapped to the same encoded float
-                    self.columns["mapped"].get_loc(col): col_mapping.to_dict()
-                    for col, col_mapping in target_encoder.mapping.items()
-                },
+                    k: v.drop([-1, -2], axis=0, errors="ignore").dropna()
+                    for k, v in target_encoder.mapping.items()
+                },  # Dict[str, DataFrame]
+                "ordinal_mapping": [
+                    info["mapping"].drop([nan], axis=0, errors="ignore")
+                    for info in target_encoder.ordinal_encoder.mapping
+                ],  # List[Dict[str, Union[str, DataFrame, dtype]]]
             }
 
             # This changes the cardinality of the dataset
@@ -1061,6 +1123,28 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
                     .union(self.columns["original"][flat_onehot_indices], sort=False)
                 )
 
+    def _apply_post_split_transforms(
+        self, split: str
+    ) -> Dict[str, Dict[str, DataFrame]]:
+        split_data = {}
+        data_feature_spaces = ["original"]
+        if self.feature_map is not None and self.feature_map != "onehot_categorical":
+            data_feature_spaces.append("mapped")
+        for data_feature_space in data_feature_spaces:  # ["original", "mapped"]
+            split_data[data_feature_space] = {}
+            for (
+                data_role,
+                split_dfs,
+            ) in self.splits.items():  # ["data", "ground_truth"]
+                if data_role != "label":  # apply transform to particular split
+                    if self.transforms is not None:
+                        split_data[data_feature_space][data_role] = self.transforms[
+                            data_feature_space
+                        ][data_role](split_dfs[split])
+                    else:
+                        split_data[data_feature_space][data_role] = split_dfs[split]
+        return split_data
+
     @staticmethod
     def _get_onehot_indices_from_groupby(
         groupby: Dict[str, Dict[int, str]]
@@ -1095,23 +1179,15 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
         if apply_transform_adhoc:  # Apply transform 1-by-1 in Dataset __getitem__
             split_data = {k: v[split] for k, v in self.splits.items()}
         else:  # apply transform beforehand on the entire split
-            split_data = {}
-            for data_version in self.transforms.keys():  # ["original", "mapped"]
-                split_data[data_version] = {}
-                for (
-                    data_role,
-                    split_dfs,
-                ) in self.splits.items():  # ["data", "ground_truth"]
-                    if data_role != "label":
-                        # apply transform to particular split
-                        split_data[data_version][data_role] = self.transforms[
-                            data_version
-                        ][data_role](split_dfs[split])
+            split_data = self._apply_post_split_transforms(split)
 
-        return self._create_dataloader(split_data, apply_transform_adhoc)
+        return self._create_dataloader(split, split_data, apply_transform_adhoc)
 
     def _create_dataloader(
-        self, split_data: Dict[str, Dict[str, DataFrame]], apply_transform_adhoc: bool
+        self,
+        split: str,
+        split_data: Dict[str, Dict[str, DataFrame]],
+        apply_transform_adhoc: bool,
     ) -> DataLoader:
         """Packages data for pytorch Dataset/DataLoader."""
         is_longitudinal = self.data_type_time_dim in (
@@ -1130,12 +1206,12 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
             dataset,
             collate_fn=self._batch_collate if is_longitudinal else None,
             batch_size=self.batch_size,
-            shuffle=False,
-            prefetch_factor=8,
-            # persistent_workers=True,
+            shuffle=split == "train",
+            # prefetch_factor=256,
+            persistent_workers=False,
             num_workers=self.num_workers,
             # don't use pin memory: https://discuss.pytorch.org/t/dataloader-method-acquire-of-thread-lock-objects/52943
-            pin_memory=False,
+            pin_memory=True,
         )
         return loader
 
@@ -1205,23 +1281,24 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
             default=128,
             help="When training the autoencoder, set the batch size.",
         )
-        p.add_argument(
-            "--num-gpus",
-            type=int,
-            default=4,
-            help="Number of gpus for the pytorch dataset used in passing batches to the autoencoder.",
-        )
+
         p.add_argument(
             "--num-workers",
             type=int,
             default=4,
-            help="Number of workers for the pytorch dataset used in passing batches to the autoencoder.",
+            help="Number of workers for the pytorch dataloader used in passing batches to the autoencoder.",
         )
         p.add_argument(
             "--scale",
             type=str2bool,
             default=False,
             help="When training the autoencoder, whether or not to scale the data before passing the data to the network.",
+        )
+        p.add_argument(
+            "--uniform-prob",
+            type=str2bool,
+            default=False,
+            help="When training an autoencoder with feature_map=discretize_continuous, whether or not to impose uniform distribution on missing values of onehot features.",
         )
         p.add_argument(
             "--separate_ground_truth_transform",
@@ -1235,12 +1312,18 @@ class CommonDataModule(LightningDataModule, CLIInitialized):
             default=None,
             help="Debugging: limits the dataset to a certain size. Must be >= batch-size.",
         )
+        p.add_argument(
+            "--evaluate-on-remaining-semi-observed",
+            type=str2bool,
+            default=False,
+            help="Whether to split the fully observed subset into train and val and use the remaining semi-observed data as test. When set to true on testing we force semi_observed_training to true.",
+        )
 
         #### AMPUTE ####
         p.add_argument(
             "--fully-observed",
             type=str2bool,
-            default=False,
+            default="no",
             help="Filter down to fully observed dataset flag.",
         )
         p.add_argument(

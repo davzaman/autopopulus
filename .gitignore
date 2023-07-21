@@ -3,20 +3,25 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-dev/
 options.yml
 *.prof
+.aim/
 mlruns/
 notebooks/
 tune_results/
 fil-result/
+F.O./
 full/
 serialized_models/
 profiling-results/
+STATIC/
+model_viz/
+guild_runs/
 # serialized models
 *.pt
 # tflow
 *.tfevents
+run_progress.csv
 
 # C extensions
 *.so

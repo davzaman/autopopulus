@@ -1,10 +1,12 @@
 from typing import Callable, List, Union
-from pandas import DataFrame, Series, get_dummies
+from pandas import DataFrame, MultiIndex, Series, Index, get_dummies
 from numpy import ndarray, nan
 from torch import Tensor
+import torch
 from torch.utils.data import DataLoader, TensorDataset
 
 from autopopulus.data.types import DataT
+from autopopulus.data.constants import TIME_LEVEL
 
 
 def explode_nans(X: DataFrame, onehot_groups_idxs: List[List[int]]) -> DataFrame:
@@ -18,9 +20,45 @@ def explode_nans(X: DataFrame, onehot_groups_idxs: List[List[int]]) -> DataFrame
     return X
 
 
-def enforce_numpy(df: DataT) -> ndarray:
+def enforce_tensor(*df: DataT, enforce_numeric: bool = True) -> Tensor:
+    def cases(data: DataT):
+        if data is None:
+            return None
+        elif isinstance(data, Tensor):
+            return data
+        else:
+            return torch.from_numpy(enforce_numpy(data, enforce_numeric))
+
+    return (cases(data) for data in df)
+
+
+def enforce_numpy(df: DataT, enforce_numeric: bool = True) -> ndarray:
     # enforce numpy is numeric with df*1 (fixes bools)
-    return (df * 1).values if isinstance(df, DataFrame) else (df * 1)
+    if enforce_numeric:
+        df = df * 1
+    return df.values if isinstance(df, DataFrame) else df
+
+
+def get_samples_from_index(index: Index) -> ndarray:
+    # ignore time dimension if longitudinal portion of data
+    is_multiindex = isinstance(index, MultiIndex)
+    # level = PATIENT_ID if is_multiindex else None
+    # sample_ids = X.index.unique(level).values
+    if is_multiindex and TIME_LEVEL in index.names:
+        return index.droplevel(TIME_LEVEL).values
+    else:
+        return index
+
+
+def regex_safe_colname(coln: str) -> str:
+    """
+    When looking up pd.str.contains(str) the passed str has to be regex safe.
+    If a column has regex keywords in it like `+` then there's a problem.
+    e.g., 'IONIZED CA++,CORRECTED_min' from crrt dataset.
+    Similar with parenthesis.
+    Chaining is fastest: https://stackoverflow.com/a/27086669/1888794
+    """
+    return coln.replace("+", "\+").replace("(", "\(").replace(")", "\)")
 
 
 def onehot_multicategorical_column(

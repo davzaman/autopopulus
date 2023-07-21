@@ -91,12 +91,16 @@ class MDLDiscretizer:
             bin_points = np.unique(
                 [range_point for range_tuple in bins for range_point in range_tuple]
             )
+            # Ref: https://stackoverflow.com/a/45169454/1888794
+            unbounded_bin_points = bin_points.copy().astype(float)  # float to allow inf
+            unbounded_bin_points[0] = -np.inf
+            unbounded_bin_points[-1] = np.inf
             # cut and create a pandas categorical column that includes info of all possible categories, even if it's not in the data itself.
             # https://stackoverflow.com/questions/37425961/dummy-variables-when-not-all-categories-are-present
             transform_df.loc[:, col] = pd.cut(
                 transform_df[col],
-                labels=labels,
-                bins=bin_points,
+                labels=labels,  # labels will reflect the 2-side bounded ranges learned by data
+                bins=unbounded_bin_points,  # but our bins will actually be unbounded at the lower and upper bounds to accomodate for unseen values in ground_truth
                 right=True,
                 include_lowest=True,
             ).astype(pd.CategoricalDtype(categories=labels))
@@ -125,7 +129,8 @@ class MDLDiscretizer:
                 column_ranges.append((float(start_range), float(end_range)))
             # min=max: don't want to add a bin back to the min, (it will be binary)
             if max_col_value > min_col_value:
-                column_ranges.append((start_of_last_bin, max_col_value))
+                if start_of_last_bin != max_col_value:
+                    column_ranges.append((start_of_last_bin, max_col_value))
 
             # add list of all ranges for each column to a list
             list_of_ranges_per_col.append(column_ranges)

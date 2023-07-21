@@ -1,6 +1,7 @@
+import re
 from argparse import Namespace
+from typing import Dict
 
-from joblib import dump
 import miceforest as mf
 import pandas as pd
 
@@ -8,76 +9,107 @@ import pandas as pd
 # Required for IterativeImputer, as it's experimental
 from sklearn.experimental import enable_iterative_imputer  # noqa
 from sklearn.impute import IterativeImputer, KNNImputer
+from sklearn.tree import DecisionTreeClassifier
 
 ## Local Modules
-from autopopulus.data.transforms import SimpleImpute
 from autopopulus.data import CommonDataModule
-from autopopulus.utils.log_utils import get_serialized_model_path
-from autopopulus.task_logic.utils import InputDataSplit
+from autopopulus.models.sklearn_model_utils import MixedFeatureImputer
+from autopopulus.utils.log_utils import dump_artifact
+from autopopulus.models.sklearn_model_utils import TransformScorer, TunableEstimator
+from autopopulus.task_logic.utils import (
+    ImputerT,
+    get_tune_metric,
+)
 
 
-BASELINE_DATA_SETTINGS = {
-    "scale": True,
-    "feature_map": None,
-    "uniform_prob": False,
-}
+def none(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
+    return {split: data.splits["data"][split] for split in ["train", "val", "test"]}
 
 
-def none(args: Namespace, data: CommonDataModule) -> InputDataSplit:
-    data.setup("fit")
-    return {
-        "train": data.splits["data"]["train"],
-        "val": data.splits["data"]["val"],
-        "test": data.splits["data"]["test"],
+def simple(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
+    # nothing to tune
+    imputer = MixedFeatureImputer(
+        ctn_cols=data.dataset_loader.continuous_cols,
+        onehot_groupby=data.groupby["original"]["categorical_onehots"],
+    )
+    imputer.fit(data.splits["data"]["train"])
+    dump_artifact(imputer, "simple")
+    return {  # impute data
+        split: imputer.transform(data.splits["data"][split])
+        for split in ["train", "val", "test"]
     }
 
 
-def simple(args: Namespace, data: CommonDataModule) -> InputDataSplit:
-    imputer = SimpleImpute(data.dataset_loader.continuous_cols)
-    X_train = imputer.fit_transform(data.splits["data"]["train"])
-    X_val = imputer.transform(data.splits["data"]["val"])
-    X_test = imputer.transform(data.splits["data"]["test"])
-
-    return (X_train, X_val, X_test)
-
-
-def knn(args: Namespace, data: CommonDataModule) -> InputDataSplit:
-    ## IMPUTE ##
-    imputer = KNNImputer()
-    X_train = imputer.fit_transform(data.splits["data"]["train"])
-    X_val = imputer.transform(data.splits["data"]["val"])
-    X_test = imputer.transform(data.splits["data"]["test"])
-
-    # Add columns back in (sklearn erases) for rmse for missing only columns
-    X_train = pd.DataFrame(X_train, columns=data.columns["original"])
-    X_val = pd.DataFrame(X_val, columns=data.columns["original"])
-    X_test = pd.DataFrame(X_test, columns=data.columns["original"])
-
-    return (X_train, X_val, X_test)
-
-
-def mice(args: Namespace, data: CommonDataModule) -> InputDataSplit:
-    """Uses sklearn instead of miceforest package."""
-    imputer = IterativeImputer(
-        max_iter=args.mice_num_iterations, random_state=args.seed
+def knn(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
+    imputer = TunableEstimator(
+        MixedFeatureImputer(
+            data.dataset_loader.continuous_cols,
+            onehot_groupby=data.groupby["original"]["categorical_onehots"],
+            numeric_transformer=KNNImputer(),
+            categorical_transformer=KNNImputer(
+                n_neighbors=1,  # any more than that and it'll take the average
+            ),
+            categorical_ignore_params=["n_neighbors", "weights"],
+        ),
+        score_fn=TransformScorer(
+            get_tune_metric(ImputerT.BASELINE, data, "original"),
+            higher_is_better=False,
+            missingonly=True,
+        ),
     )
-    X_train = imputer.fit_transform(data.splits["data"]["train"])
-    X_val = imputer.transform(data.splits["data"]["val"])
-    X_test = imputer.transform(data.splits["data"]["test"])
+    imputer.fit(data.splits["data"], data.splits["ground_truth"])
+    # need to pickle with cloudpickle bc score_fn is lambda
+    dump_artifact(imputer, "knn")
+    return {
+        # TODO: this might not be necessary anymore bc of mixedfeatureimputer
+        # Add columns back in (sklearn erases) for rmse for missing only columns
+        split: pd.DataFrame(
+            # impute data
+            imputer.transform(data.splits["data"][split]),
+            columns=data.columns["original"],
+            # some pandas operations rely on the pandas indices (e.g. pd.where)
+            index=data.splits["data"][split].index,
+        )
+        for split in ["train", "val", "test"]
+    }
 
-    # Add columns back in (sklearn erases) for rmse for missing only columns
-    X_train = pd.DataFrame(X_train, columns=data.columns["original"])
-    X_val = pd.DataFrame(X_val, columns=data.columns["original"])
-    X_test = pd.DataFrame(X_test, columns=data.columns["original"])
 
-    # Serialize Model
-    dump(imputer, get_serialized_model_path("mice"))
+def mice(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
+    """Uses sklearn instead of miceforest package."""
+    imputer = TunableEstimator(
+        MixedFeatureImputer(
+            data.dataset_loader.continuous_cols,
+            onehot_groupby=data.groupby["original"]["categorical_onehots"],
+            numeric_transformer=IterativeImputer(random_state=args.seed),
+            categorical_transformer=IterativeImputer(
+                estimator=DecisionTreeClassifier(),  # works for bin and multicat
+                initial_strategy="most_frequent",
+                random_state=args.seed,
+            ),
+        ),
+        score_fn=TransformScorer(
+            get_tune_metric(ImputerT.BASELINE, data, "original"),
+            higher_is_better=False,
+            missingonly=True,
+        ),
+    )
+    imputer.fit(data.splits["data"], data.splits["ground_truth"])
+    dump_artifact(imputer, "mice")
+    return {
+        # Add columns back in (sklearn erases) for rmse for missing only columns
+        split: pd.DataFrame(
+            # impute data
+            imputer.transform(data.splits["data"][split]),
+            columns=data.columns["original"],
+            # some pandas operations rely on the pandas indices (e.g. pd.where)
+            index=data.splits["data"][split].index,
+        )
+        for split in ["train", "val", "test"]
+    }
 
-    return (X_train, X_val, X_test)
 
-
-def miceforest(args: Namespace, data: CommonDataModule) -> InputDataSplit:
-    ## IMPUTE ##
+# TODO: this doesn't work with TunableEstimator
+def miceforest(args: Namespace, data: CommonDataModule) -> Dict[str, pd.DataFrame]:
     imputer = mf.KernelDataSet(
         data.splits["data"]["train"],
         save_all_iterations=True,
@@ -89,6 +121,6 @@ def miceforest(args: Namespace, data: CommonDataModule) -> InputDataSplit:
     X_test = imputer.impute_new_data(data.splits["data"]["test"]).complete_data()
 
     # Serialize Model
-    dump(imputer, get_serialized_model_path("miceforest"))
+    dump_artifact(imputer, "miceforest")
 
-    return (X_train, X_val, X_test)
+    return {"train": X_train, "val": X_val, "test": X_test}

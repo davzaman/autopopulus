@@ -1,11 +1,13 @@
 from argparse import ArgumentParser
 from pytorch_lightning import Trainer
-from pytorch_lightning.profiler import SimpleProfiler, AdvancedProfiler, PyTorchProfiler
-from pytorch_lightning.plugins.training_type.ddp import DDPPlugin
+from pytorch_lightning.profilers import (
+    SimpleProfiler,
+    AdvancedProfiler,
+    PyTorchProfiler,
+)
 import pandas as pd
 import os
 from numpy.random import default_rng
-from torch import vstack
 
 from autopopulus.data import CommonDataModule
 from autopopulus.data.dataset_classes import SimpleDatasetLoader
@@ -24,19 +26,22 @@ PROFILERS = {
         # emit_nvtx=True,
         profile_memory=True,
         with_stack=True,
+        record_module_names=True,
     ),
 }
 
 if __name__ == "__main__":
     seed = 0
     batch_size = 256
-    nsamples = 1000028
+    # nsamples = 1000028
+    nsamples = 100028
     nfeatures = 20
     fast_dev_run = 0
     rng = default_rng(seed)
-    num_gpus = 2
+    num_gpus = 1
     num_workers = 4
     optimn = "Adam"
+    max_epoch = 1
 
     p = ArgumentParser()
     p.add_argument("--profilers", type=str, default=None, action=YAMLStringListToList())
@@ -90,8 +95,8 @@ if __name__ == "__main__":
     )
     data = CommonDataModule(
         seed=seed,
-        val_test_size=0.5,
         test_size=0.5,
+        val_size=0.5,
         batch_size=batch_size,
         num_workers=num_workers,
         scale=True,
@@ -115,7 +120,6 @@ if __name__ == "__main__":
             num_gpus=num_gpus,
             hidden_layers=[0.5],
             learning_rate=0.1,
-            mvec=False,
             variational=False,
             activation="ReLU",
             optimn=optimn,
@@ -123,6 +127,7 @@ if __name__ == "__main__":
             datamodule=data,
             fast_dev_run=fast_dev_run,
             profiler=profiler,
+            max_epochs=max_epoch,
         )
 
         model.fit(data)

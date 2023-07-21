@@ -7,6 +7,22 @@ from hypothesis import strategies as st
 from hypothesis.extra.pandas import data_frames
 
 from autopopulus.data.utils import onehot_multicategorical_column
+from autopopulus.data.dataset_classes import SimpleDatasetLoader
+from autopopulus.test.common_mock_data import columns
+
+
+def get_dataset_loader(data, label) -> SimpleDatasetLoader:
+    return SimpleDatasetLoader(
+        data,
+        label,
+        **{
+            "continuous_cols": columns["ctn_cols"],
+            "categorical_cols": list(
+                set(columns["columns"]) - set(columns["ctn_cols"])
+            ),
+            "onehot_prefixes": columns["onehot_prefix_names"],
+        },
+    )
 
 
 def build_onehot_from_hypothesis(

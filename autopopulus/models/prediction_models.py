@@ -1,12 +1,15 @@
 from timeit import default_timer as timer
 from typing import Callable, List, Dict, Any, Optional, Tuple, Union
 from tqdm import tqdm
+from cloudpickle import load
 from argparse import ArgumentParser, Namespace
 from pandas import DataFrame, MultiIndex, Series, concat
 from numpy import ndarray, logspace, mean
 from numpy.random import Generator, default_rng
 from torch.utils.tensorboard import SummaryWriter
 from pytorch_lightning.utilities import rank_zero_info
+import re
+from lightgbm.basic import LightGBMError
 
 #### sklearn ####
 from sklearn.pipeline import Pipeline
@@ -45,12 +48,17 @@ from sktime.transformations.panel.tsfresh import TSFreshFeatureExtractor
 from autopopulus.data.constants import PATIENT_ID
 from autopopulus.data.types import DataTypeTimeDim
 from autopopulus.utils.cli_arg_utils import YAMLStringListToList
-from autopopulus.utils.log_utils import add_scalars, get_summarywriter
+from autopopulus.utils.log_utils import (
+    PREDICT_METRIC_TAG_FORMAT,
+    SERIALIZED_PREDICTOR_FORMAT,
+    BasicLogger,
+    dump_artifact,
+)
 from autopopulus.models.evaluation import (
     bootstrap_confidence_interval,
     shapiro_wilk_test,
 )
-from autopopulus.utils.utils import CLIInitialized
+from autopopulus.utils.utils import CLIInitialized, rank_zero_print
 
 
 PREDICTOR_MODEL_METADATA = {
@@ -153,18 +161,29 @@ class Predictor(TransformerMixin, CLIInitialized):
         predictors: List[str],
         num_bootstraps: int,
         data_type_time_dim: DataTypeTimeDim = DataTypeTimeDim.STATIC,
-        logdir: Optional[str] = None,
+        base_logger_context: Optional[Dict[str, Any]] = None,
+        experiment_name: Optional[str] = None,
+        parent_run_hash: Optional[str] = None,
         verbose: bool = False,
     ):
         super().__init__()
         self.seed = seed
         self.num_bootstraps = num_bootstraps
         self.data_type_time_dim = data_type_time_dim
-        self.logdir = logdir
+        self.base_logger_context = base_logger_context
+        self.experiment_name = experiment_name
+        self.parent_run_hash = parent_run_hash
         self.verbose = verbose
         self.model_names = predictors
         self.model = self.build_models()
+        self.logger = BasicLogger(
+            run_hash=self.parent_run_hash,
+            experiment_name=self.experiment_name,
+            base_context=self.base_logger_context,
+        )
 
+    # TODO: incorporate TunableEstimator
+    # TODO: separate evaluation/logging with fitting
     def fit(self, X: Dict[str, DataFrame], y: Dict[str, DataFrame]):
         bootstrap_metrics = []
         # Need to concat train and val for hold-out validation with sklearn
@@ -185,8 +204,6 @@ class Predictor(TransformerMixin, CLIInitialized):
                 X["test"], y["test"], self.X_transforms[modeln]
             )
 
-            log = get_summarywriter(self.logdir, modeln)
-
             # Set GridSearch with a hold-out validation instead of CV (via predefinedsplit)
             # indicate indices: -1 @ indices for train, 0 for evaluation
             # This should work for both static and longitudinal
@@ -202,37 +219,54 @@ class Predictor(TransformerMixin, CLIInitialized):
                 cv=holdout_validation_split,
                 n_jobs=-1,
             )
+            # Run GridSearch on concatenated train+val
+            rank_zero_print(f"Starting fit of {model}")
+            start = timer()
+            try:
+                cv.fit(X_tune, y_tune)
+            except ValueError:  # lightgbm has a weird issue with column names.
+                # https://github.com/autogluon/autogluon/issues/399#issuecomment-623326629
+                cv.fit(
+                    X_tune.rename(columns=lambda x: re.sub("[^A-Za-z0-9_]+", "", x)),
+                    y_tune,
+                )
+            rank_zero_print(f"Fit took {timer() - start} seconds.")
 
+            ## Evaluation ##
+            preds = cv.predict(X_eval)
+            pred_probas = cv.predict_proba(X_eval)[:, 1]
+            self.save_model(modeln, cv.best_estimator_)
             # Create N seeds using the original seed for each bootstrap
             gen = default_rng(self.seed)
             bootstrap_seeds = gen.integers(0, 10000, self.num_bootstraps)
             for b in tqdm(range(self.num_bootstraps)):
-                X_boot, y_boot = resample(
-                    X_tune, y_tune, stratify=y_tune, random_state=bootstrap_seeds[b]
+                preds_boot, pred_probas_boot, true_boot = resample(
+                    preds,
+                    pred_probas,
+                    y_eval,
+                    stratify=y_eval,
+                    random_state=bootstrap_seeds[b],
                 )
 
-                # Run GridSearch on concatenated train+val
-                print(f"Starting fit of {model}")
-                start = timer()
-                cv.fit(X_boot, y_boot)
-                print(f"Fit took {timer() - start} seconds.")
                 # Evaluate on best model
-                metric_results = self.evaluate(
-                    y_eval, cv.predict(X_eval), cv.predict_proba(X_eval)[:, 1]
-                )
+                metric_results = self.evaluate(true_boot, preds_boot, pred_probas_boot)
                 # plot across all bootstraps
-                add_scalars(log, metric_results, b, prefix="predict")
+                self.logger.add_scalars(
+                    metric_results,
+                    global_step=b,
+                    context={
+                        "step": "predict",
+                        "predictor": modeln,
+                        "aggregate_type": "none",
+                    },
+                    tb_name_format=PREDICT_METRIC_TAG_FORMAT,
+                )
                 # save performance across bootstrap samples to form CI
                 bootstrap_metrics.append(metric_results)
 
             # Roll up results for logging, assuming they all have the same metric keys
-            bootstrap_metrics_rolled = {
-                metricn: [metrics[metricn] for metrics in bootstrap_metrics]
-                for metricn in bootstrap_metrics[0]
-            }
-            self._log_performance_statistics(bootstrap_metrics_rolled, log)
-            if log:
-                log.close()
+            # self._log_performance_statistics(bootstrap_metrics, modeln)
+            self.logger.close()
         return self
 
     def transform(self, X: Union[ndarray, DataFrame]) -> ndarray:
@@ -286,8 +320,8 @@ class Predictor(TransformerMixin, CLIInitialized):
 
         if self.verbose:
             # print redundant with TP/etc information but it's formatted better
-            rank_zero_info(f"CM: {conf_matrix}")
-            rank_zero_info(performance)
+            rank_zero_print(f"CM: {conf_matrix}")
+            rank_zero_print(performance)
         return performance
 
     def build_models(self, n_jobs: int = -1) -> List[BaseEstimator]:
@@ -314,6 +348,14 @@ class Predictor(TransformerMixin, CLIInitialized):
             model_cls = model_metadata["cls"]
             models.append(model_cls(**model_kwargs))
         return models
+
+    def save_model(self, modeln: str, estimator: BaseEstimator):
+        dump_artifact(estimator, SERIALIZED_PREDICTOR_FORMAT.format(model=modeln))
+
+    def load_model(self, model_path: str) -> BaseEstimator:
+        with open(model_path, "rb") as f:
+            estimator = load(f)
+        return estimator
 
     ###################
     #     HELPERS     #
@@ -415,31 +457,36 @@ class Predictor(TransformerMixin, CLIInitialized):
         X, y = self._align_Xy(X, y)
         return (X, y)
 
-    def _log_performance_statistics(
+    def _log_agg_performance_statistics(
         self,
-        bootstrap_performance: Dict[str, List[float]],
-        log: Optional[SummaryWriter] = None,
+        bootstrap_metrics: List[Dict[str, float]],
+        modeln: str,
     ) -> None:
         """Compute Mean, CI, normality test across bootstrap samples"""
-        mean_performance = {
-            f"{k}-mean": mean(v) for k, v in bootstrap_performance.items()
+        bootstrap_performance: Dict[str, List[float]] = {
+            metricn: [metrics[metricn] for metrics in bootstrap_metrics]
+            for metricn in bootstrap_metrics[0]
         }
-        normality = {
-            f"{k}-isnormal": shapiro_wilk_test(v)
-            for k, v in bootstrap_performance.items()
-        }
-        ci_lower, ci_upper = {}, {}
+        perf = {"mean": {}, "isnormal": {}, "lowerci": {}, "upperci": {}}
         for k, v in bootstrap_performance.items():
+            perf["mean"][k] = mean(v)
+            perf["isnormal"][k] = shapiro_wilk_test(v)
             lower, upper = bootstrap_confidence_interval(v)
-            ci_lower[f"{k}-lower"] = lower
-            ci_upper[f"{k}-upper"] = upper
+            perf["lowerci"][k] = lower
+            perf["upperci"][k] = upper
 
         #### LOGGING ####
-        prefix = "predict-aggregate"
-        add_scalars(log, mean_performance, prefix=prefix)
-        add_scalars(log, ci_lower, prefix=prefix)
-        add_scalars(log, ci_upper, prefix=prefix)
-        add_scalars(log, normality, prefix=prefix)
+        for agg_type, agg_perf in perf.items():
+            for metrics in agg_perf:
+                self.logger.add_scalars(
+                    metrics,
+                    context={
+                        "step": "predict",
+                        "predictor": modeln,
+                        "aggregate_type": agg_type,
+                    },
+                    tb_name_format=PREDICT_METRIC_TAG_FORMAT,
+                )
 
     ###################
     #    INTERFACE    #

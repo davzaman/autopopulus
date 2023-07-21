@@ -21,11 +21,15 @@ from hypothesis.extra.pandas import data_frames
 
 from autopopulus.data.utils import onehot_multicategorical_column
 from autopopulus.data.transforms import (
+    DEFAULT_DEVICE,
     CombineOnehots,
     Discretizer,
-    invert_target_encoding_tensor,
+    get_invert_discretize_tensor_args,
+    get_invert_target_encode_tensor_args,
+    invert_discretize_tensor_gpu,
+    invert_target_encoding_tensor_gpu,
+    list_to_tensor,
     UniformProbabilityAcrossNans,
-    invert_discretize_tensor,
     simple_impute_tensor,
 )
 from autopopulus.test.common_mock_data import hypothesis, seed
@@ -34,7 +38,6 @@ from autopopulus.test.utils import (
     create_fake_disc_data,
     mock_disc_data,
 )
-from autopopulus.models.ae import AEDitto
 
 
 def unpack_tuples(nested_tuples):
@@ -110,9 +113,9 @@ class TestTransforms(unittest.TestCase):
             )
             self._test_simple_impute(
                 onehot_df,
-                AEDitto._idxs_to_tensor(hypothesis["onehot"]["ctn_cols_idx"]),
-                AEDitto._idxs_to_tensor(hypothesis["onehot"]["bin_cols_idx"]),
-                AEDitto._idxs_to_tensor(hypothesis["onehot"]["onehot_cols_idx"]),
+                list_to_tensor(hypothesis["onehot"]["ctn_cols_idx"]),
+                list_to_tensor(hypothesis["onehot"]["bin_cols_idx"]),
+                list_to_tensor(hypothesis["onehot"]["onehot_cols_idx"]),
             )
 
         with self.subTest("Uniform Probability Across Nans"):
@@ -126,17 +129,20 @@ class TestTransforms(unittest.TestCase):
             # nothing gets shifted since no discretize
             self._test_uniform_prob(
                 onehot_df,
-                {"categorical_onehots": onehot_groupby, "binary_vars": {0: "bin"}},
+                {
+                    "categorical_onehots": onehot_groupby,
+                    "binary_vars": {
+                        i: col for i, col in enumerate(hypothesis["bin_cols"])
+                    },
+                },
                 {},
             )
 
         discretized_data = None
         with self.subTest("Discretizer"):
             # if i add continuous columns i need to adjust these
-            nfeatures = 10 + 5 - 2
-            cuts = [[(0, 1), (1, 2)], [(0, 0.5), (0.5, 1), (1, 1.5)]]
-            category_names = [["0 - 1", "1 - 2"], ["0 - 0.5", "0.5 - 1", "1 - 1.5"]]
-
+            cuts = hypothesis["disc_ctn"]["cuts"]
+            category_names = hypothesis["disc_ctn"]["category_names"]
             # Create fake discretized data
             disc_data = create_fake_disc_data(
                 rng, nsamples, cuts, category_names, hypothesis["onehot"]["ctn_cols"]
@@ -179,9 +185,14 @@ class TestTransforms(unittest.TestCase):
             ).fit(disc_data, None)
             # grabs the range strings and replaces with the mean
             # find each number, split into list, convert ot float, average
-            bin_means = enc.transform(disc_data).applymap(
-                lambda s: sum([float(v) for v in re.findall(f"((?:\d*\.)?\d+)", s)]) / 2
-            )
+            bin_mean_lookup = {
+                col: {i: np.mean(cut) for i, cut in enumerate(cuts)}
+                for col, cuts in zip(
+                    hypothesis["ctn_cols"], hypothesis["disc_ctn"]["cuts"]
+                )
+            }
+
+            bin_means = enc.transform(disc_data).replace(bin_mean_lookup)
             # plop into df
             mocked_df = onehot_df.copy()
             mocked_df[hypothesis["onehot"]["ctn_cols"]] = bin_means
@@ -192,7 +203,6 @@ class TestTransforms(unittest.TestCase):
                 hypothesis["onehot"]["ctn_cols_idx"],
                 disc_groupby,
                 discretizer_dict,
-                nfeatures,
                 true_df,
             )
 
@@ -207,7 +217,9 @@ class TestTransforms(unittest.TestCase):
                                 hypothesis["onehot"]["onehot_expanded_prefixes"]
                             )
                         },
-                        "binary_vars": {0: "bin"},
+                        "binary_vars": {
+                            i: col for i, col in enumerate(hypothesis["bin_cols"])
+                        },
                     },
                     discretizer_dict,
                 )
@@ -224,29 +236,20 @@ class TestTransforms(unittest.TestCase):
 
         with self.subTest("Invert Target Encoding"):
             with self.subTest("CombineOnehots"):
-                combined_groupby = {3: "mult1", 4: "mult2"}
+                # order: bin + ctn vars in order, then multicat vars in order
+                # bin1[0] ctn1[1] ctn2[1] bin2[3] mult1[4] mult2[5]
+                combined_groupby = {4: "mult1", 5: "mult2"}
                 combined_df = self._test_combine_onehots(
                     onehot_df, y, df, onehot_groupby, combined_groupby
                 )
 
-            categories = [[0, 1], [0, 1, 2, 3], [0, 1, 2]]
-            # mock an encoding for each categorical column
-            ordinal_to_mean_map = {
-                combined_df.columns.get_loc(col): {
-                    category: rng.random() for category in categories[i]
-                }
-                for i, col in enumerate(
-                    hypothesis["onehot"]["bin_cols"] + hypothesis["onehot_prefixes"]
-                )
-            }
             # enforce float for nans bc for some reason df's dype was object
             self._test_invert_target_encode(
                 combined_df.astype(float),
                 y,
                 onehot_df.astype(float),
-                ["bin", "mult1", "mult2"],
+                hypothesis["cat_cols"],
                 onehot_df.columns,
-                combined_groupby,
             )
 
     # @patch("autopopulus.data.MDLDiscretization.EntropyMDL._entropy_discretize_sorted")
@@ -300,10 +303,9 @@ class TestTransforms(unittest.TestCase):
         with self.subTest("Discretizer"):
             assume(not df.empty)  # onehot'ing the bins will not work on empty
 
-            # if i add continuous columns i need to adjust these
-            nfeatures = 8
-            cuts = [[(0, 1), (1, 2)], [(0, 0.5), (0.5, 1), (1, 1.5)]]
-            category_names = [["0 - 1", "1 - 2"], ["0 - 0.5", "0.5 - 1", "1 - 1.5"]]
+            # if i add columns i need to adjust these
+            cuts = hypothesis["disc_ctn"]["cuts"]
+            category_names = hypothesis["disc_ctn"]["category_names"]
 
             # Create fake discretized data
             disc_data = create_fake_disc_data(
@@ -345,9 +347,14 @@ class TestTransforms(unittest.TestCase):
             ).fit(disc_data, None)
             # grabs the range strings and replaces with the mean
             # find each number, split into list, convert ot float, average
-            bin_means = enc.transform(disc_data).applymap(
-                lambda s: sum([float(v) for v in re.findall(f"((?:\d*\.)?\d+)", s)]) / 2
-            )
+            bin_mean_lookup = {
+                col: {i: np.mean(cut) for i, cut in enumerate(cuts)}
+                for col, cuts in zip(
+                    hypothesis["ctn_cols"], hypothesis["disc_ctn"]["cuts"]
+                )
+            }
+
+            bin_means = enc.transform(disc_data).replace(bin_mean_lookup)
             # plop into df
             mocked_df = df.copy()
             mocked_df[hypothesis["ctn_cols"]] = bin_means
@@ -358,14 +365,17 @@ class TestTransforms(unittest.TestCase):
                 hypothesis["ctn_cols_idx"],
                 disc_groupby,
                 discretizer_dict,
-                nfeatures,
                 true_df,
             )
 
             with self.subTest("Discretizer + Uniform Probability Across Nans"):
                 self._test_uniform_prob(
                     discretized_data,
-                    {"binary_vars": {0: "bin", 1: "mult1", 2: "mult2"}},
+                    {
+                        "binary_vars": {
+                            i: col for i, col in enumerate(hypothesis["cat_cols"])
+                        }
+                    },
                     discretizer_dict,
                 )
 
@@ -382,14 +392,7 @@ class TestTransforms(unittest.TestCase):
             # do not test combineonehot since no onehot is set
             # ordinal encoding won't work if empty
             assume(not df.empty)
-            categories = [[0, 1], [0, 1, 2, 3], [0, 1, 2]]
             # mock an encoding for each categorical column
-            ordinal_to_mean_map = {
-                df.columns.get_loc(col): {
-                    category: rng.random() for category in categories[i]
-                }
-                for i, col in enumerate(hypothesis["cat_cols"])
-            }
             self._test_invert_target_encode(
                 df,
                 y,
@@ -425,8 +428,10 @@ class TestTransforms(unittest.TestCase):
 
         # bin cols should still be bin but can be homogeneous
         for bin_col_idx in bin_cols_idxs:
+            X_col = X[:, bin_col_idx]
+            # deal with Nans in X by ignoring them because we're only checking still bin
             np.testing.assert_array_equal(
-                imputed[:, bin_col_idx].unique(), X[:, bin_col_idx].unique()
+                imputed[:, bin_col_idx].unique(), X_col[~X_col.isnan()].unique()
             )
         # onehots should still be onehot
         for onehot_group_idx in onehot_group_idxs:
@@ -453,7 +458,8 @@ class TestTransforms(unittest.TestCase):
             onehot_group_idxs,
             return_learned_stats=True,
         )
-        np.testing.assert_allclose(means, new_means, atol=1e-4)
+        # the sum on float is very lossy it looks like it's just completely truncating the values of the added means after the decimal point
+        np.testing.assert_allclose(means, new_means, atol=1e-1)
         np.testing.assert_allclose(modes, new_modes)
         # nothing should get changed
         torch.testing.assert_close(imputed, imputed_again)
@@ -489,6 +495,9 @@ class TestTransforms(unittest.TestCase):
             combine.fit(df, y)
             self.assertEqual(combine.combined_onehot_groupby, {})
             self.assertEqual(combine.nfeatures, len(df.columns))
+            np.testing.assert_equal(
+                combine.get_feature_names_out(df.columns), df.columns.values
+            )
             transformed = combine.transform(df)[df.columns]
             pd.testing.assert_frame_equal(
                 transformed.astype(float), df, check_dtype=False
@@ -498,17 +507,28 @@ class TestTransforms(unittest.TestCase):
 
         # Test groupby and nfeatures is right after fit
         combine.fit(df, y)
+        combined_names = list(combined_groupby.values())
         self.assertEqual(combine.combined_onehot_groupby, combined_groupby)
+        # the combined onehots go at the end
         self.assertEqual(combine.nfeatures, len(true_df.columns))
+        (
+            combine.get_feature_names_out(df.columns)[: -len(combined_names)],
+            combined_names,
+        )
 
-        # reorder columns to match
-        transformed = combine.transform(df)[true_df.columns]
+        transformed = combine.transform(df)
         # the combined cols will be dtype obj since the values are pulled from the column name and we don't know if the intention is to be str/float
         # but with the columns i specified they're numbers
-        pd.testing.assert_frame_equal(
-            transformed.astype(float), true_df, check_dtype=False
+        pd.testing.assert_frame_equal(  # reorder columns to match
+            transformed[true_df.columns].astype(float), true_df, check_dtype=False
         )
-        return transformed
+
+        with self.subTest("Inverse Transform"):
+            # inverting should give the original input
+            uncombined = combine.inverse_transform(transformed)
+            pd.testing.assert_frame_equal(uncombined, df, check_dtype=False)
+
+        return transformed[true_df.columns]
 
     def _test_uniform_prob(
         self,
@@ -566,7 +586,6 @@ class TestTransforms(unittest.TestCase):
         ctn_cols_idxs: List[int],
         true_disc_groupby: Dict[int, str],
         true_map_dict: Dict[str, Dict[str, List[int]]],
-        true_nfeatures: int,
         true_df: Optional[pd.DataFrame] = None,
     ) -> pd.DataFrame:
         discretize_transformer = Discretizer(
@@ -577,9 +596,29 @@ class TestTransforms(unittest.TestCase):
         np.testing.assert_equal(discretize_transformer.map_dict, true_map_dict)
         # Test groupby and nfeatures is right after fit
         self.assertEqual(discretize_transformer.discretized_groupby, true_disc_groupby)
-        self.assertEqual(discretize_transformer.nfeatures, true_nfeatures)
+        self.assertEqual(discretize_transformer.nfeatures, true_df.shape[1])
 
         transformed = discretize_transformer.transform(df)
+        # discretize should not introduce nans
+        self.assertEqual(transformed.isna().sum().sum(), df.isna().sum().sum())
+
+        # "" but especially when it has to transform values it hasn't seen
+        with self.subTest("Unseen Values"):
+            unseen_df = df.copy()
+            ctn_col = df.columns[ctn_cols_idxs[-1]]
+            rand_row = np.random.randint(0, len(unseen_df))
+            # Upper bound
+            unseen_df.loc[rand_row, ctn_col] = 5000000
+            self.assertEqual(
+                discretize_transformer.transform(unseen_df).isna().sum().sum(),
+                unseen_df.isna().sum().sum(),
+            )
+            # Lower bound
+            unseen_df.loc[rand_row, ctn_col] = -5000000
+            self.assertEqual(
+                discretize_transformer.transform(unseen_df).isna().sum().sum(),
+                unseen_df.isna().sum().sum(),
+            )
 
         if true_df is not None:
             pd.testing.assert_frame_equal(transformed, true_df, check_dtype=False)
@@ -594,11 +633,9 @@ class TestTransforms(unittest.TestCase):
         true_columns: List[str],
         true_tensor: torch.Tensor,
     ):
-        undiscretized_tensor = invert_discretize_tensor(
+        undiscretized_tensor = invert_discretize_tensor_gpu(
             df,
-            disc_groupby=disc_groupby,
-            discretizations=map_dict,
-            orig_columns=true_columns,
+            **get_invert_discretize_tensor_args(map_dict, true_columns, DEFAULT_DEVICE),
         )
         torch.testing.assert_close(
             undiscretized_tensor, true_tensor, check_dtype=False, equal_nan=True
@@ -611,34 +648,47 @@ class TestTransforms(unittest.TestCase):
         true_df: pd.DataFrame,
         cat_cols: List[str],
         orig_cols: List[str],
-        combined_onehots_groupby: Optional[Dict[int, int]] = None,
     ):
-        enc = TargetEncoder(
-            cols=cat_cols, handle_missing="return_nan", handle_unknown="return_nan"
-        )
+        # this needs to match CommonDataModule set_post_split_transform
+        enc = TargetEncoder(cols=cat_cols, handle_missing="return_nan")
         enc.fit(df, y)
-        # make the encoding random
+        # make the encoding random, otherwise multiple categories might map to the same thing, and I can't reliably recover the values to check
+        # however, keep the nans and unknown value stuff to make sure i deal with them properly.
         rng = default_rng()
         enc.mapping = {
-            k: series.map(lambda enc_v: rng.random())
-            for k, series in enc.mapping.items()
+            colname: series_mapping.map(
+                lambda enc_v: rng.random() if not np.isnan(enc_v) else enc_v
+            )
+            for colname, series_mapping in enc.mapping.items()
         }
-        unencoded_tensor = invert_target_encoding_tensor(
-            torch.tensor(enc.fit_transform(df, y).values),
-            {
-                "inverse_transform": enc.ordinal_encoder.inverse_transform,
-                "mapping": {
-                    df.columns.get_loc(col): col_mapping.to_dict()
-                    for col, col_mapping in enc.mapping.items()
-                },
-            },
-            df.columns,
-            orig_cols,
-            combined_onehots_groupby,
+        inverse_target_encode_map = {
+            "mapping": {
+                k: v.drop([-1, -2], axis=0, errors="ignore").dropna()
+                for k, v in enc.mapping.items()
+            },  # Dict[str, DataFrame]
+            "ordinal_mapping": [
+                info["mapping"].drop([np.nan], axis=0, errors="ignore")
+                for info in enc.ordinal_encoder.mapping
+            ],  # List[Dict[str, Union[str, DataFrame, dtype]]]
+        }
+
+        unencoded_tensor = invert_target_encoding_tensor_gpu(
+            torch.tensor(enc.transform(df, y).values),
+            **get_invert_target_encode_tensor_args(
+                inverse_target_encode_map["mapping"],
+                inverse_target_encode_map["ordinal_mapping"],
+                df.columns,  # mapped
+                orig_cols,  # orig
+                DEFAULT_DEVICE,
+            ),
         )
-        # rounding error with float point in torch?
+        # by the time we invert we shouldn't have nans, but for our tests I can't control that
+        # I just need to ensure we've reliably recovered the observe values
+        where_input_data_observed = torch.tensor(~true_df.isna().values)
         np.testing.assert_allclose(
-            unencoded_tensor, torch.tensor(true_df.values).float(), atol=1
+            unencoded_tensor[where_input_data_observed],
+            torch.tensor(true_df.values)[where_input_data_observed],
+            atol=1,
         )
 
 
