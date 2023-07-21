@@ -7,7 +7,7 @@ import sys
 
 
 root = "/home/davina/Private/repos/autopopulus"
-dataset = "cure_ckd"
+dataset = "crrt"
 
 sys.path.insert(0, join(sys.path[0], root))
 
@@ -103,15 +103,15 @@ dup_dims = [
     "tags.percent_missing",
     "tags.amputation_patterns",
     "tags.bootstrap_evaluate_imputer",
-    "tags.evaluate_on_remaining_semi_observed",
 ]
 dup_runs = runs[runs.duplicated(subset=dup_dims, keep=False)][["run_id"] + dup_dims]
 dup_runs
 # %%
 # Ref: https://stackoverflow.com/a/56138825/1888794
-with ProcessPoolExecutor() as executor:
-    run_scalars = [executor.submit(all_scalars(run_id)) for run_id in runs["run_id"]]
-    run_scalars = [future.result() for future in run_scalars]
+# with ProcessPoolExecutor() as executor:
+#     run_scalars = [executor.submit(all_scalars(run_id)) for run_id in runs["run_id"]]
+#     run_scalars = [future.result() for future in run_scalars]
+run_scalars = [all_scalars(run_id) for run_id in runs["run_id"]]
 run_scalars = pd.concat(run_scalars)
 
 # %%
@@ -120,7 +120,7 @@ all_info = (
     .merge(run_scalars, how="left", on="run_id")
     .drop(
         # tags.feature_map is what we want, not params.feature_map
-        ["tags.feature_map"],
+        ["tags.feature_map", "tags.evaluate_on_remaining_semi_observed"],
         axis=1,
     )
 )

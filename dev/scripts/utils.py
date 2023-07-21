@@ -134,6 +134,7 @@ def save_fig_to_svg(fig, fname: str = "impute_performance.svg"):
 
 
 def format_names(df: pd.DataFrame) -> pd.DataFrame:
+    df.loc[:, "metric_name"] = df["metric_name"].str.replace("_", "&")
     df = df.rename(  # Format col names
         {k: v["name"] for k, v in PRETTY_NAMES.items()}, axis="columns"
     ).replace(  # Format values
@@ -447,7 +448,8 @@ class RunManager:
 
     def run_and_save_output(self, cmd: List[str], run_name: str) -> Tuple[int, str]:
         rc, stdout, stderr = self.loop.run_until_complete(read_and_display(*cmd))
-        stdout, stderr = stdout.decode("utf-8"), stderr.decode("utf-8")
+        stdout = stdout.decode("utf-8", errors="replace")
+        stderr = stderr.decode("utf-8", errors="replace")
         parent_hash = re.search(r"(?:Logger Hash: )(\w+)\b", str(stdout))
         if parent_hash:
             parent_hash = parent_hash.groups()[-1]

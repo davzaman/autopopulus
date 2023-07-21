@@ -46,9 +46,9 @@ replace_nan_with = ["0"]
 ####################################
 # experiment switches: all experiments: none, baseline, ae, vae
 # can use a mix of group names and also individual ones
-chosen_methods = ["baseline", "ae", "variational"]
+chosen_methods = ["vanilla", "dae"]
 experiment_tracker = "mlflow"
-datasets = ["crrt"]
+datasets = ["cure_ckd"]
 
 guild_use_queues: int = 1
 data_filtering = {
@@ -64,7 +64,9 @@ chosen_methods = [
 
 def run_all():
     run_manager = RunManager(
-        experiment_tracker=experiment_tracker, guild_use_queues=guild_use_queues
+        experiment_tracker=experiment_tracker,
+        continue_runs=True,
+        guild_use_queues=guild_use_queues,
     )
     for dataset in datasets:
         # fully_observed=no uses entire dataset

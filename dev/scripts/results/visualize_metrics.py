@@ -32,7 +32,7 @@ from dev.scripts.utils import (
 )
 
 tracker = "mlflow"
-dataset = "crrt"
+dataset = "cure_ckd"
 legend = False
 root = "/home/davina/Private/repos/autopopulus/guild_runs/"
 
@@ -57,7 +57,7 @@ agg_impute_data = (
 agg_impute_data["combined_metric_name"] = (
     agg_impute_data["reduction"]
     + " "
-    + agg_impute_data["metric_name"].str.replace("_", " ")
+    + agg_impute_data["metric_name"].str.replace("_", "&")
 )
 
 
@@ -93,7 +93,6 @@ fig = px.scatter(
     # facet_col="combined_metric_name",
     # facet_col_spacing=0.08,  # when vert legend
     facet_col_spacing=0.04,
-    # facet_row=PRETTY_NAMES["metric_name"]["name"],
     facet_row=PRETTY_NAMES[row]["name"],
     facet_row_spacing=0.05,
     symbol=PRETTY_NAMES["score_to_probability_func"]["name"],
@@ -155,6 +154,7 @@ fig = px.scatter(
     labels={"val": "", "Method": ""},
     color_discrete_sequence=color_palette,
     height=300,
+    width=850,
 )
 add_percent_missing_to_legend(fig)
 default_graph_format(
@@ -180,8 +180,15 @@ mapped = agg_impute_data[
     # & (agg_impute_data["feature_space"] == "mapped")
     & (agg_impute_data["filter_subgroup"] == "missingonly")
     & (agg_impute_data["metric_name"].str.contains("MAAPE"))
+    & (agg_impute_data["reduction"] == "CW")
     & (agg_impute_data["feature_type"] == "mixed")
 ]
+# mapped = impute_data[
+#     (impute_data["split"] == "test")
+#     & (impute_data["filter_subgroup"] == "missingonly")
+#     & (impute_data["reduction"] == "CW")
+#     & (impute_data["feature_type"] == "mixed")
+# ]
 fig = px.scatter(
     format_names(mapped),
     x=PRETTY_NAMES["method"]["name"],
@@ -202,6 +209,7 @@ fig = px.scatter(
     labels={"val": "", "Method": ""},
     color_discrete_sequence=color_palette,
     height=300,
+    width=850,
 )
 add_percent_missing_to_legend(fig)
 default_graph_format(
@@ -353,9 +361,9 @@ fig
 # %%
 print(
     (
-        formatted_ci_table["mean"].applymap("{:.3f}".format).astype("str")
+        formatted_ci_table["mean"].applymap("{:.4f}".format).astype("str")
         + " +/- "
-        + formatted_ci_table["erry"].applymap("{:.3f}".format).astype("str")
+        + formatted_ci_table["erry"].applymap("{:.4f}".format).astype("str")
     ).to_latex()
 )
 
@@ -398,6 +406,33 @@ fig = px.line_3d(
 display(fig)
 fig = px.scatter(
     format_names(loss_data),
+    x="step",
+    y="val",
+    color=PRETTY_NAMES["feature-map"]["name"],
+    facet_col=PRETTY_NAMES[col]["name"],
+    # facet_col="combined_metric_name",
+    # facet_col_spacing=0.08,  # when vert legend
+    facet_col_spacing=0.04,
+    facet_row=PRETTY_NAMES["method"]["name"],
+    # facet_row=PRETTY_NAMES[row]["name"],
+    facet_row_spacing=0.05,
+    symbol=PRETTY_NAMES["score_to_probability_func"]["name"],
+    symbol_sequence=["circle", "x-open"],
+    size=PRETTY_NAMES["percent-missing"]["name"],
+    size_max=8,
+    category_orders={
+        info["name"]: info["order"] for info in PRETTY_NAMES.values() if "order" in info
+    },
+    labels={"val": "", "Method": ""},
+    # title="Column-wise Imputation Performance per Missingness Mechanism",
+    # width=2551/agg_impute_data[col].nunique()/2,
+    # height=3295/agg_impute_data[row].nunique()*1.4,
+    height=250,
+    color_discrete_sequence=color_palette,
+)
+display(fig)
+fig = px.scatter(
+    format_names(loss_data),
     x=PRETTY_NAMES["method"]["name"],
     y="val",
     color=PRETTY_NAMES["feature-map"]["name"],
@@ -429,6 +464,8 @@ default_graph_format(
 if not legend:
     fig.update_layout(showlegend=False)
 display(fig)
+
+# %%
 fig.write_image(join(root, f"{dataset}_loss_performance.pdf"), width=850)
 
 #########################
@@ -494,7 +531,7 @@ fig = px.scatter(
     color=PRETTY_NAMES["feature-map"]["name"],
     # https://plotly.com/python/marker-style/#custom-marker-symbols
     symbol_sequence=["cross", "diamond-open"],
-    facet_col=PRETTY_NAMES[pred_col]["name"], # if dataset == "cure_ckd" else None,
+    facet_col=PRETTY_NAMES[pred_col]["name"],  # if dataset == "cure_ckd" else None,
     facet_col_spacing=0.02,
     facet_row=PRETTY_NAMES[pred_row]["name"] if dataset == "cure_ckd" else None,
     facet_row_spacing=0.01,
@@ -508,8 +545,8 @@ fig = px.scatter(
     },
     color_discrete_sequence=color_palette,
     # long format
-    width=400 if shape == "long" else 950,
-    height=950 if shape == "long" else 350,
+    width=350 if shape == "long" else 850,
+    height=850 if shape == "long" else 350,
 )
 add_percent_missing_to_legend(fig)
 default_graph_format(fig, l1_name="Feature Mapping", l2_name="Predictor")
@@ -622,14 +659,14 @@ if dataset == "cure_ckd":
     print(
         (
             formatted_semi_obs_table["mean"][limit_semi_obs_metrics]
-            .applymap("{:.3f}".format)
+            .applymap("{:.4f}".format)
             .astype("str")
             + " +/- "
             + (
                 formatted_semi_obs_table["ci96_hi"][limit_semi_obs_metrics]
                 - formatted_semi_obs_table["mean"][limit_semi_obs_metrics]
             )
-            .applymap("{:.3f}".format)
+            .applymap("{:.4f}".format)
             .astype("str")
         ).to_latex()
     )
